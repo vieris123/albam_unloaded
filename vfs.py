@@ -22,7 +22,6 @@ class VirtualFile(bpy.types.PropertyGroup):
     relative_path: bpy.props.StringProperty()  # posix style
     is_archive: bpy.props.BoolProperty(default=False)
     is_root: bpy.props.BoolProperty(default=False)
-    is_folder: bpy.props.BoolProperty(default=False)
     is_expandable: bpy.props.BoolProperty(default=False)
     is_expanded: bpy.props.BoolProperty(default=False)
     category: bpy.props.StringProperty()
@@ -215,10 +214,6 @@ class ALBAM_OT_VirtualFileSystemAddFiles(bpy.types.Operator):
     bl_label = "Add Files"
     directory: bpy.props.StringProperty(subtype="DIR_PATH")  # NOQA
     files: bpy.props.CollectionProperty(name="added_files", type=bpy.types.OperatorFileListElement)  # NOQA
-    filter_folder = bpy.props.BoolProperty(
-        default=True,
-        options={"HIDDEN"}
-        )
     # FIXME: use registry, un-hardcode
     filter_glob: bpy.props.StringProperty(default="*.arc;*.pak", options={"HIDDEN"})  # NOQA
 
