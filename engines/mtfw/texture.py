@@ -145,6 +145,7 @@ APPID_SERIALIZE_MAPPER = {
     "re0": lambda: _serialize_texture_21,
     "re1": lambda: _serialize_texture_21,
     "re5": lambda: _serialize_texture_156,
+    "dmc4": lambda: _serialize_texture_156,
     "re6": lambda: _serialize_texture_21,
     "rev1": lambda: _serialize_texture_21,
     "rev2": lambda: _serialize_texture_21,
@@ -154,6 +155,7 @@ APPID_TEXCLS_MAP = {
     "re0": Tex157,
     "re1": Tex157,
     "re5": Tex112,
+    "dmc4": Tex112,
     "re6": Tex157,
     "rev1": Tex157,
     "rev2": Tex157,
@@ -162,6 +164,7 @@ APPID_TEXCLS_MAP = {
 APPID_RTEXCLS_MAP = {
     "re0": Rtex157,
     "re1": Rtex157,
+    "dmc4": Rtex112,
     "re5": Rtex112,
     "re6": Rtex157,
     "rev1": Rtex157,
@@ -687,7 +690,7 @@ def _calculate_cube_faces_data(tex):
     return cube_faces
 
 
-@blender_registry.register_custom_properties_image("tex_112", ("re5", ))
+@blender_registry.register_custom_properties_image("tex_112", ("re5", "dmc4"))
 @blender_registry.register_blender_prop
 class Tex112CustomProperties(bpy.types.PropertyGroup):
     unk_02: bpy.props.IntProperty(default=0)  # TODO u1

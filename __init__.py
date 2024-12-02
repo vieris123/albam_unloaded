@@ -75,3 +75,6 @@ def unregister():
     bpy.utils.unregister_class(type(bpy.context.scene.albam))
 
     sys.path.remove(VENDOR_DIR)
+
+if __name__ == "main":
+    register()

@@ -35,11 +35,13 @@ from .material import (
 )
 from .texture import check_dds_textures
 from .structs.mod_156 import Mod156
+from .structs.mod_153 import Mod153
 from .structs.mod_21 import Mod21
 
 
 MOD_CLASS_MAPPER = {
     156: Mod156,
+    153: Mod153,
     210: Mod21,
     211: Mod21,
 }
@@ -47,6 +49,7 @@ APPID_CLASS_MAPPER = {
     "re0": Mod21,
     "re1": Mod21,
     "re5": Mod156,
+    "dmc4": Mod153,
     "re6": Mod21,
     "rev1": Mod21,
     "rev2": Mod21,
@@ -1791,7 +1794,7 @@ def _calculate_vertex_group_weight_bound(mesh_vertex_groups, armature, vertex_gr
     return wb
 
 
-@blender_registry.register_custom_properties_mesh("mod_156_mesh", ("re5",))
+@blender_registry.register_custom_properties_mesh("mod_156_mesh", ("re5", "dmc4"))
 @blender_registry.register_blender_prop
 class Mod156MeshCustomProperties(bpy.types.PropertyGroup):
     vdecl_enum = bpy.props.EnumProperty(
