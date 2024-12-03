@@ -171,65 +171,12 @@ types:
   materials_data:
     seq:
       - {id: textures, type: str, encoding: ASCII, size: 64, terminator: 0, repeat: expr, repeat-expr: _root.header.num_textures}
-      - {id: materials, type: material_153, repeat: expr, repeat-expr: _root.header.num_materials}
+      - {id: materials, type: material, repeat: expr, repeat-expr: _root.header.num_materials}
     instances:
       size_:
         value: 64 * _root.header.num_textures + _root.header.num_materials * materials[0].size_
 
-  material_156:
-    seq:
-      - {id: fog_enable, type: b1}
-      - {id: zwrite, type: b1}
-      - {id: attr, type: b12}
-      - {id: num, type: b8}
-      - {id: envmap_bias, type: b5}
-      - {id: vtype, type: b3}
-      - {id: uvscroll_enable, type: b1}
-      - {id: ztest, type: b1}
-      
-      - {id: func_skin, type: b4}
-      - {id: func_reserved2, type: b2}
-      - {id: func_lighting, type: b4}
-      - {id: func_normalmap, type: b4}
-      - {id: func_specular, type: b4} 
-      - {id: func_lightmap, type: b4}
-      - {id: func_multitexture, type: b4}
-      - {id: func_reserved, type: b6}
-
-      - {id: htechnique, type: u4}
-      - {id: pipeline, type: u4}
-      - {id: pvdeclbase, type: u4}
-      - {id: pvdecl, type: u4}
-      - {id: basemap, type: u4}
-      - {id: normalmap, type: u4}
-      - {id: maskmap, type: u4}
-      - {id: lightmap, type: u4}
-      - {id: shadowmap, type: u4}
-      - {id: additionalmap, type: u4}
-      - {id: envmap, type: u4}
-      - {id: detailmap, type: u4}
-      - {id: occlusionmap, type: u4}
-      - {id: transparency, type: f4}
-
-      - {id: fresnel_factor, type: f4, repeat: expr, repeat-expr: 4}
-      - {id: lightmap_factor, type: f4, repeat: expr, repeat-expr: 4}
-      - {id: detail_factor, type: f4, repeat: expr, repeat-expr: 4}
-      - {id: reserved1, type: u4}
-      - {id: reserved2, type: u4}
-      - {id: lightblendmap, type: u4}
-      - {id: shadowblendmap, type: u4}
-      - {id: parallax_factor, type: f4, repeat: expr, repeat-expr: 2}
-      - {id: flip_binormal, type: f4}
-      - {id: heightmap_occ, type: f4}
-      - {id: blend_state, type: u4}
-      - {id: alpha_ref, type: u4}
-      - {id: heightmap, type: u4}
-      - {id: glossmap, type: u4}
-    instances:
-      size_:
-        value: 160
-
-  material_153:
+  material:
     seq:
       - {id: fog_enable, type: b1}
       - {id: zwrite, type: b1}
@@ -271,7 +218,7 @@ types:
       - {id: parallax_factor, type: f4, repeat: expr, repeat-expr: 4}
       - {id: blend_state, type: u4}
       - {id: alpha_ref, type: u4}
-      - {id: reserved2, type: f4, repeat: expr, repeat-expr: 2}
+      - {id: reserved2, type: u4, repeat: expr, repeat-expr: 2}
     instances:
       size_:
         value: 160
@@ -302,12 +249,13 @@ types:
       - {id: shape, type: b1}
       - {id: env, type: b1}
       - {id: refrect, type: b1}
-      - {id: reserved2, type: b2}
+      - {id: reserved2_flag_1, type: b1}
+      - {id: reserved2_flag_2, type: b1}
       - {id: shadow_cast, type: b1}
       - {id: shadow_receive, type: b1}
       - {id: sort, type: b1}
       - {id: num_vertices, type: u2}
-      - {id: vertex_position_end, type: u2}
+      - {id: max_index, type: u2}
       - {id: vertex_position_2, type: u4}
       - {id: vertex_offset, type: u4}
       - {id: vertex_offset_2, type: u4} # second vertex buffer offset
@@ -316,7 +264,7 @@ types:
       - {id: face_offset, type: u4} # index_base
       - {id: vdeclbase, type: u1}
       - {id: vdecl, type: u1}
-      - {id: vertex_position, type: u2} # min_index
+      - {id: min_index, type: u2} # min_index
       - {id: num_weight_bounds, type: u1} # probably num of OABB boundng volumes
       - {id: idx_bone_palette, type: u1} # envelope
       - {id: rcn_base, type: u2} 
@@ -333,10 +281,10 @@ types:
         # XXX vertex_position and vertex_position_2 are equal most of the time
         # But if using vertex_position_2 when they are not, vertices import wrongly
         # needs investigation
-        pos: "vertex_position > vertex_position_2 ?  _root.header.offset_vertex_buffer + (vertex_position * vertex_stride) + vertex_offset : _root.header.offset_vertex_buffer + (vertex_position * vertex_stride) + vertex_offset"
+        pos: "min_index > vertex_position_2 ?  _root.header.offset_vertex_buffer + (min_index * vertex_stride) + vertex_offset : _root.header.offset_vertex_buffer + (min_index * vertex_stride) + vertex_offset"
         repeat: expr
           #repeat-expr: num_vertices # TODO: special case
-        repeat-expr: "vertex_position > vertex_position_2 ? vertex_position_end - vertex_position + 1 : num_vertices"
+        repeat-expr: "min_index > vertex_position_2 ? max_index - min_index + 1 : num_vertices"
         type:
           switch-on: vertex_format
           cases:

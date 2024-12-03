@@ -145,31 +145,34 @@ APPID_SERIALIZE_MAPPER = {
     "re0": lambda: _serialize_texture_21,
     "re1": lambda: _serialize_texture_21,
     "re5": lambda: _serialize_texture_156,
-    "dmc4": lambda: _serialize_texture_156,
     "re6": lambda: _serialize_texture_21,
     "rev1": lambda: _serialize_texture_21,
     "rev2": lambda: _serialize_texture_21,
+    "dd": lambda: _serialize_texture_21,
 }
 
 APPID_TEXCLS_MAP = {
     "re0": Tex157,
     "re1": Tex157,
     "re5": Tex112,
-    "dmc4": Tex112,
     "re6": Tex157,
     "rev1": Tex157,
     "rev2": Tex157,
+    "dd": Tex157,
+    "dmc4": Tex112,
 }
 
 APPID_RTEXCLS_MAP = {
     "re0": Rtex157,
     "re1": Rtex157,
-    "dmc4": Rtex112,
     "re5": Rtex112,
     "re6": Rtex157,
     "rev1": Rtex157,
     "rev2": Rtex157,
+    "dd": Rtex157,
+    "dmc4": Rtex112,
 }
+
 TEX_TYPE_MAPPER = {
     0xcd06f: TextureType.DIFFUSE,
     0x22660: TextureType.NORMAL,
@@ -220,14 +223,20 @@ def build_blender_textures(app_id, context, parsed_mod, mrl=None):
         if RtexCls == Rtex157 and texture_type == 2013850128:
             is_rtex = True
             ext = ".rtex"
-        try:
-            texture_vfile = context.scene.albam.vfs.get_vfile(app_id, texture_path + ext)
-            tex_bytes = texture_vfile.get_bytes()
-        except KeyError:
-            tex_bytes = None
+        # texture_vfile = context.scene.albam.vfs.get_vfile(app_id, texture_path + ext)
+        # if not texture_vfile:
+        #     path = PureWindowsPath(texture_path+ext)
+        #     for i in range(len(path.parts)-1):
+        #         texture_vfile = context.scene.albam.rfs.get_vfile(app_id, PureWindowsPath(*path.parts[i:]))
+        #         if texture_vfile:
+        #             break
+        texture_vfile = context.scene.albam.rfs.get_vfile(app_id, texture_path+ext)
+        print(texture_vfile.absolute_path)
+        tex_bytes = texture_vfile.get_bytes()
+
         if RtexCls == Rtex112 and not tex_bytes:
             try:
-                texture_vfile = context.scene.albam.vfs.get_vfile(app_id, texture_path + ".rtex")
+                texture_vfile = context.scene.albam.rfs.get_vfile(app_id, PureWindowsPath(texture_path + ".rtex").parts[-1])
                 tex_bytes = texture_vfile.get_bytes()
                 is_rtex = True
             except KeyError:
@@ -304,6 +313,11 @@ def assign_textures(mtfw_material, bl_material, textures, mrl):
     for ri, (resource, i) in enumerate(set_texture_resources):
         tex_index = resource.value_cmd.tex_idx
         real_tex_index = tex_index - 1
+        try:
+            resource.shader_object_hash.name
+        except AttributeError:
+            print(resource.shader_object_hash)
+            continue
         tex_type_mtfw = resource.shader_object_hash.name
         try:
             tex_type_blender = TEX_TYPE_MAP_2.get(tex_type_mtfw)
@@ -321,7 +335,10 @@ def assign_textures(mtfw_material, bl_material, textures, mrl):
                 texture_node.image = texture_target
             texture_code_to_blender_texture(tex_type_blender.value, texture_node, bl_material)
             if texture_node.image and tex_type_blender.value in NON_SRGB_IMAGE_TYPE:
-                texture_node.image.colorspace_settings.name = "Non-Color"
+                try:
+                    texture_node.image.colorspace_settings.name = "Non-Color"
+                except AttributeError:
+                    print("Missing texture")
         except IndexError:
             print(f"tex_index {tex_index} not found. Texture len(): {len(textures)}")
             continue
@@ -357,7 +374,7 @@ def _find_texture_index(mtfw_material, texture_type, from_mrl=False):
         if tex_value == texture_type:
             tex_slot = tex_type
             break
-    tex_index = getattr(mtfw_material, tex_slot)
+    tex_index = getattr(mtfw_material, tex_slot, 0)
     return tex_index
 
 
@@ -717,7 +734,7 @@ class Tex112CustomProperties(bpy.types.PropertyGroup):
         setattr(dst, name, src_value)
 
 
-@blender_registry.register_custom_properties_image("tex_157", ("re0", "re1", "re6", "rev1", "rev2"))
+@blender_registry.register_custom_properties_image("tex_157", ("re0", "re1", "re6", "rev1", "rev2", "dd",))
 @blender_registry.register_blender_prop
 class Tex157CustomProperties(bpy.types.PropertyGroup):  # noqa: F821
     compression_format: bpy.props.IntProperty(name="Compression Format", default=0, min=0, max=43)
@@ -728,6 +745,7 @@ class Tex157CustomProperties(bpy.types.PropertyGroup):  # noqa: F821
             ("0x9a", "0x9a", "", 2),
             ("0xa09d", "0xa09d", "", 3),
             ("0x9e", "0x9e", "", 4),
+            ("0x99", "0x99", "", 5),
         ],
         options=set()
     )

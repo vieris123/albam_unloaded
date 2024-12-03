@@ -14,7 +14,7 @@ from albam.vfs import (VirtualFile, VirtualFileSystem, Tree, TreeNode,
 @blender_registry.register_blender_prop
 class RealFile(bpy.types.PropertyGroup):
     # FIXME: consider strings, seems pretty inefficient
-
+    # TODO: Fix subdirectories, fix pathing, fix search trimming
     display_name: bpy.props.StringProperty()
     absolute_path: bpy.props.StringProperty()
     relative_path: bpy.props.StringProperty()  # posix style
@@ -115,7 +115,7 @@ class RealFileSystemBase:
         path = PureWindowsPath(absolute_path)
         f = self.file_list.add()
         f.is_root = True
-        f.name = path.name
+        f.name = f"{app_id}::{path.name}"
         f.vfs_id = self.VFS_ID
         f.app_id = app_id
         f.display_name = path.name
@@ -169,21 +169,28 @@ class RealFileSystemBase:
 
         return bl_vf
 
-    def _expand_archive(self, app_id, rf):
+    def _expand_archive(self, app_id, rf, root_rf = None):
         # Beware of chaning this, it was observed the reference
         # is lost in the middle of the loop below if using vf.name directly,
         # we get an empty string instead! Don't know why
-        root_id = rf.name
-        root_path = rf.absolute_path
+        if root_rf is not None:
+            root_id = root_rf.name
+            root_path = root_rf.absolute_path or rf.absolute_path
+        else:
+            root_id = rf.name
+            root_path = rf.absolute_path
         tree = RealTree(root_id=rf.name, app_id=app_id, root_path = root_path)
         # TODO: popup if calling failed. Known exceptions + unexpected
-        for p in glob.glob(os.path.join(rf.absolute_path,"*")):
+        for p in glob.glob(os.path.join(rf.absolute_path,"**/*"), recursive=True):
             tree.add_node_from_path(p)
         for node in tree.flatten():
-            self._add_vf_from_treenode(app_id, root_id, node)
+            if root_rf is not None:
+                self._add_vf_from_treenode(app_id, root_rf, node)
+            elif node['name'] != rf.name:
+                self._add_vf_from_treenode(app_id, rf, node)
 
 
-    def _add_vf_from_treenode(self, app_id, root_id, node):
+    def _add_vf_from_treenode(self, app_id, root, node):
         child_vf = self.file_list.add()
         child_vf.vfs_id = self.VFS_ID
         child_vf.app_id = app_id
@@ -195,10 +202,10 @@ class RealFileSystemBase:
         child_vf.category = blender_registry.file_categories.get((app_id, child_vf.extension), "")
         if not child_vf.is_expandable:
             child_vf.data_bytes = child_vf.get_bytes()
-        else:
-            self._expand_archive(app_id, child_vf)
+        # else:
+        #     self._expand_archive(app_id, child_vf, root)
         child_vf.tree_node.depth = node["depth"] + 1
-        child_vf.tree_node.root_id = root_id
+        child_vf.tree_node.root_id = root.name
         for ancestor_id in node["ancestors_ids"]:
             ancestor_node = child_vf.tree_node_ancestors.add()
             ancestor_node.node_id = ancestor_id

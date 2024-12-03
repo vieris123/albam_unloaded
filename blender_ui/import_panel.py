@@ -51,7 +51,7 @@ class AlbamApps(bpy.types.PropertyGroup):
 
 @blender_registry.register_blender_prop_albam(name="import_settings")
 class AlbamImportSettings(bpy.types.PropertyGroup):
-    import_only_main_lods : bpy.props.BoolProperty(default=True)
+    import_only_main_lods: bpy.props.BoolProperty(default=True)
 
 
 @blender_registry.register_blender_type
@@ -301,7 +301,7 @@ class ALBAM_PT_ImportOptionsCustom(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
 
     def draw(self, context):
-        current_item = ALBAM_OT_Import.get_selected_item(context)
+        current_item = ALBAM_OT_Import.get_selected_item(context) or ImportReal.get_selected_item(context)
         if not current_item:
             return
         ext = current_item.extension
@@ -312,7 +312,7 @@ class ALBAM_PT_ImportOptionsCustom(bpy.types.Panel):
 
     @classmethod
     def poll(self, context):
-        current_item = ALBAM_OT_Import.get_selected_item(context)
+        current_item = ALBAM_OT_Import.get_selected_item(context) or ImportReal.get_selected_item(context)
         if not current_item:
             return False
         ext = current_item.extension
@@ -428,22 +428,20 @@ class ALBAM_PT_ImportButton(bpy.types.Panel):
         row.operator("albam.import_real", text="Import Folder")
         self.layout.row()
 
+
 @blender_registry.register_blender_type
 class ALBAM_WM_OT_ImportOptions(bpy.types.Operator):
     """Set settings for importing"""
     bl_label = "Import Options"
     bl_idname = "wm.import_options"
 
-    import_main_lods_bool = bpy.props.BoolProperty(
-        name="Import main LODs only",
-        description="Allows to import only the most detailed meshes",
-        default=True)
-    import_only_main_lods: import_main_lods_bool
-
     def execute(self, context):
-        import_settings = context.scene.albam.import_settings
-        import_settings.import_only_main_lods = self.import_only_main_lods
         return {'FINISHED'}
+
+    def draw(self, context):
+        import_settings = context.scene.albam.import_settings
+        layout = self.layout
+        layout.prop(import_settings, "import_only_main_lods", text="Import main LODs only")
 
     def invoke(self, context, event):
         return context.window_manager.invoke_props_dialog(self)
