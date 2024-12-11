@@ -661,8 +661,9 @@ def build_blender_armature(mod, armature_name, bbox_data):
         # blender_bone.use_deform = False if i in non_deform_bone_indices else True
         m = mod.bones_data.inverse_bind_matrices[i]
         head = _transform_inverse_bind_matrix(mod, m, bbox_data)
+        blender_bone.length = bone.length * scale
         blender_bone.head = [head[0] * scale, -head[2] * scale, head[1] * scale]
-        blender_bone.tail = [head[0] * scale, -head[2] * scale, (head[1] * scale) + 0.01]
+        blender_bone.tail = [head[0] * scale, -head[2] * scale, (head[1] * scale) + 0.05]
         blender_bone['mtfw.anim_retarget'] = str(bone.idx_anim_map)
         blender_bones.append(blender_bone)
 

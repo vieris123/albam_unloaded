@@ -24,6 +24,7 @@ types:
         type:
           switch-on: lmt_ver
           cases:
+            49: block_header51
             51: block_header51
             67: block_header67
 
@@ -32,11 +33,13 @@ types:
       - {id: ofs_frame, type: u4}
       - {id: num_tracks, type: u4}
       - {id: num_frames, type: u4}
-      - {id: unk_01, type: f4, repeat: expr, repeat-expr: 9}
-      - {id: unk_02, type: u4, repeat: expr, repeat-expr: 16}
+      - {id: loop_frmaes, type: u4}
+      - {id: end_pos, type: vec4}
+      - {id: end_quat, type: vec4}
+      - {id: display_events, type: u4, repeat: expr, repeat-expr: 16}
       - {id: count_01, type: u4}
       - {id: ofs_buffer_01, type: u4}
-      - {id: sfx, type: u2, repeat: expr, repeat-expr: 32}
+      - {id: sfx_events, type: u2, repeat: expr, repeat-expr: 32}
       - {id: count_02, type: u4}
       - {id: ofs_buffer_02, type: u4}
     instances:
@@ -56,7 +59,7 @@ types:
       - {id: unk_01, type: f4}
       - {id: len_data, type: u4}
       - {id: ofs_data, type: u4}
-      - {id: unk_reference_data, type: f4, repeat: expr, repeat-expr: 4}
+      - {id: ref_data, type: vec4}
     instances:
       data:
         {pos: ofs_data, size: len_data}
@@ -99,7 +102,7 @@ types:
     instances:
       data:
         {pos: ofs_data, size: len_data}
-  
+
   ofs_float_buff:
     seq:
     - {id: ofs_buffer, type: u4}
@@ -114,3 +117,16 @@ types:
   float_buffer:
     seq:
       - {id: unk_00, type: f4, repeat: expr, repeat-expr: 8}
+      
+  vec3:
+    seq:
+      - {id: x, type: f4}
+      - {id: y, type: f4}
+      - {id: z, type: f4}
+      
+  vec4:
+    seq:
+      - {id: x, type: f4}
+      - {id: y, type: f4}
+      - {id: z, type: f4}
+      - {id: w, type: f4}

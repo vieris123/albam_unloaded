@@ -109,9 +109,45 @@ class ALBAM_OT_Import(bpy.types.Operator):
         return item
 
 @blender_registry.register_blender_type
-class ImportReal(ALBAM_OT_Import):
+class ImportReal(bpy.types.Operator):
     bl_idname = "albam.import_real"
     bl_label = "import real item"
+
+    def execute(self, context):  # pragma: no cover
+        item = self.get_selected_item(context)
+        try:
+            self._execute(item, context)
+        except Exception:
+            bpy.ops.albam.error_handler_popup("INVOKE_DEFAULT")
+        return {"FINISHED"}
+
+    @staticmethod
+    def _execute(item, context):
+        import_function = blender_registry.import_registry[(item.app_id, item.extension)]
+
+        bl_container = import_function(item, context)
+        if not bl_container:
+            return
+
+        if bl_container.type != "ARMATURE":
+            # armature building needs it linked to for building
+            bpy.context.collection.objects.link(bl_container)
+        for child in bl_container.children_recursive:
+            try:
+                # already linked
+                bpy.context.collection.objects.link(child)
+            except RuntimeError:
+                pass
+
+    @classmethod
+    def poll(cls, context):
+        item = cls.get_selected_item(context)
+        if not item or (item.app_id, item.extension) not in blender_registry.importable_extensions:
+            return False
+        custom_poll_func = blender_registry.import_operator_poll_funcs.get(item.extension)
+        if custom_poll_func:
+            return custom_poll_func(cls, context)
+        return True
 
     @staticmethod
     def get_selected_item(context):

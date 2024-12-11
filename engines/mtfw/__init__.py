@@ -1,5 +1,18 @@
 from enum import Enum
 
+class BufferType(Enum):
+    SingleVector3 = 2
+    StepRotationQuat3 = 4
+    HermiteVector3 = 5
+    LinearRotationQuat4_14bit = 6
+    LinearVector3 = 9
+
+class TrackType(Enum):
+    LocalRotation = 0
+    LocalPosition = 1
+    LocalScale = 2
+    AbsoluteRotation = 3
+    AbsolutePosition = 4
 
 class Mod156BoneAnimationMapping(Enum):
     """
@@ -265,6 +278,269 @@ class Mod156BoneAnimationMapping(Enum):
     UNK_254 = 254
     UNK_255 = 255
 
+# class Mod153BoneAnimationMapping(Enum):
+#     """
+#     Mod153.bones_animation_mapping is an array of 256 bytes. Each index
+#     correspond to a certain predefined bone type, and it's used to be able to
+#     transfer animations between models.
+#     """
+#
+#     ROOT = 0
+#     LOWER_SPINE = 1
+#     UPPER_SPINE = 2
+#     NECK = 3
+#     HEAD = 4
+#     RIGHT_SHOULDER = 5
+#     RIGHT_UPPER_ARM = 6
+#     RIGHT_ARM = 7
+#     RIGHT_WRIST = 8
+#     LEFT_SHOULDER = 9
+#     LEFT_UPPER_ARM = 10
+#     LEFT_ARM = 11
+#     LEFT_WRIST = 12
+#     HIPS = 13
+#     RIGHT_UPPER_LEG = 14
+#     RIGHT_LEG = 15
+#     RIGHT_FOOT = 16
+#     RIGHT_TOE = 17
+#     LEFT_UPPER_LEG = 18
+#     LEFT_LEG = 19
+#     LEFT_FOOT = 20
+#     LEFT_TOE = 21
+#     UKN_22 = 22 #FIXME: placeholder
+#     UKN_23 = 23 #FIXME: placeholder
+#     UKN_24 = 24
+#     UKN_25 = 25
+#     UKN_26 = 26
+#     UKN_27 = 27
+#     UKN_28 = 28
+#     UKN_29 = 29
+#     UKN_30 = 30
+#     UKN_31 = 31
+#     UKN_32 = 32
+#     UKN_33 = 33
+#     UKN_34 = 34
+#     UKN_35 = 35
+#     UKN_36 = 36
+#     UKN_37 = 37
+#     UKN_38 = 38
+#     UKN_39 = 39
+#     UKN_40 = 40
+#     UKN_41 = 41
+#     UKN_42 = 42
+#     UKN_43 = 43
+#     UKN_44 = 44
+#     UKN_45 = 45
+#     UKN_46 = 46
+#     UKN_47 = 47
+#     UKN_48 = 48
+#     UKN_49 = 49
+#     UKN_50 = 50
+#     UKN_51 = 51
+#     UKN_52 = 52
+#     UKN_53 = 53
+#     UKN_54 = 54
+#     UKN_55 = 55
+#     RIGHT_EYE = 56
+#     LEFT_EYE = 57
+#     RIGHT_EYELID = 58
+#     LEFT_EYELID = 59
+#     JAW = 60
+#     UNK_61 = 61
+#     RIGHT_SHOULDER_DEFORM = 62
+#     RIGHT_ELBOW_DEFORM = 63
+#     LEFT_SHOULDER_DEFORM = 64
+#     LEFT_ELBOW_DEFORM = 65
+#     UKN_66 = 66
+#     UKN_67 = 67
+#     UKN_68 = 68
+#     UKN_69 = 69
+#     UKN_70 = 70
+#     UKN_71 = 71
+#     UKN_72 = 72
+#     UKN_73 = 73
+#     UKN_74 = 74
+#     UKN_75 = 75
+#     UKN_76 = 76
+#     UKN_77 = 77
+#     UKN_78 = 78
+#     UKN_79 = 79
+#     UKN_80 = 80
+#     UKN_81 = 81
+#     UNK_82 = 82
+#     UNK_83 = 83
+#     UNK_84 = 84
+#     UNK_85 = 85
+#     UNK_86 = 86
+#     UNK_87 = 87
+#     UNK_88 = 88
+#     UNK_89 = 89
+#     UNK_90 = 90
+#     UNK_91 = 91
+#     UNK_92 = 92
+#     UNK_93 = 93
+#     UNK_94 = 94
+#     UNK_95 = 95
+#     UNK_96 = 96
+#     UNK_97 = 97
+#     UNK_98 = 98
+#     UNK_99 = 99
+#     RIGHT_LOWER_THUMB = 100
+#     RIGHT_MIDDLE_THUMB = 101
+#     RIGHT_UPPER_THUMB = 102
+#     RIGHT_LOWER_INDEX_FINGER = 103
+#     RIGHT_MIDDLE_INDEX_FINGER = 104
+#     RIGHT_UPPER_INDEX_FINGER = 105
+#     RIGHT_LOWER_MIDDLE_FINGER = 106
+#     RIGHT_MIDDLE_MIDDLE_FINGER = 107
+#     RIGHT_UPPER_MIDDLE_FINGER = 108
+#     RIGHT_PALM = 109 #actually pinky metacarpal ?
+#     RIGHT_LOWER_RING_FINGER = 110
+#     RIGHT_MIDDLE_RING_FINGER = 111
+#     RIGHT_UPPER_RING_FINGER = 112
+#     RIGHT_LOWER_PINKY_FINGER = 113
+#     RIGHT_MIDDLE_PINKY_FINGER = 114
+#     RIGHT_UPPER_PINKY_FINGER = 115
+#     LEFT_LOWER_THUMB = 116
+#     LEFT_MIDDLE_THUMB = 117
+#     LEFT_UPPER_THUMB = 118
+#     LEFT_LOWER_INDEX_FINGER = 119
+#     LEFT_MIDDLE_INDEX_FINGER = 120
+#     LEFT_UPPER_INDEX_FINGER = 121
+#     LEFT_LOWER_MIDDLE_FINGER = 122
+#     LEFT_MIDDLE_MIDDLE_FINGER = 123
+#     LEFT_UPPER_MIDDLE_FINGER = 124
+#     LEFT_PALM = 125
+#     LEFT_LOWER_RING_FINGER = 126
+#     LEFT_MIDDLE_RING_FINGER = 127
+#     LEFT_UPPER_RING_FINGER = 128
+#     LEFT_LOWER_PINKY_FINGER = 129
+#     LEFT_MIDDLE_PINKY_FINGER = 130
+#     LEFT_UPPER_PINKY_FINGER = 131
+#     UNK_132 = 132
+#     UNK_133 = 133
+#     UNK_134 = 134
+#     UNK_135 = 135
+#     UNK_136 = 136
+#     UNK_137 = 137
+#     UNK_138 = 138
+#     UNK_139 = 139
+#     UNK_140 = 140
+#     UNK_141 = 141
+#     UNK_142 = 142
+#     UNK_143 = 143
+#     UNK_144 = 144
+#     UNK_145 = 145
+#     UNK_146 = 146
+#     UNK_147 = 147
+#     UNK_148 = 148
+#     UNK_149 = 149
+#     RIGHT_HAND_PROP = 150
+#     LEFT_HAND_PROP = 151
+#     WEAPON_HOLSTER = 152
+#     CHEST = 153 #controls the zipper on Dante's chest ?
+#     RIGHT_COLLAR = 154
+#     LEFT_COLLAR = 155
+#     UNK_156 = 156
+#     UNK_157 = 157
+#     UNK_158 = 158
+#     UNK_159 = 159
+#     UNK_160 = 160
+#     UNK_161 = 161
+#     UNK_162 = 162
+#     UNK_163 = 163
+#     UNK_164 = 164
+#     UNK_165 = 165
+#     UNK_166 = 166
+#     UNK_167 = 167
+#     UNK_168 = 168
+#     UNK_169 = 169
+#     UNK_170 = 170
+#     UNK_171 = 171
+#     UNK_172 = 172
+#     UNK_173 = 173
+#     UNK_174 = 174
+#     UNK_175 = 175
+#     UNK_176 = 176
+#     UNK_177 = 177
+#     UNK_178 = 178
+#     UNK_179 = 179
+#     RIGHT_INNER_EYEBROW = 180
+#     RIGHT_OUTER_EYEBROW = 181
+#     LEFT_INNER_EYEBROW = 182
+#     LEFT_OUTER_EYEBROW = 183
+#     RIGHT_LOWER_EYELID = 184
+#     LEFT_LOWER_EYELID = 185
+#     RIGHT_UPPER_CHEEK = 186
+#     LEFT_UPPER_CHEEK = 187
+#     RIGHT_UPPER_OUTER_CHEEK = 188
+#     LEFT_UPPER_OUTER_CHEEK = 189
+#     RIGHT_NOSE = 190
+#     LEFT_NOSE = 191
+#     RIGHT_OUTER_LIP = 192
+#     RIGHT_UPPER_LIP = 193
+#     UPPER_LIP = 194
+#     LEFT_UPPER_LIP = 195
+#     LEFT_OUTER_LIP = 196
+#     LEFT_OUTER_LOWER_LIP = 197
+#     LOWER_LIP = 198
+#     LEFT_LOWER_LIP = 199
+#     RIGHT_UPPER_ARM_DEFORM_1 = 200
+#     RIGHT_UPPER_ARM_DEFORM_2 = 201
+#     RIGHT_ARM_DEFORM_1 = 202
+#     RIGHT_ARM_DEFORM_2 = 203
+#     LEFT_UPPER_ARM_DEFORM_1 = 204
+#     LEFT_UPPER_ARM_DEFORM_2 = 205
+#     LEFT_ARM_DEFORM_1 = 206
+#     LEFT_ARM_DEFORM_2 = 207
+#     RIGHT_LEG_DEFORM = 208
+#     RIGHT_BUTT_CHEEK = 209
+#     RIGHT_ANKLE = 210
+#     RIGHT_KNEE = 211
+#     LEFT_LEG_DEFORM = 212
+#     LEFT_BUTT_CHEEK = 213
+#     LEFT_ANKLE = 214
+#     LEFT_KNEE = 215
+#     UNK_216 = 216
+#     UNK_217 = 217
+#     UNK_218 = 218
+#     UNK_219 = 219
+#     UNK_220 = 220
+#     UNK_221 = 221
+#     UNK_222 = 222
+#     UNK_223 = 223
+#     UNK_224 = 224
+#     UNK_225 = 225
+#     UNK_226 = 226
+#     UNK_227 = 227
+#     UNK_228 = 228
+#     UNK_229 = 229
+#     UNK_230 = 230
+#     UNK_231 = 231
+#     UNK_232 = 232
+#     UNK_233 = 233
+#     UNK_234 = 234
+#     UNK_235 = 235
+#     UNK_236 = 236
+#     UNK_237 = 237
+#     UNK_238 = 238
+#     UNK_239 = 239
+#     UNK_240 = 240
+#     UNK_241 = 241
+#     UNK_242 = 242
+#     UNK_243 = 243
+#     UNK_244 = 244
+#     UNK_245 = 245
+#     UNK_246 = 246
+#     UNK_247 = 247
+#     UNK_248 = 248
+#     UNK_249 = 249
+#     UNK_250 = 250
+#     UNK_251 = 251
+#     UNK_252 = 252
+#     UNK_253 = 253
+#     UNK_254 = 254
+#     UNK_255 = 255
 
 BONE_GROUP_MAIN = {
     "ROOT",
@@ -318,7 +594,6 @@ BONE_GROUP_LEGS = {
     "RIGHT_KNEE",
     "LEFT_KNEE",
 }
-
 
 BONE_GROUP_HANDS = {
     "RIGHT_THUMB",
@@ -419,7 +694,62 @@ BONE_GROUP_ACCESORIES = {
     "BACK_LEFT_KNIFE",
     "RIGHT_BACKPACK_STRIP_BACK_1_PARENT",
     "RIGHT_BACKPACK_STRIP_BACK_1",
+
 }
+
+# BONE_GROUP_MAIN_MOD_153 = {
+#     "ROOT",
+#     "LOWER_SPINE",
+#     "UPPER_SPINE",
+#     "NECK",
+#     "HEAD",
+#     "RIGHT_SHOULDER",
+#     "RIGHT_UPPER_ARM",
+#     "RIGHT_ARM",
+#     "RIGHT_WRIST",
+#     "LEFT_SHOULDER",
+#     "LEFT_UPPER_ARM",
+#     "LEFT_ARM",
+#     "LEFT_WRIST",
+#     "HIPS",
+#     "RIGHT_UPPER_LEG",
+#     "RIGHT_LEG",
+#     "RIGHT_FOOT",
+#     "RIGHT_TOE",
+#     "LEFT_UPPER_LEG",
+#     "LEFT_LEG",
+#     "LEFT_FOOT",
+#     "LEFT_TOE",
+# }
+
+# BONE_GROUP_FOOT = {
+#     "RIGHT_ANKLE",
+#     "LEFT_ANKLE"
+# }
+
+# BONE_GROUP_ARMS_MOD_153 = {
+#     "RIGHT_SHOULDER_DEFORM",
+#     "RIGHT_ELBOW_DEFORM",
+#     "LEFT_SHOULDER_DEFORM",
+#     "LEFT_ELBOW_DEFORM",
+#     "RIGHT_UPPER_ARM_DEFORM_1",
+#     "RIGHT_UPPER_ARM_DEFORM_2",
+#     "RIGHT_ARM_DEFORM_1",
+#     "RIGHT_ARM_DEFORM_2",
+#     "LEFT_UPPER_ARM_DEFORM_1",
+#     "LEFT_UPPER_ARM_DEFORM_2",
+#     "LEFT_ARM_DEFORM_1",
+#     "LEFT_ARM_DEFORM_2",
+# }
+#
+# BONE_GROUP_ACCESSORIES_MOD_153 = {
+#     "RIGHT_HAND_PROP",
+#     "LEFT_HAND_PROP",
+#     "WEAPON_HOLSTER"
+#     "LEFT_COLLAR",
+#     "RIGHT_COLLAR",
+#     "CHEST"
+# }
 
 # Iterate over all BONE_GROUP_* sets and create a dict
 # with bone_indices as keys and group_name as value

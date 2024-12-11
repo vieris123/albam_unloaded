@@ -1,6 +1,7 @@
 import importlib
 import os
 import sys
+from sys import modules
 
 import bpy
 
@@ -63,9 +64,14 @@ def register():
     bpy.types.Material.albam_custom_properties = bpy.props.PointerProperty(type=AlbamCustomPropertiesMaterial)
     bpy.types.Mesh.albam_custom_properties = bpy.props.PointerProperty(type=AlbamCustomPropertiesMesh)
     bpy.types.Image.albam_custom_properties = bpy.props.PointerProperty(type=AlbamCustomPropertiesImage)
+def cleanse_modules():
+    for module_name in sorted(modules.keys()):
 
+        if module_name.startswith(__name__):
+            del modules[module_name]
 
 def unregister():
+    
     for _, cls in reversed(blender_registry.props):
         bpy.utils.unregister_class(cls)
 
@@ -74,7 +80,6 @@ def unregister():
 
     bpy.utils.unregister_class(type(bpy.context.scene.albam))
 
-    sys.path.remove(VENDOR_DIR)
+    cleanse_modules()
 
-if __name__ == "main":
-    register()
+    sys.path.remove(VENDOR_DIR)
