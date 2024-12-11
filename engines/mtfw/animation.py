@@ -28,8 +28,10 @@ class TrackType(Enum):
     AbsoluteRotation = 3
     AbsolutePosition = 4
 
-HACKY_BONE_INDEX_IK_FOOT_RIGHT = 19
-HACKY_BONE_INDEX_IK_FOOT_LEFT = 23
+# HACKY_BONE_INDEX_IK_FOOT_RIGHT = 19
+# HACKY_BONE_INDEX_IK_FOOT_LEFT = 23
+HACKY_BONE_INDEX_IK_FOOT_RIGHT = 16
+HACKY_BONE_INDEX_IK_FOOT_LEFT = 20
 IK_HIPS = 0
 HACKY_BONE_INDICES_IK_FOOT = {HACKY_BONE_INDEX_IK_FOOT_RIGHT, HACKY_BONE_INDEX_IK_FOOT_LEFT}
 ROOT_UNK_BONE_ID = 254
@@ -79,7 +81,7 @@ def load_lmt(file_item, context):
             if track.buffer_type == 6:
                 TRACK_MODE = "rotation_quaternion"  # TODO: improve naming
                 decoded_frames = decode_type_6(track.data)
-                #decoded_frames = _parent_space_to_local_rot(decoded_frames, armature, bone_index)
+                decoded_frames = _parent_space_to_local_rot(decoded_frames, armature, bone_index)
 
             elif track.buffer_type == 4:
                 # TRACK_MODE = "rotation_euler"
@@ -88,7 +90,7 @@ def load_lmt(file_item, context):
 
                 TRACK_MODE = "rotation_quaternion"
                 decoded_frames = decode_type_4(track.data)
-                #decoded_frames = _parent_space_to_local_rot(decoded_frames, armature, bone_index)
+                decoded_frames = _parent_space_to_local_rot(decoded_frames, armature, bone_index)
 
             elif track.buffer_type == 2:
                 print(f'Buffer type 2 track type {track.usage}')
@@ -367,9 +369,9 @@ def quat_fix(quat):
     mat_r2l = mat_l2r.inverted()
 
     #m_rot = mat_l2r @ Vector((quat.x, quat.y, quat.z, quat.w)) @ mat_l2r
-    m_rot = (mat_l2r @ quat.to_matrix() @ mat_r2l).to_quaternion()
+    m_rot = (mat_l2r @ quat.to_matrix()).to_quaternion()
     return m_rot
-    # return Quaternion((quat.w, quat.z, quat.y, quat.x))
+    #return Quaternion((-quat.w, quat.x, quat.y, quat.z))
 
 
 
@@ -446,27 +448,19 @@ def _parent_space_to_local(decoded_frames, armature, bone_index):
         if frame is None:
             local_space_frames.append(None)
             continue
+
         bone = armature.data.bones[bone_index]
-        #bone = armature.pose.bones[bone_index]
         if bone.parent:
             parent_space = bone.parent.matrix_local.inverted() @ bone.matrix_local #child - parent matrix
-            transform_mat = Matrix.Translation([-frame[2], -frame[1], frame[0]])
-            #transform_mat = Matrix.Translation(frame)
-            #parent_space = bone.matrix_local.inverted()
-            #parent_space = bone.parent.matrix_basis.inverted() @ bone.matrix_basis
+
         else:
-            # XXX Temp hack
-            #v = bone.matrix_local.to_translation()
-            #v = (v[0], -v[2], v[1])
-            #parent_space = Matrix.Identity(4).inverted() @ Matrix.Translation(v)
             parent_space = Matrix([[1.0, 0.0, 0.0, 0.0],
                                     [0.0, 0.0, 1.0, 0.0],
                                     [0.0, -1.0, 0.0, 0.0],
                                     [0.0, 0.0, 0.0, 1.0]])
-            transform_mat = Matrix.Translation(frame)
-        #transform_mat = Matrix.Translation([frame[0], -frame[1], frame[2]])
+        transform_mat = Matrix.Translation(frame)
+    
         local_space_frame = (parent_space.inverted() @ transform_mat).to_translation()
-        #local_space_frame = (bone.matrix_local.inverted() @ transform_mat).to_translation()
         local_space_frames.append(local_space_frame)
     return local_space_frames
 
@@ -476,12 +470,18 @@ def _parent_space_to_local_rot(decoded_frames, armature, bone_index):
         if frame is None:
             local_space_frames.append(None)
             continue
+
         #bone = armature.data.bones[bone_index]
-        bone = armature.pose.bones[bone_index]
-        
-        #transform_mat = Matrix.Translation(frame)
-        local_space_frame = (bone.matrix_basis.decompose()[1] @ Quaternion([frame[0], frame[3], frame[1], frame[2]]))
-        #local_space_frame = (bone.matrix_local.inverted() @ transform_mat).to_translation()
+        bone = armature.data.bones[bone_index]
+        parent = bone.parent
+
+        if parent is None:
+            local_space_frames.append(frame)
+            continue
+
+        parent_mat = parent.matrix_local.inverted() @ bone.matrix_local
+        parent_quat = parent_mat.inverted().to_quaternion()
+        local_space_frame = parent_quat @ Quaternion([frame[0], frame[1], frame[2], frame[3]])
         local_space_frames.append(local_space_frame)
     return local_space_frames
 

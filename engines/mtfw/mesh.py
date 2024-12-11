@@ -11,7 +11,7 @@ except ImportError:
 
 import bpy
 from kaitaistruct import KaitaiStream
-from mathutils import Matrix
+from mathutils import Matrix, Vector
 import numpy as np
 
 from albam.lib.blender import (
@@ -652,6 +652,7 @@ def build_blender_armature(mod, armature_name, bbox_data):
 
     blender_bones = []
     scale = 0.01
+    # NOTE: parent_space_matrices are world space
     # TODO: do it at blender level
     # non_deform_bone_indices = get_non_deform_bone_indices(mod)
     for i, bone in enumerate(mod.bones_data.bones_hierarchy):
@@ -661,9 +662,16 @@ def build_blender_armature(mod, armature_name, bbox_data):
         # blender_bone.use_deform = False if i in non_deform_bone_indices else True
         m = mod.bones_data.inverse_bind_matrices[i]
         head = _transform_inverse_bind_matrix(mod, m, bbox_data)
-        blender_bone.length = bone.length * scale
         blender_bone.head = [head[0] * scale, -head[2] * scale, head[1] * scale]
-        blender_bone.tail = [head[0] * scale, -head[2] * scale, (head[1] * scale) + 0.05]
+         #in parent space
+        #blender_bone.tail = [head[0] * scale, -head[2] * scale, (head[1] * scale) + 0.05]
+        swap_mat = Matrix([[1.0, 0.0, 0.0, 0.0],
+                           [0.0, 0.0, -1.0, 0.0],
+                           [0.0, 1.0, 0.0, 0.0],
+                           [0.0, 0.0, 0.0, 1.0]])
+        blender_bone.matrix = swap_mat @ get_transform_matrix(mod, m, bbox_data).inverted()
+
+        blender_bone.length = 0.05
         blender_bone['mtfw.anim_retarget'] = str(bone.idx_anim_map)
         blender_bones.append(blender_bone)
 
@@ -696,6 +704,21 @@ def _transform_inverse_bind_matrix(mod, matrix, bbox_data):
         bl_matrix = ((bl_matrix @ scale_matrix.inverted()) @ rotation_matrix.inverted()) - translation_matrix
 
     return bl_matrix.inverted().to_translation()
+
+def get_transform_matrix(mod, matrix, bbox_data):
+    m = matrix
+    bl_matrix = Matrix((
+        (m.row_1.x, m.row_1.y, m.row_1.z, m.row_1.w),
+        (m.row_2.x, m.row_2.y, m.row_2.z, m.row_2.w),
+        (m.row_3.x, m.row_3.y, m.row_3.z, m.row_3.w),
+        (m.row_4.x / 100, m.row_4.y / 100, m.row_4.z / 100, m.row_4.w),
+    )).transposed()  # directx to opengl style
+
+    return bl_matrix
+
+def get_parent_matrix(child_wmat, parent_wmat):
+    res = parent_wmat.inverted() @ child_wmat
+    return res
 
 
 def _create_bbox_data(mod):
