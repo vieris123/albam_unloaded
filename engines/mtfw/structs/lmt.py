@@ -13,7 +13,6 @@ class Lmt(ReadWriteKaitaiStruct):
         self._io = _io
         self._parent = _parent
         self._root = _root if _root else self
-        self._read()
 
     def _read(self):
         self.id_magic = self._io.read_bytes(4)
@@ -93,6 +92,352 @@ class Lmt(ReadWriteKaitaiStruct):
             pass
 
 
+    class BlockHeader49(ReadWriteKaitaiStruct):
+        def __init__(self, _io=None, _parent=None, _root=None):
+            self._io = _io
+            self._parent = _parent
+            self._root = _root
+            self._should_write_tracks = False
+            self.tracks__to_write = True
+            self._should_write_events_01 = False
+            self.events_01__to_write = True
+            self._should_write_events_02 = False
+            self.events_02__to_write = True
+
+        def _read(self):
+            self.ofs_frame = self._io.read_u4le()
+            self.num_tracks = self._io.read_u4le()
+            self.num_frames = self._io.read_u4le()
+            self.loop_frames = self._io.read_u4le()
+            self.end_pos = Lmt.Vec4(self._io, self, self._root)
+            self.end_pos._read()
+            self.end_quat = Lmt.Vec4(self._io, self, self._root)
+            self.end_quat._read()
+            self.events_params_01 = []
+            for i in range(32):
+                self.events_params_01.append(self._io.read_u2le())
+
+            self.num_event_01 = self._io.read_u4le()
+            self.event_buffer_01 = self._io.read_u4le()
+            self.events_params_02 = []
+            for i in range(32):
+                self.events_params_02.append(self._io.read_u2le())
+
+            self.num_event_02 = self._io.read_u4le()
+            self.event_buffer_02 = self._io.read_u4le()
+
+
+        def _fetch_instances(self):
+            pass
+            self.end_pos._fetch_instances()
+            self.end_quat._fetch_instances()
+            for i in range(len(self.events_params_01)):
+                pass
+
+            for i in range(len(self.events_params_02)):
+                pass
+
+            _ = self.tracks
+            for i in range(len(self._m_tracks)):
+                pass
+                self.tracks[i]._fetch_instances()
+
+            _ = self.events_01
+            for i in range(len(self._m_events_01)):
+                pass
+                self.events_01[i]._fetch_instances()
+
+            _ = self.events_02
+            for i in range(len(self._m_events_02)):
+                pass
+                self.events_02[i]._fetch_instances()
+
+
+
+        def _write__seq(self, io=None):
+            super(Lmt.BlockHeader49, self)._write__seq(io)
+            self._should_write_tracks = self.tracks__to_write
+            self._should_write_events_01 = self.events_01__to_write
+            self._should_write_events_02 = self.events_02__to_write
+            self._io.write_u4le(self.ofs_frame)
+            self._io.write_u4le(self.num_tracks)
+            self._io.write_u4le(self.num_frames)
+            self._io.write_u4le(self.loop_frames)
+            self.end_pos._write__seq(self._io)
+            self.end_quat._write__seq(self._io)
+            for i in range(len(self.events_params_01)):
+                pass
+                self._io.write_u2le(self.events_params_01[i])
+
+            self._io.write_u4le(self.num_event_01)
+            self._io.write_u4le(self.event_buffer_01)
+            for i in range(len(self.events_params_02)):
+                pass
+                self._io.write_u2le(self.events_params_02[i])
+
+            self._io.write_u4le(self.num_event_02)
+            self._io.write_u4le(self.event_buffer_02)
+
+
+        def _check(self):
+            pass
+            if self.end_pos._root != self._root:
+                raise kaitaistruct.ConsistencyError(u"end_pos", self.end_pos._root, self._root)
+            if self.end_pos._parent != self:
+                raise kaitaistruct.ConsistencyError(u"end_pos", self.end_pos._parent, self)
+            if self.end_quat._root != self._root:
+                raise kaitaistruct.ConsistencyError(u"end_quat", self.end_quat._root, self._root)
+            if self.end_quat._parent != self:
+                raise kaitaistruct.ConsistencyError(u"end_quat", self.end_quat._parent, self)
+            if (len(self.events_params_01) != 32):
+                raise kaitaistruct.ConsistencyError(u"events_params_01", len(self.events_params_01), 32)
+            for i in range(len(self.events_params_01)):
+                pass
+
+            if (len(self.events_params_02) != 32):
+                raise kaitaistruct.ConsistencyError(u"events_params_02", len(self.events_params_02), 32)
+            for i in range(len(self.events_params_02)):
+                pass
+
+
+        @property
+        def tracks(self):
+            if self._should_write_tracks:
+                self._write_tracks()
+            if hasattr(self, '_m_tracks'):
+                return self._m_tracks
+
+            _pos = self._io.pos()
+            self._io.seek(self.ofs_frame)
+            self._m_tracks = []
+            for i in range(self.num_tracks):
+                _t__m_tracks = Lmt.Track49(self._io, self, self._root)
+                _t__m_tracks._read()
+                self._m_tracks.append(_t__m_tracks)
+
+            self._io.seek(_pos)
+            return getattr(self, '_m_tracks', None)
+
+        @tracks.setter
+        def tracks(self, v):
+            self._m_tracks = v
+
+        def _write_tracks(self):
+            self._should_write_tracks = False
+            _pos = self._io.pos()
+            self._io.seek(self.ofs_frame)
+            for i in range(len(self._m_tracks)):
+                pass
+                self.tracks[i]._write__seq(self._io)
+
+            self._io.seek(_pos)
+
+
+        def _check_tracks(self):
+            pass
+            if (len(self.tracks) != self.num_tracks):
+                raise kaitaistruct.ConsistencyError(u"tracks", len(self.tracks), self.num_tracks)
+            for i in range(len(self._m_tracks)):
+                pass
+                if self.tracks[i]._root != self._root:
+                    raise kaitaistruct.ConsistencyError(u"tracks", self.tracks[i]._root, self._root)
+                if self.tracks[i]._parent != self:
+                    raise kaitaistruct.ConsistencyError(u"tracks", self.tracks[i]._parent, self)
+
+
+        @property
+        def events_01(self):
+            if self._should_write_events_01:
+                self._write_events_01()
+            if hasattr(self, '_m_events_01'):
+                return self._m_events_01
+
+            _pos = self._io.pos()
+            self._io.seek(self.event_buffer_01)
+            self._m_events_01 = []
+            for i in range(self.num_event_01):
+                _t__m_events_01 = Lmt.Event49(self._io, self, self._root)
+                _t__m_events_01._read()
+                self._m_events_01.append(_t__m_events_01)
+
+            self._io.seek(_pos)
+            return getattr(self, '_m_events_01', None)
+
+        @events_01.setter
+        def events_01(self, v):
+            self._m_events_01 = v
+
+        def _write_events_01(self):
+            self._should_write_events_01 = False
+            _pos = self._io.pos()
+            self._io.seek(self.event_buffer_01)
+            for i in range(len(self._m_events_01)):
+                pass
+                self.events_01[i]._write__seq(self._io)
+
+            self._io.seek(_pos)
+
+
+        def _check_events_01(self):
+            pass
+            if (len(self.events_01) != self.num_event_01):
+                raise kaitaistruct.ConsistencyError(u"events_01", len(self.events_01), self.num_event_01)
+            for i in range(len(self._m_events_01)):
+                pass
+                if self.events_01[i]._root != self._root:
+                    raise kaitaistruct.ConsistencyError(u"events_01", self.events_01[i]._root, self._root)
+                if self.events_01[i]._parent != self:
+                    raise kaitaistruct.ConsistencyError(u"events_01", self.events_01[i]._parent, self)
+
+
+        @property
+        def events_02(self):
+            if self._should_write_events_02:
+                self._write_events_02()
+            if hasattr(self, '_m_events_02'):
+                return self._m_events_02
+
+            _pos = self._io.pos()
+            self._io.seek(self.event_buffer_02)
+            self._m_events_02 = []
+            for i in range(self.num_event_02):
+                _t__m_events_02 = Lmt.Event49(self._io, self, self._root)
+                _t__m_events_02._read()
+                self._m_events_02.append(_t__m_events_02)
+
+            self._io.seek(_pos)
+            return getattr(self, '_m_events_02', None)
+
+        @events_02.setter
+        def events_02(self, v):
+            self._m_events_02 = v
+
+        def _write_events_02(self):
+            self._should_write_events_02 = False
+            _pos = self._io.pos()
+            self._io.seek(self.event_buffer_02)
+            for i in range(len(self._m_events_02)):
+                pass
+                self.events_02[i]._write__seq(self._io)
+
+            self._io.seek(_pos)
+
+
+        def _check_events_02(self):
+            pass
+            if (len(self.events_02) != self.num_event_02):
+                raise kaitaistruct.ConsistencyError(u"events_02", len(self.events_02), self.num_event_02)
+            for i in range(len(self._m_events_02)):
+                pass
+                if self.events_02[i]._root != self._root:
+                    raise kaitaistruct.ConsistencyError(u"events_02", self.events_02[i]._root, self._root)
+                if self.events_02[i]._parent != self:
+                    raise kaitaistruct.ConsistencyError(u"events_02", self.events_02[i]._parent, self)
+
+
+
+    class Track49(ReadWriteKaitaiStruct):
+        def __init__(self, _io=None, _parent=None, _root=None):
+            self._io = _io
+            self._parent = _parent
+            self._root = _root
+            self._should_write_data = False
+            self.data__to_write = True
+
+        def _read(self):
+            self.buffer_type = self._io.read_u1()
+            self.usage = self._io.read_u1()
+            self.joint_type = self._io.read_u1()
+            self.bone_index = self._io.read_u1()
+            self.unk_01 = self._io.read_f4le()
+            self.len_data = self._io.read_u4le()
+            self.ofs_data = self._io.read_u4le()
+            self.ref_data = Lmt.Vec4(self._io, self, self._root)
+            self.ref_data._read()
+
+
+        def _fetch_instances(self):
+            pass
+            self.ref_data._fetch_instances()
+            _ = self.data
+
+
+        def _write__seq(self, io=None):
+            super(Lmt.Track49, self)._write__seq(io)
+            self._should_write_data = self.data__to_write
+            self._io.write_u1(self.buffer_type)
+            self._io.write_u1(self.usage)
+            self._io.write_u1(self.joint_type)
+            self._io.write_u1(self.bone_index)
+            self._io.write_f4le(self.unk_01)
+            self._io.write_u4le(self.len_data)
+            self._io.write_u4le(self.ofs_data)
+            self.ref_data._write__seq(self._io)
+
+
+        def _check(self):
+            pass
+            if self.ref_data._root != self._root:
+                raise kaitaistruct.ConsistencyError(u"ref_data", self.ref_data._root, self._root)
+            if self.ref_data._parent != self:
+                raise kaitaistruct.ConsistencyError(u"ref_data", self.ref_data._parent, self)
+
+        @property
+        def data(self):
+            if self._should_write_data:
+                self._write_data()
+            if hasattr(self, '_m_data'):
+                return self._m_data
+
+            _pos = self._io.pos()
+            self._io.seek(self.ofs_data)
+            self._m_data = self._io.read_bytes(self.len_data)
+            self._io.seek(_pos)
+            return getattr(self, '_m_data', None)
+
+        @data.setter
+        def data(self, v):
+            self._m_data = v
+
+        def _write_data(self):
+            self._should_write_data = False
+            _pos = self._io.pos()
+            self._io.seek(self.ofs_data)
+            self._io.write_bytes(self.data)
+            self._io.seek(_pos)
+
+
+        def _check_data(self):
+            pass
+            if (len(self.data) != self.len_data):
+                raise kaitaistruct.ConsistencyError(u"data", len(self.data), self.len_data)
+
+
+    class Event49(ReadWriteKaitaiStruct):
+        def __init__(self, _io=None, _parent=None, _root=None):
+            self._io = _io
+            self._parent = _parent
+            self._root = _root
+
+        def _read(self):
+            self.group_id = self._io.read_u4le()
+            self.frame = self._io.read_u4le()
+
+
+        def _fetch_instances(self):
+            pass
+
+
+        def _write__seq(self, io=None):
+            super(Lmt.Event49, self)._write__seq(io)
+            self._io.write_u4le(self.group_id)
+            self._io.write_u4le(self.frame)
+
+
+        def _check(self):
+            pass
+
+
     class Atk(ReadWriteKaitaiStruct):
         def __init__(self, _io=None, _parent=None, _root=None):
             self._io = _io
@@ -132,17 +477,20 @@ class Lmt(ReadWriteKaitaiStruct):
 
         def _fetch_instances(self):
             pass
-            _ = self.block_header
-            _on = self.lmt_ver
-            if _on == 49:
+            if (self.offset != 0):
                 pass
-                self.block_header._fetch_instances()
-            elif _on == 51:
-                pass
-                self.block_header._fetch_instances()
-            elif _on == 67:
-                pass
-                self.block_header._fetch_instances()
+                _ = self.block_header
+                _on = self.lmt_ver
+                if _on == 49:
+                    pass
+                    self.block_header._fetch_instances()
+                elif _on == 51:
+                    pass
+                    self.block_header._fetch_instances()
+                elif _on == 67:
+                    pass
+                    self.block_header._fetch_instances()
+
 
 
         def _write__seq(self, io=None):
@@ -171,22 +519,25 @@ class Lmt(ReadWriteKaitaiStruct):
             if hasattr(self, '_m_block_header'):
                 return self._m_block_header
 
-            _pos = self._io.pos()
-            self._io.seek(self.offset)
-            _on = self.lmt_ver
-            if _on == 49:
+            if (self.offset != 0):
                 pass
-                self._m_block_header = Lmt.BlockHeader51(self._io, self, self._root)
-                self._m_block_header._read()
-            elif _on == 51:
-                pass
-                self._m_block_header = Lmt.BlockHeader51(self._io, self, self._root)
-                self._m_block_header._read()
-            elif _on == 67:
-                pass
-                self._m_block_header = Lmt.BlockHeader67(self._io, self, self._root)
-                self._m_block_header._read()
-            self._io.seek(_pos)
+                _pos = self._io.pos()
+                self._io.seek(self.offset)
+                _on = self.lmt_ver
+                if _on == 49:
+                    pass
+                    self._m_block_header = Lmt.BlockHeader49(self._io, self, self._root)
+                    self._m_block_header._read()
+                elif _on == 51:
+                    pass
+                    self._m_block_header = Lmt.BlockHeader51(self._io, self, self._root)
+                    self._m_block_header._read()
+                elif _on == 67:
+                    pass
+                    self._m_block_header = Lmt.BlockHeader67(self._io, self, self._root)
+                    self._m_block_header._read()
+                self._io.seek(_pos)
+
             return getattr(self, '_m_block_header', None)
 
         @block_header.setter
@@ -195,42 +546,48 @@ class Lmt(ReadWriteKaitaiStruct):
 
         def _write_block_header(self):
             self._should_write_block_header = False
-            _pos = self._io.pos()
-            self._io.seek(self.offset)
-            _on = self.lmt_ver
-            if _on == 49:
+            if (self.offset != 0):
                 pass
-                self.block_header._write__seq(self._io)
-            elif _on == 51:
-                pass
-                self.block_header._write__seq(self._io)
-            elif _on == 67:
-                pass
-                self.block_header._write__seq(self._io)
-            self._io.seek(_pos)
+                _pos = self._io.pos()
+                self._io.seek(self.offset)
+                _on = self.lmt_ver
+                if _on == 49:
+                    pass
+                    self.block_header._write__seq(self._io)
+                elif _on == 51:
+                    pass
+                    self.block_header._write__seq(self._io)
+                elif _on == 67:
+                    pass
+                    self.block_header._write__seq(self._io)
+                self._io.seek(_pos)
+
 
 
         def _check_block_header(self):
             pass
-            _on = self.lmt_ver
-            if _on == 49:
+            if (self.offset != 0):
                 pass
-                if self.block_header._root != self._root:
-                    raise kaitaistruct.ConsistencyError(u"block_header", self.block_header._root, self._root)
-                if self.block_header._parent != self:
-                    raise kaitaistruct.ConsistencyError(u"block_header", self.block_header._parent, self)
-            elif _on == 51:
-                pass
-                if self.block_header._root != self._root:
-                    raise kaitaistruct.ConsistencyError(u"block_header", self.block_header._root, self._root)
-                if self.block_header._parent != self:
-                    raise kaitaistruct.ConsistencyError(u"block_header", self.block_header._parent, self)
-            elif _on == 67:
-                pass
-                if self.block_header._root != self._root:
-                    raise kaitaistruct.ConsistencyError(u"block_header", self.block_header._root, self._root)
-                if self.block_header._parent != self:
-                    raise kaitaistruct.ConsistencyError(u"block_header", self.block_header._parent, self)
+                _on = self.lmt_ver
+                if _on == 49:
+                    pass
+                    if self.block_header._root != self._root:
+                        raise kaitaistruct.ConsistencyError(u"block_header", self.block_header._root, self._root)
+                    if self.block_header._parent != self:
+                        raise kaitaistruct.ConsistencyError(u"block_header", self.block_header._parent, self)
+                elif _on == 51:
+                    pass
+                    if self.block_header._root != self._root:
+                        raise kaitaistruct.ConsistencyError(u"block_header", self.block_header._root, self._root)
+                    if self.block_header._parent != self:
+                        raise kaitaistruct.ConsistencyError(u"block_header", self.block_header._parent, self)
+                elif _on == 67:
+                    pass
+                    if self.block_header._root != self._root:
+                        raise kaitaistruct.ConsistencyError(u"block_header", self.block_header._root, self._root)
+                    if self.block_header._parent != self:
+                        raise kaitaistruct.ConsistencyError(u"block_header", self.block_header._parent, self)
+
 
 
     class BlockHeader51(ReadWriteKaitaiStruct):
@@ -249,7 +606,7 @@ class Lmt(ReadWriteKaitaiStruct):
             self.ofs_frame = self._io.read_u4le()
             self.num_tracks = self._io.read_u4le()
             self.num_frames = self._io.read_u4le()
-            self.loop_frmaes = self._io.read_u4le()
+            self.loop_frames = self._io.read_u4le()
             self.end_pos = Lmt.Vec4(self._io, self, self._root)
             self.end_pos._read()
             self.end_quat = Lmt.Vec4(self._io, self, self._root)
@@ -258,13 +615,13 @@ class Lmt(ReadWriteKaitaiStruct):
             for i in range(16):
                 self.display_events.append(self._io.read_u4le())
 
-            self.count_01 = self._io.read_u4le()
+            self.num_event_01 = self._io.read_u4le()
             self.ofs_buffer_01 = self._io.read_u4le()
             self.sfx_events = []
             for i in range(32):
                 self.sfx_events.append(self._io.read_u2le())
 
-            self.count_02 = self._io.read_u4le()
+            self.num_event_02 = self._io.read_u4le()
             self.ofs_buffer_02 = self._io.read_u4le()
 
 
@@ -303,20 +660,20 @@ class Lmt(ReadWriteKaitaiStruct):
             self._io.write_u4le(self.ofs_frame)
             self._io.write_u4le(self.num_tracks)
             self._io.write_u4le(self.num_frames)
-            self._io.write_u4le(self.loop_frmaes)
+            self._io.write_u4le(self.loop_frames)
             self.end_pos._write__seq(self._io)
             self.end_quat._write__seq(self._io)
             for i in range(len(self.display_events)):
                 pass
                 self._io.write_u4le(self.display_events[i])
 
-            self._io.write_u4le(self.count_01)
+            self._io.write_u4le(self.num_event_01)
             self._io.write_u4le(self.ofs_buffer_01)
             for i in range(len(self.sfx_events)):
                 pass
                 self._io.write_u2le(self.sfx_events[i])
 
-            self._io.write_u4le(self.count_02)
+            self._io.write_u4le(self.num_event_02)
             self._io.write_u4le(self.ofs_buffer_02)
 
 
@@ -396,7 +753,7 @@ class Lmt(ReadWriteKaitaiStruct):
             _pos = self._io.pos()
             self._io.seek(self.ofs_buffer_01)
             self._m_atk_buff = []
-            for i in range(self.count_01):
+            for i in range(self.num_event_01):
                 _t__m_atk_buff = Lmt.Atk(self._io, self, self._root)
                 _t__m_atk_buff._read()
                 self._m_atk_buff.append(_t__m_atk_buff)
@@ -421,8 +778,8 @@ class Lmt(ReadWriteKaitaiStruct):
 
         def _check_atk_buff(self):
             pass
-            if (len(self.atk_buff) != self.count_01):
-                raise kaitaistruct.ConsistencyError(u"atk_buff", len(self.atk_buff), self.count_01)
+            if (len(self.atk_buff) != self.num_event_01):
+                raise kaitaistruct.ConsistencyError(u"atk_buff", len(self.atk_buff), self.num_event_01)
             for i in range(len(self._m_atk_buff)):
                 pass
                 if self.atk_buff[i]._root != self._root:
@@ -441,7 +798,7 @@ class Lmt(ReadWriteKaitaiStruct):
             _pos = self._io.pos()
             self._io.seek(self.ofs_buffer_02)
             self._m_atk_buff2 = []
-            for i in range(self.count_02):
+            for i in range(self.num_event_02):
                 _t__m_atk_buff2 = Lmt.Atk2(self._io, self, self._root)
                 _t__m_atk_buff2._read()
                 self._m_atk_buff2.append(_t__m_atk_buff2)
@@ -466,8 +823,8 @@ class Lmt(ReadWriteKaitaiStruct):
 
         def _check_atk_buff2(self):
             pass
-            if (len(self.atk_buff2) != self.count_02):
-                raise kaitaistruct.ConsistencyError(u"atk_buff2", len(self.atk_buff2), self.count_02)
+            if (len(self.atk_buff2) != self.num_event_02):
+                raise kaitaistruct.ConsistencyError(u"atk_buff2", len(self.atk_buff2), self.num_event_02)
             for i in range(len(self._m_atk_buff2)):
                 pass
                 if self.atk_buff2[i]._root != self._root:

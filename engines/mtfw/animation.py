@@ -14,7 +14,7 @@ import numpy as np
 from albam.registry import blender_registry
 from .structs.lmt import Lmt
 
-class BufferType(Enum):
+class BufferType49(Enum):
     SingleVector3 = 2
     StepRotationQuat3 = 4
     HermiteVector3 = 5
@@ -27,6 +27,9 @@ class TrackType(Enum):
     LocalScale = 2
     AbsoluteRotation = 3
     AbsolutePosition = 4
+
+class AlbamAction(bpy.types.Action):
+    pass
 
 # HACKY_BONE_INDEX_IK_FOOT_RIGHT = 19
 # HACKY_BONE_INDEX_IK_FOOT_LEFT = 23
@@ -45,6 +48,7 @@ FRAMERATE = 60.0
 def load_lmt(file_item, context):
     lmt_bytes = file_item.get_bytes()
     lmt = Lmt(KaitaiStream(io.BytesIO(lmt_bytes)))
+    lmt._read()
     armature = context.scene.albam.import_options_lmt.armature
     mapping = _create_bone_mapping(armature)
 
@@ -59,6 +63,23 @@ def load_lmt(file_item, context):
         armature.animation_data_create()
         name = f"{armature.name}.{file_item.display_name}.{str(block_index).zfill(4)}"
         action = bpy.data.actions.new(name)
+        #Events
+        cumulative_frames = 0
+        for event in block.block_header.events_01:
+            marker = action.pose_markers.new(str(event.group_id))
+            marker.frame = event.frame - 1
+
+        for event in block.block_header.events_02:
+            marker = action.pose_markers.new(str(event.group_id))
+            marker.frame = event.frame - 1
+        #Loops
+        is_cyclic = False
+        if block.block_header.loop_frames > 0:
+            action.use_cyclic = True
+            is_cyclic = True
+            #action.use_frame_range = True
+            #action.frame_range = Vector([block.block_header.loop_frames, block.block_header.num_frames])
+        
         action.use_fake_user = True
         context.scene.albam.import_options_lmt.armature.animation_data.action = action
         for track_index, track in enumerate(block.block_header.tracks):
@@ -152,9 +173,13 @@ def load_lmt(file_item, context):
             for i in range(num_curv):
                 try:
                     #action.fcurves.new(data_path=data_path, index=i, action_group=group_name)
-                    curves.append(action.fcurves.new(data_path=data_path, index=i, action_group=group_name))
-            # for c in curves:
-            #     c.group = group
+                    curve = action.fcurves.new(data_path=data_path, index=i, action_group=group_name)
+                    curves.append(curve)
+                    if is_cyclic:
+                        mod = curve.modifiers.new('CYCLES')
+                        mod.use_restricted_range = True
+                        mod.frame_start = block.block_header.loop_frames
+
                 except KeyError as err:
                     print('unknown error:', err)
                     curves.append(action.fcurves.new(data_path=data_path+'[1]', index=i, action_group=group_name))

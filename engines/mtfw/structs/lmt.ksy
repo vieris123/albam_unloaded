@@ -24,31 +24,73 @@ types:
         type:
           switch-on: lmt_ver
           cases:
-            49: block_header51
+            49: block_header49
             51: block_header51
             67: block_header67
+        if: offset != 0
 
+  block_header49:
+    seq:
+      - {id: ofs_frame, type: u4}
+      - {id: num_tracks, type: u4}
+      - {id: num_frames, type: u4}
+      - {id: loop_frames, type: u4}
+      - {id: end_pos, type: vec4}
+      - {id: end_quat, type: vec4}
+      - {id: events_params_01, type: u2, repeat: expr, repeat-expr: 32}
+      - {id: num_events_01, type: u4}
+      - {id: event_buffer_01, type: u4}
+      - {id: events_params_02, type: u2, repeat: expr, repeat-expr: 32}
+      - {id: num_events_02, type: u4}
+      - {id: event_buffer_02, type: u4}
+    instances:
+      tracks:
+        {pos: ofs_frame, type: track49, repeat: expr, repeat-expr: num_tracks}
+      events_01:
+        {pos: event_buffer_01, type: event49, repeat: expr, repeat-expr: num_evens_01}
+      events_02:
+        {pos: event_buffer_02, type: event49, repeat: expr, repeat-expr: num_events_02}
+    
+  track49:
+    seq:
+      - {id: buffer_type, type: u1}
+      - {id: usage, type: u1}
+      - {id: joint_type, type: u1}
+      - {id: bone_index, type: u1}
+      - {id: unk_01, type: f4}
+      - {id: len_data, type: u4}
+      - {id: ofs_data, type: u4}
+      - {id: ref_data, type: vec4}
+    instances:
+      data:
+        {pos: ofs_data, size: len_data}
+  
+  event49:
+    seq:
+      - {id: group_id, type: u4}
+      - {id: frame, type: u4}
+  
   block_header51:
     seq:
       - {id: ofs_frame, type: u4}
       - {id: num_tracks, type: u4}
       - {id: num_frames, type: u4}
-      - {id: loop_frmaes, type: u4}
+      - {id: loop_frames, type: u4}
       - {id: end_pos, type: vec4}
       - {id: end_quat, type: vec4}
       - {id: display_events, type: u4, repeat: expr, repeat-expr: 16}
-      - {id: count_01, type: u4}
+      - {id: num_events_01, type: u4}
       - {id: ofs_buffer_01, type: u4}
       - {id: sfx_events, type: u2, repeat: expr, repeat-expr: 32}
-      - {id: count_02, type: u4}
+      - {id: num_events_02, type: u4}
       - {id: ofs_buffer_02, type: u4}
     instances:
       tracks:
         {pos: ofs_frame, type: track51, repeat: expr, repeat-expr: num_tracks}
       atk_buff:
-        {pos: ofs_buffer_01, type: atk, repeat: expr, repeat-expr: count_01}
+        {pos: ofs_buffer_01, type: atk, repeat: expr, repeat-expr: num_events_01}
       atk_buff2:
-        {pos: ofs_buffer_02, type: atk2, repeat: expr, repeat-expr: count_02}
+        {pos: ofs_buffer_02, type: atk2, repeat: expr, repeat-expr: num_events_02}
 
   track51:
     seq:
