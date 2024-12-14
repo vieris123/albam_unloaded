@@ -747,6 +747,7 @@ def _create_bbox_data(mod):
         min_y=mod.bbox_min.y,
         min_z=mod.bbox_min.z,
         max_x=mod.bbox_max.x,
+        #max_x=-mod.bbox_min.x,
         max_y=mod.bbox_max.y,
         max_z=mod.bbox_max.z,
         width=mod.bbox_max.x - mod.bbox_min.x,
@@ -777,6 +778,7 @@ def _get_material_hash(mod, mesh):
 @blender_registry.register_export_function(app_id="rev1", extension="mod")
 @blender_registry.register_export_function(app_id="rev2", extension="mod")
 @blender_registry.register_export_function(app_id="dd", extension="mod")
+@blender_registry.register_export_function(app_id="dmc4", extension="mod")
 @check_dds_textures
 @check_mtfw_shader_group
 def export_mod(bl_obj):
@@ -840,6 +842,7 @@ def export_mod(bl_obj):
     dst_mod._check()
     dst_mod._write(stream)
 
+    #return stream.to_byte_array()
     mod_vf = VirtualFileData(app_id, asset.relative_path, data_bytes=stream.to_byte_array())
     vfiles.append(mod_vf)
     vfiles.extend(vtextures)
@@ -853,7 +856,7 @@ def _init_mod_header(bl_obj, src_mod, dst_mod):
     dst_mod_header.__dict__.update(dict(
         ident=b"MOD\x00",
         version=src_mod.header.version,
-        revision=1,
+        revision=0,
         num_bones=0,
         num_meshes=0,
         num_materials=0,
@@ -930,6 +933,10 @@ def _serialize_top_level_mod(bl_meshes, src_mod, dst_mod):
         dst_mod.rcn_vertices = []
         dst_mod.rcn_trianlges = []
 
+    if src_mod.header.version == 153:
+        dst_mod.reserved_01 = src_mod.reserved_01
+        dst_mod.reserved_02 = src_mod.reserved_02
+
     if src_mod.header.version in (210, 212):
         dst_mod.num_weight_bounds = 0
 
@@ -943,7 +950,6 @@ def _serialize_bones_data(bl_obj, bl_meshes, src_mod, dst_mod, bone_palettes=Non
     bones_data.bones_hierarchy = []
     bones_data.parent_space_matrices = []
     bones_data.inverse_bind_matrices = []
-
     if bone_palettes:
         bones_data.bone_palettes = []
         dst_mod.header.num_bone_palettes = len(bone_palettes)
@@ -965,7 +971,8 @@ def _serialize_bones_data(bl_obj, bl_meshes, src_mod, dst_mod, bone_palettes=Non
         bone.idx_parent = src_bone.idx_parent
         bone.idx_mirror = src_bone.idx_mirror
         bone.idx_mapping = src_bone.idx_mapping
-        bone.unk_01 = src_bone.unk_01
+        bone.length = src_bone.length
+        #bone.unk_01 = src_bone.unk_01
         bone.parent_distance = src_bone.parent_distance
         loc = dst_mod.Vec3(_parent=bone, _root=bone._root)
         loc.x = src_bone.location.x
@@ -1083,7 +1090,7 @@ def _get_vertex_colors(blender_mesh):
 
 
 def _create_bone_palettes(src_mod, bl_armature, bl_meshes):
-    if src_mod.header.version != 156:
+    if src_mod.header.version not in (156, 153):
         return {}
     bone_palette_dicts = []
     MAX_BONE_PALETTE_SIZE = 32
@@ -1251,10 +1258,10 @@ def _serialize_meshes_data(bl_obj, bl_meshes, src_mod, dst_mod, materials_map, b
                 max_bones_per_vertex = 5
         mesh.max_bones_per_vertex = max_bones_per_vertex
 
-        if dst_mod.header.version in (156,):
+        if dst_mod.header.version in (156, 153):
             mesh.reserved2 = 0
             mesh.connective = 0
-
+        
         mesh._check()
         meshes_data.meshes.append(mesh)
         mesh_weight_bounds = _calculate_weight_bounds(
@@ -1268,7 +1275,7 @@ def _serialize_meshes_data(bl_obj, bl_meshes, src_mod, dst_mod, materials_map, b
         face_position += (num_indices + face_padding)
         total_num_vertices += mesh.num_vertices
 
-    if dst_mod.header.version in (156, 211):
+    if dst_mod.header.version in (156, 153, 211):
         meshes_data.num_weight_bounds = len(meshes_data.weight_bounds)
     else:
         dst_mod.num_weight_bounds = len(meshes_data.weight_bounds)
@@ -1305,6 +1312,31 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
             vtx_stride_2 = 8
             VertexBuff2Cls = Mod156.Vertex28
         VertexCls = VERTEX_FORMATS_MAPPER[vertex_format]
+        vtx_stride = 32
+        # vertex_format = max_bones_per_vertex
+
+    elif dst_mod.header.version == 153:
+        dmc4_vertex_format = int(mod_156_material_props.vtype, 16)
+        skin_function = int(mod_156_material_props.func_skin, 16)
+        if dmc4_vertex_format == 0x1 and skin_function == 0x4:
+            has_vertex_buffer_2 = True
+            vtx_stride_2 = 8
+            VertexBuff2Cls = Mod156.Vertex28
+
+        MOD153_VERTEX_MAPPER = {
+            0: 0,
+            1: 1,
+            2: 2
+        }
+
+        MOD153_VERTEX_CLS_MAPPER = {
+            0: Mod153.VfSkin,
+            1: Mod153.VfSkinEx,
+            2: Mod153.VfNonSkin,
+        }
+        VertexCls = MOD153_VERTEX_CLS_MAPPER[dmc4_vertex_format]
+        
+        vertex_format = MOD153_VERTEX_MAPPER[dmc4_vertex_format]
         vtx_stride = 32
         # vertex_format = max_bones_per_vertex
 
@@ -1369,7 +1401,7 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
             vertex_struct.position = dst_mod.Vec3(
                 _parent=vertex_struct, _root=vertex_struct._root)
         # Normals types
-        if dst_mod.header.version == 156 or vertex_format in VERTEX_FORMATS_NORMAL4:
+        if dst_mod.header.version == 156 or dst_mod.header.version == 153 or vertex_format in VERTEX_FORMATS_NORMAL4:
             vertex_struct.normal = dst_mod.Vec4U1(
                 _parent=vertex_struct, _root=vertex_struct._root)
         else:
@@ -1452,6 +1484,8 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
         xyz = (xyz[0], xyz[2], -xyz[1])  # z-up to y-up
         xyz = _apply_bbox_transforms(
             xyz, dst_mod, bbox_data) if has_bones else xyz
+        if xyz[0] > 32767:
+            continue
         vertex_struct.position.x = xyz[0]
         vertex_struct.position.y = xyz[1]
         vertex_struct.position.z = xyz[2]
@@ -1474,7 +1508,7 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
             else:
                 raise
         # Set Weights
-        if dst_mod.header.version == 156 or vertex_format in VERTEX_FORMATS_NORMAL4:
+        if dst_mod.header.version == 156 or dst_mod.header.version == 153 or vertex_format in VERTEX_FORMATS_NORMAL4:
             vertex_struct.normal.w = 255  # is this occlusion as well?
         if has_bones:
             # applying bounding box constraints
@@ -1491,7 +1525,7 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
                 bone_indices.insert(1, 128)
                 bone_indices.insert(3, 128)
             vertex_struct.bone_indices = bone_indices
-            if dst_mod.header.version != 156 and vertex_format not in VERTEX_FORMATS_BRIDGE:
+            if dst_mod.header.version not in (156, 153) and vertex_format not in VERTEX_FORMATS_BRIDGE:
                 if MAX_BONES == 2:
                     vertex_struct.bone_indices = [
                         pack('e', bone_indices[0]), pack('e', bone_indices[1])]
@@ -1526,13 +1560,15 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
         vertex_struct._check()
         vertex_struct._write(vtx_stream)
 
+        if dst_mod.header.version == 153:
+            vertex_format = dmc4_vertex_format
     return vtx_stream, vtx_stream_2, vertex_format, vtx_stride, vtx_stride_2, max_bones_per_vertex
 
 
 def _apply_bbox_transforms(xyz_tuple, dst_mod, bbox_data):
     x, y, z = xyz_tuple
 
-    if dst_mod.header.version == 156:
+    if dst_mod.header.version == 156 or dst_mod.header.version == 153:
 
         x -= dst_mod.bbox_min.x
         x /= (dst_mod.bbox_max.x - dst_mod.bbox_min.x)

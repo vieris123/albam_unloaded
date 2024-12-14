@@ -578,6 +578,15 @@ def slerp_eval(track, block, frame_data, time):
             frame -= 1
             frameDelta -= 1.0    
 
+@blender_registry.register_export_function(app_id="dmc4", extension="lmt")
+def export_lmt():
+    export_settings = bpy.context.scene.albam.export_settings
+    asset = bl_obj.albam_asset
+    app_id = asset.app_id
+    Mod = APPID_CLASS_MAPPER[app_id]
+    vfiles = []
+    pass
+
 def filter_armatures(self, obj):
     # TODO: filter by custom properties that indicate is
     # a RE5 compatible armature

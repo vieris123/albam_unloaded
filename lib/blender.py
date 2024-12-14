@@ -123,11 +123,13 @@ def get_model_bounding_box(blender_objects):
     max_y = -99999999
     max_z = -99999999
 
+    x_thresh = 9999
     for mesh in meshes:
         for vert in mesh.vertices:
             x, y, z = vert.co[:]
             if x > max_x:
-                max_x = x
+                if x < x_thresh:
+                    max_x = x
             if y > max_y:
                 max_y = y
             if z > max_z:

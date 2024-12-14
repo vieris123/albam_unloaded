@@ -12,7 +12,6 @@ from albam.vfs import (
 )
 from .import_panel import ALBAM_UL_VirtualFileSystemUIBase
 
-
 @blender_registry.register_blender_prop_albam(name="export_settings")
 class AlbamExportSettings(bpy.types.PropertyGroup):
     # remove suffix added by blender when there are duplicate material names.

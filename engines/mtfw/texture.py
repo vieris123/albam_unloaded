@@ -145,6 +145,7 @@ APPID_SERIALIZE_MAPPER = {
     "re0": lambda: _serialize_texture_21,
     "re1": lambda: _serialize_texture_21,
     "re5": lambda: _serialize_texture_156,
+    "dmc4": lambda: _serialize_texture_156,
     "re6": lambda: _serialize_texture_21,
     "rev1": lambda: _serialize_texture_21,
     "rev2": lambda: _serialize_texture_21,

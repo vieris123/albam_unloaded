@@ -27,6 +27,7 @@ MTFW_SHADER_NODEGROUP_NAME = "MT Framework shader"
 
 MAPPER_SERIALIZE_FUNCS = {
     156: lambda: _serialize_materials_data_156,
+    153: lambda: _serialize_materials_data_156,
     210: lambda: _serialize_materials_data_21,
     211: lambda: _serialize_materials_data_21,
     212: lambda: _serialize_materials_data_21,
@@ -353,7 +354,7 @@ def _serialize_materials_data_156(model_asset, bl_materials, exported_textures, 
         mat.func_reserved = 0
         mat.func_reserved2 = 0
         mat.reserved1 = 0
-        mat.reserved2 = 0
+        mat.reserved2 = [0, 0] # NOTE: STUPID
         dst_mod.materials_data.materials.append(mat)
         exported_materials_map[bl_mat.name] = mat_idx
 
