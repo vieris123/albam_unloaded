@@ -1007,6 +1007,12 @@ class Mod153(ReadWriteKaitaiStruct):
                 elif _on == 4:
                     pass
                     self.vertices[i]._fetch_instances()
+                elif _on == 6:
+                    pass
+                    self.vertices[i]._fetch_instances()
+                elif _on == 7:
+                    pass
+                    self.vertices[i]._fetch_instances()
                 elif _on == 1:
                     pass
                     self.vertices[i]._fetch_instances()
@@ -1014,6 +1020,9 @@ class Mod153(ReadWriteKaitaiStruct):
                     pass
                     self.vertices[i]._fetch_instances()
                 elif _on == 5:
+                    pass
+                    self.vertices[i]._fetch_instances()
+                elif _on == 8:
                     pass
                     self.vertices[i]._fetch_instances()
                 elif _on == 2:
@@ -1149,9 +1158,19 @@ class Mod153(ReadWriteKaitaiStruct):
                     _t__m_vertices = Mod153.VfSkin(self._io, self, self._root)
                     _t__m_vertices._read()
                     self._m_vertices.append(_t__m_vertices)
-                elif _on == 1:
+                elif _on == 6:
                     pass
                     _t__m_vertices = Mod153.VfNonSkin(self._io, self, self._root)
+                    _t__m_vertices._read()
+                    self._m_vertices.append(_t__m_vertices)
+                elif _on == 7:
+                    pass
+                    _t__m_vertices = Mod153.VfSkinEx(self._io, self, self._root)
+                    _t__m_vertices._read()
+                    self._m_vertices.append(_t__m_vertices)
+                elif _on == 1:
+                    pass
+                    _t__m_vertices = Mod153.VfSkinEx(self._io, self, self._root)
                     _t__m_vertices._read()
                     self._m_vertices.append(_t__m_vertices)
                 elif _on == 3:
@@ -1164,9 +1183,14 @@ class Mod153(ReadWriteKaitaiStruct):
                     _t__m_vertices = Mod153.VfSkin(self._io, self, self._root)
                     _t__m_vertices._read()
                     self._m_vertices.append(_t__m_vertices)
+                elif _on == 8:
+                    pass
+                    _t__m_vertices = Mod153.VfNonSkinCol(self._io, self, self._root)
+                    _t__m_vertices._read()
+                    self._m_vertices.append(_t__m_vertices)
                 elif _on == 2:
                     pass
-                    _t__m_vertices = Mod153.VfSkinEx(self._io, self, self._root)
+                    _t__m_vertices = Mod153.VfNonSkin(self._io, self, self._root)
                     _t__m_vertices._read()
                     self._m_vertices.append(_t__m_vertices)
 
@@ -1190,6 +1214,12 @@ class Mod153(ReadWriteKaitaiStruct):
                 elif _on == 4:
                     pass
                     self.vertices[i]._write__seq(self._io)
+                elif _on == 6:
+                    pass
+                    self.vertices[i]._write__seq(self._io)
+                elif _on == 7:
+                    pass
+                    self.vertices[i]._write__seq(self._io)
                 elif _on == 1:
                     pass
                     self.vertices[i]._write__seq(self._io)
@@ -1197,6 +1227,9 @@ class Mod153(ReadWriteKaitaiStruct):
                     pass
                     self.vertices[i]._write__seq(self._io)
                 elif _on == 5:
+                    pass
+                    self.vertices[i]._write__seq(self._io)
+                elif _on == 8:
                     pass
                     self.vertices[i]._write__seq(self._io)
                 elif _on == 2:
@@ -1225,6 +1258,18 @@ class Mod153(ReadWriteKaitaiStruct):
                         raise kaitaistruct.ConsistencyError(u"vertices", self.vertices[i]._root, self._root)
                     if self.vertices[i]._parent != self:
                         raise kaitaistruct.ConsistencyError(u"vertices", self.vertices[i]._parent, self)
+                elif _on == 6:
+                    pass
+                    if self.vertices[i]._root != self._root:
+                        raise kaitaistruct.ConsistencyError(u"vertices", self.vertices[i]._root, self._root)
+                    if self.vertices[i]._parent != self:
+                        raise kaitaistruct.ConsistencyError(u"vertices", self.vertices[i]._parent, self)
+                elif _on == 7:
+                    pass
+                    if self.vertices[i]._root != self._root:
+                        raise kaitaistruct.ConsistencyError(u"vertices", self.vertices[i]._root, self._root)
+                    if self.vertices[i]._parent != self:
+                        raise kaitaistruct.ConsistencyError(u"vertices", self.vertices[i]._parent, self)
                 elif _on == 1:
                     pass
                     if self.vertices[i]._root != self._root:
@@ -1238,6 +1283,12 @@ class Mod153(ReadWriteKaitaiStruct):
                     if self.vertices[i]._parent != self:
                         raise kaitaistruct.ConsistencyError(u"vertices", self.vertices[i]._parent, self)
                 elif _on == 5:
+                    pass
+                    if self.vertices[i]._root != self._root:
+                        raise kaitaistruct.ConsistencyError(u"vertices", self.vertices[i]._root, self._root)
+                    if self.vertices[i]._parent != self:
+                        raise kaitaistruct.ConsistencyError(u"vertices", self.vertices[i]._parent, self)
+                elif _on == 8:
                     pass
                     if self.vertices[i]._root != self._root:
                         raise kaitaistruct.ConsistencyError(u"vertices", self.vertices[i]._root, self._root)

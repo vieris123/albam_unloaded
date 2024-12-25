@@ -301,11 +301,14 @@ types:
           switch-on: _root.materials_data.materials[idx_material].vtype
           cases:
             0: vf_skin
-            1: vf_non_skin
-            2: vf_skin_ex
+            1: vf_skin_ex
+            2: vf_non_skin
             3: vf_non_skin_col
             4: vf_skin # shape
             5: vf_skin # skin color?
+            6: vf_non_skin
+            7: vf_skin_ex
+            8: vf_non_skin_col
             
       vertices2:
         pos: _root.header.offset_vertex_buffer_2 + (vertex_position_2 * vertex_stride_2) + vertex_offset_2

@@ -34,13 +34,18 @@ class AlbamAction(bpy.types.Action):
 # HACKY_BONE_INDEX_IK_FOOT_RIGHT = 19
 # HACKY_BONE_INDEX_IK_FOOT_LEFT = 23
 HACKY_BONE_INDEX_IK_FOOT_RIGHT = 16
+RIGHT_LEG_BONE0 = 14
+RIGHT_LEG_BONE1 = 15
 HACKY_BONE_INDEX_IK_FOOT_LEFT = 20
+LEFT_LEG_BONE0 = 18
+LEFT_LEG_BONE1 = 19
 IK_HIPS = 0
 HACKY_BONE_INDICES_IK_FOOT = {HACKY_BONE_INDEX_IK_FOOT_RIGHT, HACKY_BONE_INDEX_IK_FOOT_LEFT}
 ROOT_UNK_BONE_ID = 254
 ROOT_MOTION_BONE_ID = 255
 ROOT_MOTION_BONE_NAME = 'root_motion'
 ROOT_BONE_NAME = '0'
+ROOT_BONE_RENAMED = 'root'
 FRAMERATE = 60.0
 
 @blender_registry.register_import_function(app_id="re5", extension='lmt', file_category="ANIMATION")
@@ -50,7 +55,10 @@ def load_lmt(file_item, context):
     lmt = Lmt(KaitaiStream(io.BytesIO(lmt_bytes)))
     lmt._read()
     armature = context.scene.albam.import_options_lmt.armature
+    renamed_bone_flag = context.scene.albam.import_options_lmt.renamed_bone_flag
     mapping = _create_bone_mapping(armature)
+
+    context.scene.render.fps = FRAMERATE
 
     # DEBUG_BLOCK = 2
     DEBUG_BLOCK = None
@@ -63,15 +71,22 @@ def load_lmt(file_item, context):
         armature.animation_data_create()
         name = f"{armature.name}.{file_item.display_name}.{str(block_index).zfill(4)}"
         action = bpy.data.actions.new(name)
+
+
         #Events
         cumulative_frames = 0
         for event in block.block_header.events_01:
-            marker = action.pose_markers.new(str(event.group_id))
-            marker.frame = event.frame - 1
+            marker = action.pose_markers.new('ev1_'+str(event.group_id))
+            cumulative_frames += event.frame - 1 or 0
+            marker.frame = cumulative_frames
 
+        cumulative_frames = 0
         for event in block.block_header.events_02:
-            marker = action.pose_markers.new(str(event.group_id))
-            marker.frame = event.frame - 1
+            marker = action.pose_markers.new('ev2_'+str(event.group_id))
+            cumulative_frames += event.frame - 1 or 0
+            marker.frame = cumulative_frames
+
+
         #Loops
         is_cyclic = False
         if block.block_header.loop_frames > 0:
@@ -80,6 +95,8 @@ def load_lmt(file_item, context):
             #action.use_frame_range = True
             #action.frame_range = Vector([block.block_header.loop_frames, block.block_header.num_frames])
         
+
+
         action.use_fake_user = True
         context.scene.albam.import_options_lmt.armature.animation_data.action = action
         for track_index, track in enumerate(block.block_header.tracks):
@@ -105,10 +122,6 @@ def load_lmt(file_item, context):
                 decoded_frames = _parent_space_to_local_rot(decoded_frames, armature, bone_index)
 
             elif track.buffer_type == 4:
-                # TRACK_MODE = "rotation_euler"
-                # decoded_frames = decode_type_4_euler(track.data)
-                # world_pos_fix(decoded_frames)
-
                 TRACK_MODE = "rotation_quaternion"
                 decoded_frames = decode_type_4(track.data)
                 decoded_frames = _parent_space_to_local_rot(decoded_frames, armature, bone_index)
@@ -123,7 +136,6 @@ def load_lmt(file_item, context):
                     TRACK_MODE = 'scale'
                     decoded_frames = decode_type_2_scale(track.data)
                     world_pos_fix(decoded_frames)
-                    #_parent_space_to_local(decoded_frames, armature, bone_index)
                 elif track.usage == 4:
                     TRACK_MODE = 'location'
                     decoded_frames = decode_type_2(track.data)
@@ -132,26 +144,21 @@ def load_lmt(file_item, context):
                     continue
 
             elif track.buffer_type == 9:
-                #decoded_frames = decode_type_9(track.data, block.block_header.num_frames)
                 print(f'Buffer type 9 track type {track.usage}')
                 if track.usage == 1:
                     TRACK_MODE = 'location'
                     decoded_frames = decode_type_9(track.data)
-                    #decoded_frames = decode_type_9(track.data, block.block_header.num_frames)
                     decoded_frames = _parent_space_to_local(decoded_frames, armature, bone_index)
                 elif track.usage == 2:
                     TRACK_MODE = 'scale'
                     decoded_frames = decode_type_9_scale(track.data)
                     world_pos_fix(decoded_frames)
-                    #_parent_space_to_local(decoded_frames, armature, bone_index)
                 elif track.usage == 4:
                     TRACK_MODE = 'location'
-                    #decoded_frames = decode_type_9(track.data)
                     decoded_frames = decode_type_9(track.data)
                     world_pos_fix(decoded_frames)
                 else:
                     continue
-                #decoded_frames = _parent_space_to_local(decoded_frames, armature, bone_index)
 
             else:
                 # TODO: print statistics of missing tracks
@@ -160,7 +167,12 @@ def load_lmt(file_item, context):
 
             group_name = str(bone_index)
             group = action.groups.get(group_name) or action.groups.new(group_name)
-            data_path = f"pose.bones[\"{bone_index}\"].{TRACK_MODE}"
+
+            #TOGGLE RENAMED BONES
+            if renamed_bone_flag:
+                data_path = f"pose.bones[\"{armature.data.bones[bone_index].name}\"].{TRACK_MODE}"
+            else:
+                data_path = f"pose.bones[\"{bone_index}\"].{TRACK_MODE}"
             try:
                 num_curv = len(decoded_frames[0])
             except IndexError:
@@ -195,14 +207,18 @@ def load_lmt(file_item, context):
 
 def _create_bone_mapping(armature_obj):
     mapping = {}
+
     for b_idx, mapped_bone in enumerate(armature_obj.data.bones):
         reference_bone_id = mapped_bone.get('mtfw.anim_retarget')  # TODO: better name
+
         if reference_bone_id is None:
             print(f"WARNING: {armature_obj.name}->{mapped_bone.name} doesn't contain a mapped bone")
             continue
+
         if reference_bone_id in mapping:
             print(f"WARNING: bone_id {b_idx} already mapped. TODO")
         mapping[reference_bone_id] = b_idx
+        
     return mapping
 
 class FrameQuat4_14(Structure):
@@ -256,41 +272,6 @@ class FrameQuat4_14(Structure):
 
         if self._z_sign:
             self.z *= -1.0
-
-
-# def decode_type_9(data, num_frames):
-#     decoded_frames = []
-#     CHUNK_SIZE = 16
-#     frame_count = 0
-#     remaining_frames = num_frames
-#     for start in range(0, len(data) - CHUNK_SIZE, CHUNK_SIZE):
-#         chunk1 = data[start: start + CHUNK_SIZE]
-#         chunk2 = data[start + CHUNK_SIZE: start + CHUNK_SIZE*2]
-#         u1 = struct.unpack("fffI", chunk1)
-#         floats1 = u1[:3]
-#         duration = u1[3]
-
-#         u2 = struct.unpack("fffI", chunk1)
-#         floats2 = u2[:3]
-
-#         keyframes = []
-#         for i in range(duration-1):
-#             x = (floats2[0] - floats1[0]) * (frame_count + i - remaining_frames) + floats1[0]
-#             y = (floats2[1] - floats1[1]) * (frame_count + i - remaining_frames) + floats1[1]
-#             z = (floats2[2] - floats1[2]) * (frame_count + i - remaining_frames) + floats1[2]
-#             keyframes.append([x / 1000.0, y / 1000.0, z / 1000.0])
-
-#         #floats = (u[0] / 100, u[1] / 100, u[2] / 100)
-#         #
-#         # decoded_frames.append(floats)
-#         # decoded_frames.extend([None] * (duration - 1))
-
-#         decoded_frames.extend(keyframes)
-
-#         frame_count += duration
-#         remaining_frames -= duration
-
-#     return decoded_frames
 
 def decode_type_9(data):
     decoded_frames = []
@@ -352,7 +333,7 @@ def decode_type_4(data):
         if (w < 0.0):
             w = 0.0
         w = np.sqrt(w)
-        #floats = list(quat_fix(mathutils.Quaternion([w, u[0], u[1], u[2]])))
+
         floats= (w, u[0], u[1], u[2])
         decoded_frames.append(floats)
     return decoded_frames
@@ -381,23 +362,10 @@ def decode_type_6(data):
         io.BytesIO(chunk).readinto(frame)
         frame.calc_components()
 
-        #decoded_frames.append(list(quat_fix(mathutils.Quaternion([frame.w, frame.x, frame.y, frame.z]))))
         decoded_frames.append((frame.w, frame.x, frame.y, frame.z))
         decoded_frames.extend([None] * frame.duration)
 
     return decoded_frames
-
-def quat_fix(quat):
-    mat_l2r = mathutils.Matrix([[1.0, 0.0, 0.0],
-                                [0.0, 0.0, 1.0],
-                                [0.0, -1.0, 0.0]])
-    mat_r2l = mat_l2r.inverted()
-
-    #m_rot = mat_l2r @ Vector((quat.x, quat.y, quat.z, quat.w)) @ mat_l2r
-    m_rot = (mat_l2r @ quat.to_matrix()).to_quaternion()
-    return m_rot
-    #return Quaternion((-quat.w, quat.x, quat.y, quat.z))
-
 
 
 def _get_or_create_ik_bone(armature, track_bone_index, bone_index):
@@ -458,7 +426,10 @@ def _get_or_create_root_motion_bone(armature):
     blender_bone.tail[2] += 0.01
     bpy.ops.object.mode_set(mode='OBJECT')
 
-    pose_bone = armature.pose.bones[ROOT_BONE_NAME]
+    if armature.pose.bones[ROOT_BONE_NAME] is not None:
+        pose_bone = armature.pose.bones[ROOT_BONE_NAME]
+    else:
+        pose_bone = armature.pose.bones[ROOT_BONE_RENAMED]
     constraint = pose_bone.constraints.new('COPY_LOCATION')
     constraint.target = armature
     constraint.subtarget = bone_name
@@ -489,6 +460,7 @@ def _parent_space_to_local(decoded_frames, armature, bone_index):
         local_space_frames.append(local_space_frame)
     return local_space_frames
 
+
 def _parent_space_to_local_rot(decoded_frames, armature, bone_index):
     local_space_frames = []
     for frame in decoded_frames:
@@ -510,27 +482,12 @@ def _parent_space_to_local_rot(decoded_frames, armature, bone_index):
         local_space_frames.append(local_space_frame)
     return local_space_frames
 
+
 def world_pos_fix(decoded_frames):
     for frame in decoded_frames:
         if frame is not None:
             frame = ([frame[2], frame[1], frame[0]])
 
-# def _parent_space_to_local(decoded_frames, armature, bone_index):
-# # XXX Temp hack
-#     local_space_frames = []
-#     for frame in decoded_frames:
-#         if frame is None:
-#             local_space_frames.append(None)
-#             continue
-#         bone = armature.data.bones[bone_index]
-#         v = armature.matrix_world
-#         v = (v[0], v[2], -v[1])
-#         parent_space = Matrix.Identity(4).inverted() @ Matrix.Translation(v)
-#         transform_mat = Matrix.Translation([frame[0], frame[2],-frame[1]])
-#         translation = bone
-#         local_space_frame = (bone.convert).to_translation()
-#         local_space_frames.append(local_space_frame)
-#         return local_space_frames
 
 def slerp(start: Quaternion, end: Quaternion, delta):
     end_copy = end.copy()
@@ -578,14 +535,24 @@ def slerp_eval(track, block, frame_data, time):
             frame -= 1
             frameDelta -= 1.0    
 
-@blender_registry.register_export_function(app_id="dmc4", extension="lmt")
-def export_lmt():
-    export_settings = bpy.context.scene.albam.export_settings
-    asset = bl_obj.albam_asset
-    app_id = asset.app_id
-    Mod = APPID_CLASS_MAPPER[app_id]
-    vfiles = []
-    pass
+# class AlbamAction(bpy.types.Action):
+#     pass
+
+class Lmt49Action(bpy.types.PropertyGroup):
+    anim: bpy.types.CollectionProperty(type=AlbamAction)
+    name: bpy.types.StringProperty()
+    lmt_id: bpy.types.IntProperty('LMT index')
+    coll_ev: bpy.types.ListProperty()
+    sfx_ev: bpy.types.ListProperty()
+
+# @blender_registry.register_export_function(app_id="dmc4", extension="lmt")
+# def export_lmt():
+#     export_settings = bpy.context.scene.albam.export_settings
+#     asset = bl_obj.albam_asset
+#     app_id = asset.app_id
+#     Mod = APPID_CLASS_MAPPER[app_id]
+#     vfiles = []
+#     pass
 
 def filter_armatures(self, obj):
     # TODO: filter by custom properties that indicate is
@@ -595,13 +562,14 @@ def filter_armatures(self, obj):
 @blender_registry.register_blender_prop_albam(name='import_options_lmt')
 class ImportOptionsLMT(bpy.types.PropertyGroup):
     armature: bpy.props.PointerProperty(type=bpy.types.Object, poll=filter_armatures)
+    renamed_bone_flag: bpy.props.BoolProperty(name = 'Renamed bones')
 
 
 @blender_registry.register_import_options_custom_draw_func(extension='lmt')
 def draw_lmt_options(panel_instance, context):
     panel_instance.bl_label = "LMT Options"
     panel_instance.layout.prop(context.scene.albam.import_options_lmt, 'armature')
-
+    panel_instance.layout.prop(context.scene.albam.import_options_lmt, 'renamed_bone_flag')
 
 @blender_registry.register_import_options_custom_poll_func(extension='lmt')
 def poll_lmt_options(panel_instance, context):

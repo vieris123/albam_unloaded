@@ -984,26 +984,65 @@ def _serialize_bones_data(bl_obj, bl_meshes, src_mod, dst_mod, bone_palettes=Non
         m = dst_mod.Matrix4x4(_parent=bones_data, _root=bones_data._root)
         src_m = src_mod.bones_data.parent_space_matrices[i]
 
-        m.row_1 = dst_mod.Vec4(_parent=m, _root=m._root)
-        m.row_1.x = src_m.row_1.x
-        m.row_1.y = src_m.row_1.y
-        m.row_1.z = src_m.row_1.z
-        m.row_1.w = src_m.row_1.w
-        m.row_2 = dst_mod.Vec4(_parent=m, _root=m._root)
-        m.row_2.x = src_m.row_2.x
-        m.row_2.y = src_m.row_2.y
-        m.row_2.z = src_m.row_2.z
-        m.row_2.w = src_m.row_2.w
-        m.row_3 = dst_mod.Vec4(_parent=m, _root=m._root)
-        m.row_3.x = src_m.row_3.x
-        m.row_3.y = src_m.row_3.y
-        m.row_3.z = src_m.row_3.z
-        m.row_3.w = src_m.row_3.w
-        m.row_4 = dst_mod.Vec4(_parent=m, _root=m._root)
-        m.row_4.x = src_m.row_4.x
-        m.row_4.y = src_m.row_4.y
-        m.row_4.z = src_m.row_4.z
-        m.row_4.w = src_m.row_4.w
+        bl_bone = bl_obj.data.bones[str(i)]
+        bl_p_bone = bl_bone.parent
+
+        transform = Matrix([[-1.0, 0.0, 0.0, 0.0],
+                    [0.0, 0.0, -1.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0]])
+
+        if bl_p_bone is None:
+            m.row_1 = dst_mod.Vec4(_parent=m, _root=m._root)
+            m.row_1.x = src_m.row_1.x
+            m.row_1.y = src_m.row_1.y
+            m.row_1.z = src_m.row_1.z
+            m.row_1.w = src_m.row_1.w
+
+            m.row_2 = dst_mod.Vec4(_parent=m, _root=m._root)
+            m.row_2.x = src_m.row_2.x
+            m.row_2.y = src_m.row_2.y
+            m.row_2.z = src_m.row_2.z
+            m.row_2.w = src_m.row_2.w
+
+            m.row_3 = dst_mod.Vec4(_parent=m, _root=m._root)
+            m.row_3.x = src_m.row_3.x
+            m.row_3.y = src_m.row_3.y
+            m.row_3.z = src_m.row_3.z
+            m.row_3.w = src_m.row_3.w
+
+            m.row_4 = dst_mod.Vec4(_parent=m, _root=m._root)
+            m.row_4.x = src_m.row_4.x
+            m.row_4.y = src_m.row_4.y
+            m.row_4.z = src_m.row_4.z
+            m.row_4.w = src_m.row_4.w
+        else:
+            parent_mat = (bl_p_bone.matrix_local.inverted() @ bl_bone.matrix_local).transposed()
+            #inverse_mat = transform @ bl_bone.matrix_local
+
+            m.row_1 = dst_mod.Vec4(_parent=m, _root=m._root)
+            m.row_1.x = parent_mat[0][0]
+            m.row_1.y = parent_mat[0][1]
+            m.row_1.z = parent_mat[0][2]
+            m.row_1.w = parent_mat[0][3]
+
+            m.row_2 = dst_mod.Vec4(_parent=m, _root=m._root)
+            m.row_2.x = parent_mat[1][0]
+            m.row_2.y = parent_mat[1][1]
+            m.row_2.z = parent_mat[1][2]
+            m.row_2.w = parent_mat[1][3]
+
+            m.row_3 = dst_mod.Vec4(_parent=m, _root=m._root)
+            m.row_3.x = parent_mat[2][0]
+            m.row_3.y = parent_mat[2][1]
+            m.row_3.z = parent_mat[2][2]
+            m.row_3.w = parent_mat[2][3]
+
+            m.row_4 = dst_mod.Vec4(_parent=m, _root=m._root)
+            m.row_4.x = parent_mat[3][0] * 100
+            m.row_4.y = parent_mat[3][1] * 100
+            m.row_4.z = parent_mat[3][2] * 100
+            m.row_4.w = parent_mat[3][3]
 
         # TODO: be concise with struct (e.g. array of floats)
         m2 = dst_mod.Matrix4x4(_parent=bones_data, _root=bones_data._root)
@@ -1031,6 +1070,34 @@ def _serialize_bones_data(bl_obj, bl_meshes, src_mod, dst_mod, bone_palettes=Non
             m2.row_4.x = r4x + dst_bbox_data.min_x
             m2.row_4.y = r4y + dst_bbox_data.min_y
             m2.row_4.z = r4z + dst_bbox_data.min_z
+
+        elif bl_p_bone is not None:
+            inverse_mat = (transform @ bl_bone.matrix_local).transposed()
+
+            m2.row_1 = dst_mod.Vec4(_parent=m, _root=m._root)
+            m2.row_1.x = -inverse_mat[0][0]
+            m2.row_1.y = inverse_mat[0][1]
+            m2.row_1.z = inverse_mat[0][2]
+            m2.row_1.w = inverse_mat[0][3]
+
+            m2.row_2 = dst_mod.Vec4(_parent=m, _root=m._root)
+            m2.row_2.x = inverse_mat[1][0]
+            m2.row_2.y = -inverse_mat[1][1]
+            m2.row_2.z = inverse_mat[1][2]
+            m2.row_2.w = inverse_mat[1][3]
+
+            m2.row_3 = dst_mod.Vec4(_parent=m, _root=m._root)
+            m2.row_3.x = inverse_mat[2][0]
+            m2.row_3.y = inverse_mat[2][1]
+            m2.row_3.z = -inverse_mat[2][2]
+            m2.row_3.w = inverse_mat[2][3]
+
+            m2.row_4 = dst_mod.Vec4(_parent=m, _root=m._root)
+            m2.row_4.x = inverse_mat[3][0] * 100
+            m2.row_4.y = inverse_mat[3][1] * 100
+            m2.row_4.z = inverse_mat[3][2] * 100
+            m2.row_4.w = inverse_mat[3][3]
+
         else:
             m2.row_1.x = src_m2.row_1.x
             m2.row_2.y = src_m2.row_2.y
@@ -1039,19 +1106,20 @@ def _serialize_bones_data(bl_obj, bl_meshes, src_mod, dst_mod, bone_palettes=Non
             m2.row_4.y = src_m2.row_4.y
             m2.row_4.z = src_m2.row_4.z
 
-        m2.row_1.y = src_m2.row_1.y
-        m2.row_1.z = src_m2.row_1.z
-        m2.row_1.w = src_m2.row_1.w
+            m2.row_1.y = src_m2.row_1.y
+            m2.row_1.z = src_m2.row_1.z
+            m2.row_1.w = src_m2.row_1.w
 
-        m2.row_2.x = src_m2.row_2.x
-        m2.row_2.z = src_m2.row_2.z
-        m2.row_2.w = src_m2.row_2.w
+            m2.row_2.x = src_m2.row_2.x
+            m2.row_2.z = src_m2.row_2.z
+            m2.row_2.w = src_m2.row_2.w
 
-        m2.row_3.x = src_m2.row_3.x
-        m2.row_3.y = src_m2.row_3.y
-        m2.row_3.w = src_m2.row_3.w
+            m2.row_3.x = src_m2.row_3.x
+            m2.row_3.y = src_m2.row_3.y
+            m2.row_3.w = src_m2.row_3.w
 
-        m2.row_4.w = src_m2.row_4.w
+            m2.row_4.w = src_m2.row_4.w
+
 
         bones_data.bones_hierarchy.append(bone)
         bones_data.parent_space_matrices.append(m)
