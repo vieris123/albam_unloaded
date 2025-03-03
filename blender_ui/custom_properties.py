@@ -199,7 +199,7 @@ def AlbamCustomPropertiesFactory(kind: str):
 
     # missing bl_label and bl_idname in cls dict?
     # https://projects.blender.org/blender/blender/issues/86719#issuecomment-232525
-    assert kind in ("mesh", "material", "image")
+    assert kind in ("mesh", "material", "image","action")
     data, appid_map, appid_map_secondary = create_data_custom_properties(f"custom_properties_{kind}")
 
     return type(
@@ -318,6 +318,16 @@ class ALBAM_PT_CustomPropertiesMesh(ALBAM_PT_CustomPropertiesBase):
     bl_region_type = 'WINDOW'
     bl_context = "data"
     CONTEXT_ITEM_NAME = "mesh"
+
+
+@blender_registry.register_blender_type
+class ALBAM_PT_CustomPropertiesAction(ALBAM_PT_CustomPropertiesBase):
+    bl_idname = "ALBAM_PT_CustomPropertiesAction"
+    bl_space_type = 'DOPESHEET_EDITOR'
+    bl_region_type = 'WINDOW'
+    bl_context = "data"
+    CONTEXT_ITEM_NAME = "action"
+
 
 
 @blender_registry.register_blender_prop_albam(name="clipboard")

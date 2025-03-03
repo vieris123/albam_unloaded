@@ -7,12 +7,14 @@ class BlenderRegistry:
         self.archive_accessor_registry = {}
         self.props = []  # order is meaningful for dependencies
         self.types = []  # order is meaningufl for dependencies
+        self.prop_types = []
         self.import_options_custom_draw_funcs = {}
         self.import_options_custom_poll_funcs = {}
         self.import_operator_poll_funcs = {}
         self.custom_properties_material = {}
         self.custom_properties_mesh = {}
         self.custom_properties_image = {}
+        self.custom_properties_action = {}
         self.file_categories = {}
 
     def register_blender_prop_albam(self, name):
@@ -32,6 +34,12 @@ class BlenderRegistry:
     def register_blender_type(self, cls):
         self.types.append(cls)
         return cls
+
+    def register_blender_props_to_type(self, type, name):
+        def decorator(cls):
+            self.prop_types.append((type, name, cls))
+            return cls
+        return decorator
 
     def register_import_options_custom_draw_func(self, extension):
         def decorator(f):
@@ -108,6 +116,13 @@ class BlenderRegistry:
         def decorator(cls):
             for app_id in app_ids:
                 self.custom_properties_image.setdefault(app_id, {})[name] = (cls, is_secondary, display_name)
+            return cls
+        return decorator
+
+    def register_custom_properties_action(self, name, app_ids, is_secondary=False, display_name=""):
+        def decorator(cls):
+            for app_id in app_ids:
+                self.custom_properties_action.setdefault(app_id, {})[name] = (cls, is_secondary, display_name)
             return cls
         return decorator
 

@@ -115,6 +115,43 @@ class ALBAM_PT_VGMerger(bpy.types.Panel):
         else:
             return False
 
+@blender_registry.register_blender_type
+class ALBAM_PT_FACE_PROP(bpy.types.Panel):
+    '''UI Tool subpanel in Mesh Object Data'''
+    bl_label = "Face properties"
+    bl_idname = "ALBAM_PT_FACE_PROP"
+    bl_parent_id = "ALBAM_PT_ToolsPanel"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        
+        ob = context.edit_object
+        bm = bmesh.from_edit_mesh(ob.data)
+
+        group = bm.faces.layers.int.get('group')
+        surface_attr = bm.faces.layers.int.get('surface_attr')
+        special_attr = bm.faces.layers.int.get('special_attr')
+
+        for f in bm.faces:
+            if f.select:
+                layout.label(text=f'Index: {f.index}')
+                layout.label(text=f'Group: {f[group]}')
+                layout.label(text=f'Surface attribute: {hex(f[surface_attr])}')
+                layout.label(text=f'Special attribute: {hex(f[special_attr])}')
+
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.edit_object
+        if ob:
+            return True
+        else:
+            return False
+        
+
 
 @blender_registry.register_blender_type
 class ALBAM_OT_SplitUVSeams(bpy.types.Operator):

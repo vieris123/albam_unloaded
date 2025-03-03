@@ -1,5 +1,5 @@
 meta:
-  id: mtframework_sbc
+  id: sbc_156
   file-extension: sbc
   endian: le
   title:  Resident Evil 5 (MTFramework) collision format
@@ -38,14 +38,14 @@ types:
 
   re5triangle: #28 bytes
     seq:
-      - {id: a, type: u2}
-      - {id: b, type: u2}
-      - {id: c, type: u2}
+      - {id: vert, type: u2, repeat: expr, repeat-expr: 3}
       - {id: unk_00, type: u1}
       - {id: unk_01, type: u1}
-      - {id: unk_02, type: u4} # 1 in scr  16 64 128 in eff
-      - {id: unk_eff, type: u4} # 32 64 128
-      - {id: nulls, type: u4, repeat: expr, repeat-expr: 3}
+      - {id: runtime_attr, type: u4} # 1 in scr  16 64 128 in eff
+      - {id: type, type: u4} # 32 64 128
+      - {id: special_attr, type: u4}
+      - {id: surface_attr, type: u4}
+      - {id: unk_02, type: u4}
   
   re5boxes: # 80 bytes
     seq:

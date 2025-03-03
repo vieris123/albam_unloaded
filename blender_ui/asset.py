@@ -11,6 +11,7 @@ class AlbamAsset(bpy.types.PropertyGroup):
     relative_path : bpy.props.StringProperty()
     extension: bpy.props.StringProperty()
     render_target: bpy.props.BoolProperty(default=False)
+    lmt_index: bpy.props.IntProperty(name='LMT slot',default=0)
 
 
 @blender_registry.register_blender_type
@@ -53,3 +54,21 @@ class ALBAM_PT_AssetImage(bpy.types.Panel):
     @classmethod
     def poll(cls, context):  # pragma: no cover
         return bool(context.space_data.image)
+
+class ALBAM_PT_AssetAnim(bpy.types.Panel):
+    bl_label = "Albam Asset"
+    bl_space_type = "DOPESHEET_EDITOR"
+    bl_region_type = "UI"
+    bl_category = "Albam"
+
+    def draw(self, context):  # pragma: no cover
+        action = context.space_data.action
+
+        self.layout.row().prop(im.albam_asset, "app_id")
+        self.layout.row().prop(im.albam_asset, "relative_path")
+        self.layout.row().prop(im.albam_asset, "render_target")
+
+        app_id = im.albam_asset.app_id
+        custom_props = im.albam_custom_properties.get_custom_properties_for_appid(app_id)
+        for k in custom_props.__annotations__:
+            self.layout.prop(custom_props, k)

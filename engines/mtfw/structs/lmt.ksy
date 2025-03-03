@@ -34,7 +34,7 @@ types:
       - {id: ofs_frame, type: u4}
       - {id: num_tracks, type: u4}
       - {id: num_frames, type: u4}
-      - {id: loop_frames, type: u4}
+      - {id: loop_frames, type: s4}
       - {id: end_pos, type: vec4}
       - {id: end_quat, type: vec4}
       - {id: events_params_01, type: u2, repeat: expr, repeat-expr: 32}
@@ -44,10 +44,12 @@ types:
       - {id: num_events_02, type: u4}
       - {id: event_buffer_02, type: u4}
     instances:
+      size_:
+        value: 0xC0
       tracks:
         {pos: ofs_frame, type: track49, repeat: expr, repeat-expr: num_tracks}
       events_01:
-        {pos: event_buffer_01, type: event49, repeat: expr, repeat-expr: num_evens_01}
+        {pos: event_buffer_01, type: event49, repeat: expr, repeat-expr: num_events_01}
       events_02:
         {pos: event_buffer_02, type: event49, repeat: expr, repeat-expr: num_events_02}
     
@@ -57,11 +59,13 @@ types:
       - {id: usage, type: u1}
       - {id: joint_type, type: u1}
       - {id: bone_index, type: u1}
-      - {id: unk_01, type: f4}
+      - {id: weight, type: f4}
       - {id: len_data, type: u4}
       - {id: ofs_data, type: u4}
       - {id: ref_data, type: vec4}
     instances:
+      size_:
+        value: 0x20
       data:
         {pos: ofs_data, size: len_data}
   

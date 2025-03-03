@@ -35,6 +35,7 @@ def register():
     importlib.import_module("albam.blender_ui.export_panel")
     importlib.import_module("albam.engines.mtfw.animation")
     importlib.import_module("albam.engines.mtfw.archive")
+    importlib.import_module("albam.engines.mtfw.collision")
     importlib.import_module("albam.engines.mtfw.mesh")
     if os.getenv("ALBAM_ENABLE_REEN"):
         importlib.import_module("albam.engines.reng.archive")
@@ -44,6 +45,10 @@ def register():
     for _, cls in blender_registry.props:
         bpy.utils.register_class(cls)
 
+    for bpy_type, name, cls in blender_registry.prop_types:
+        bpy.utils.register_class(cls)
+        setattr(getattr(bpy.types, bpy_type), name, bpy.props.PointerProperty(type=cls))
+
     for cls in blender_registry.types:
         bpy.utils.register_class(cls)
 
@@ -51,19 +56,25 @@ def register():
     AlbamCustomPropertiesMaterial = AlbamCustomPropertiesFactory("material")
     AlbamCustomPropertiesMesh = AlbamCustomPropertiesFactory("mesh")
     AlbamCustomPropertiesImage = AlbamCustomPropertiesFactory("image")
+    AlbamCustomPropertiesAction = AlbamCustomPropertiesFactory("action")
+
     bpy.utils.register_class(AlbamData)
     bpy.utils.register_class(AlbamCustomPropertiesMaterial)
     bpy.utils.register_class(AlbamCustomPropertiesMesh)
     bpy.utils.register_class(AlbamCustomPropertiesImage)
+    bpy.utils.register_class(AlbamCustomPropertiesAction)
 
     bpy.types.Scene.albam = bpy.props.PointerProperty(type=AlbamData)
 
     bpy.types.Object.albam_asset = bpy.props.PointerProperty(type=AlbamAsset)
     bpy.types.Image.albam_asset = bpy.props.PointerProperty(type=AlbamAsset)
+    bpy.types.Action.albam_asset = bpy.props.PointerProperty(type=AlbamAsset)
 
     bpy.types.Material.albam_custom_properties = bpy.props.PointerProperty(type=AlbamCustomPropertiesMaterial)
     bpy.types.Mesh.albam_custom_properties = bpy.props.PointerProperty(type=AlbamCustomPropertiesMesh)
     bpy.types.Image.albam_custom_properties = bpy.props.PointerProperty(type=AlbamCustomPropertiesImage)
+    bpy.types.Action.albam_custom_properties = bpy.props.PointerProperty(type=AlbamCustomPropertiesAction)
+
 def cleanse_modules():
     for module_name in sorted(modules.keys()):
 
