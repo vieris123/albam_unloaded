@@ -179,6 +179,24 @@ class BinaryCluster(Cluster):
         qnode = QBVH(self, *children)
         return qnode
 
+    def binary_collapse(self):
+        if self.isPrimitive():
+            return BBVH(self)
+        children = []
+
+        def checkAddSide(side):
+            if side:
+                if side.isPrimitive():
+                    children.append(BBVH(side))
+                else:
+                    children.append(side.binary_collapse())
+        checkAddSide(self.l)
+        checkAddSide(self.r)
+        children += [BBVH(None) for i in range(2-len(children))]
+        # print(children)
+        qnode = BBVH(self, *children)
+        return qnode
+
 
 class QBVH():
     def __init__(self, binaryCluster, ll=None, lr=None, rl=None, rr=None):
@@ -355,7 +373,44 @@ class QBVH():
             self.separateTraverse()
         return self.traversalBuffer[1]
 
+class BBVH(QBVH):
+    def __init__(self, binaryCluster, l = None, r = None):
+        self.parent = None
+        if binaryCluster is None:
+            self.type = Cluster.EMPTY
+            self.node = None
+        else:
+            self.type = binaryCluster.type
+            self.node = binaryCluster
+            if not self.isPrimitive():
+                def check(x): return BBVH(None) if x is None else x
+                self.l = check(l)
+                self.r = check(r)
+    
+    def typeMask(self):
+        if not self.isNode():
+            raise NotImplementedError(
+                "Empties and Primitives don't have a type mask.")
+        else:
+            primitive, node = list(map(list, map(reversed, zip(
+                *[subnode.typePair() for subnode in [self.l, self.r]]))))
 
+            def lshiftOr(x, y): return (x << 1) | y
+            return [reduce(lshiftOr, primitive+node)]*4
+
+    def nodeId(self):
+        if not self.isNode():
+            raise NotImplementedError(
+                "Empties and Primitives don't have subnodes.")
+        else:
+            return [self.l.index(), self.r.index()]
+
+    def children(self):
+        if self.isNode():
+            return [self.l, self.r]
+        else:
+            return []
+        
 # =============================================================================
 # Exact Agglomerative Clustering O(N^3)
 # =============================================================================
@@ -645,6 +700,16 @@ def primitive_to_sbc(primitives, clusteringFunction=spatialSplits, **kwargs):
     indexize_ob(nodes)
     return npairPrimitives, PrimitiveTree(qtree).refine([vert for p in primitives for vert in p.vertices])
 
+def primitive_to_sbc156(primitives, clusteringFunction=spatialSplits, **kwargs):
+    indexize_ob(primitives, lambda x: x.dataFace)
+    indexize_ob(primitives)
+    btree = next(iter(clusteringFunction(primitives, **kwargs)))
+    btree = btree.binary_collapse()
+    indexize_ob(btree.subnodes())
+    npairPrimitives = mergerReindex(primitives, btree.subprimitives())
+    nodes, pairPrimitives = btree.separateTraverse()
+    indexize_ob(nodes)
+    return npairPrimitives, PrimitiveTree(btree).refine([vert for p in primitives for vert in p.vertices])
 
 def trees_to_sbc_col(tree_list, clusteringFunction=spatialSplits, **kwargs):
     indexize_ob(tree_list)

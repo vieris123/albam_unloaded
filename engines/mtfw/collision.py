@@ -327,18 +327,57 @@ def export_sbc(bl_obj):
         quadList.append(quads)
         sbcsList.append(sbc)
         mesh_metadata.append({"indexID": mesh["indexID"]})
-        parent_tree = bvh.trees_to_sbc_col(sbcsList, **options)
-        final_size, serialized = build_sbc(bl_obj, src_sbc, dst_sbc, vertList, trisList, quadList, sbcsList,
-                                           links, parent_tree, mesh_metadata)
-        stream = KaitaiStream(BytesIO(bytearray(final_size)))
-        dst_sbc._check()
-        dst_sbc._write(stream)
-        sbc_vf = VirtualFileData(app_id, asset.relative_path, data_bytes=stream.to_byte_array())
-        vfiles.append(sbc_vf)
+    parent_tree = bvh.trees_to_sbc_col(sbcsList, **options)
+    final_size, serialized = build_sbc(bl_obj, src_sbc, dst_sbc, vertList, trisList, quadList, sbcsList,
+                                        links, parent_tree, mesh_metadata)
+    stream = KaitaiStream(BytesIO(bytearray(final_size)))
+    dst_sbc._check()
+    dst_sbc._write(stream)
+    sbc_vf = VirtualFileData(app_id, asset.relative_path, data_bytes=stream.to_byte_array())
+    vfiles.append(sbc_vf)
     for clone in clones:
         common.delete_ob(clone)
     return vfiles
 
+
+@blender_registry.register_export_function(app_id="dmc4", extension="sbc")
+@blender_registry.register_export_function(app_id="re5", extension="sbc")
+def export_sbc156(bl_obj):
+    asset = bl_obj.albam_asset
+    app_id = asset.app_id
+    dst_sbc = Sbc156()
+
+    meshes = [c for c in bl_obj.children_recursive if c.type == "MESH"]
+    links = [c for c in bl_obj.children_recursive if c.type == "EMPTY"]
+    clones = [common.clone_mesh(mesh) for mesh in meshes]
+    clones = [mesh_rescale(clone) for clone in clones]
+
+    vertList = []
+    trisList = []
+    sbcsList = []
+    mesh_metadata = []
+    options = {"clusteringFunction": bvh.HybridClustering,
+               "metric": bvh.Cluster.SAHMetric,
+               "partition": bvh.morton_partition,
+               "mode": bvh.CAPCOM}
+    for mesh in clones:
+        try:
+            vertices, tris, attr = mesh_to_tri156(mesh)
+        except TriangulationRequiredError:
+            errors.append("%s requires triangulating." % mesh.name)
+        quads, sbc = bvh.primitive_to_sbc(tris, **options)
+        vertList.append(vertices)
+        trisList.append(tris)
+        sbcsList.append(sbc)
+    parent_tree = bvh.trees_to_sbc_col(sbcsList, **options)
+    stream = KaitaiStream(BytesIO(bytearray(final_size)))
+    dst_sbc._check()
+    dst_sbc._write(stream)
+    sbc_vf = VirtualFileData(app_id, asset.relative_path, data_bytes=stream.to_byte_array())
+    vfiles.append(sbc_vf)
+    for clone in clones:
+        common.delete_ob(clone)
+    return vfiles
 
 def build_sbc(bl_obj, src_sbc, dst_sbc, verts, tris, quads, sbcs, links, parent_tree, mesh_metadata):
     def tally(x):
@@ -399,7 +438,6 @@ def build_sbc(bl_obj, src_sbc, dst_sbc, verts, tris, quads, sbcs, links, parent_
     #        flatten(pairCollection))
     return final_size, dst_sbc
 
-
 def _init_sbc_header(bl_obj, src_sbc, dst_sbc, object_count, stage_count, pair_count, face_count,
                      vertex_count, parent_tree, aabb_count):
     dst_sbc_header = dst_sbc.SbcHeader(_parent=dst_sbc, _root=dst_sbc._root)
@@ -425,6 +463,10 @@ def _init_sbc_header(bl_obj, src_sbc, dst_sbc, object_count, stage_count, pair_c
     dst_sbc_header._check()
     dst_sbc.header = dst_sbc_header
     return dst_sbc_header
+
+def _serialize_bvhc156(dst_sbc, bvhc_data, is_root=False):
+    bvhc_raw = bvhc_data.primitiveSerialize()
+    bbox_data = bvhc_raw['boundingBox']
 
 
 def _serialize_bvhc(dst_sbc, bvhc_data):
@@ -555,7 +597,7 @@ def get_vertex_box(v):
 
 
 class SemiTri():
-    def __init__(self, face, matType):
+    def __init__(self, face, matType=None):
         if not len(face.verts) == 3:
             raise TriangulationRequiredError()
         self.vert = [int(v.index) for v in face.verts]
@@ -641,6 +683,23 @@ class SemiTri():
         except IndexError:
             raise MaterialMissingError
 
+def mesh_to_tri156(mesh):
+    bm = bmesh.new()
+    # bm.from_object(mesh, bpy.context.scene)
+    bm.from_mesh(mesh.data)
+    group = bm.faces.layers.int.get('group')
+    surface_attr = bm.faces.layers.int.get('surface_attr')
+    special_attr = bm.faces.layers.int.get('special_attr')
+    attr = []
+    faces = []
+    vertices = [Vector(v.co) for v in bm.verts]
+    for f in bm.faces:
+        faces.append(Tri(SemiTri(f), vertices))
+        attr.append({'group': f[group],
+                    'surface_attr':f[surface_attr],
+                    'special_attr': f[special_attr]})
+    bm.free()
+    return vertices, faces, attr
 
 def mesh_to_tri(mesh):
     bm = bmesh.new()
