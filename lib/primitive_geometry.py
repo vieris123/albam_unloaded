@@ -137,8 +137,15 @@ def decontainer(vec):
 class Tri(GeometryPrimitive):
     def __init__(self, triface, vertList):
         self.dataFace = triface
-        self.vertices = [
-            Vector(decontainer(vertList[triface.vert[i]])) for i in range(3)]
+        verts = []
+        for i in range(3):
+            ind = triface.vert[i]
+            print(ind)
+            v = vertList[ind]
+            verts.append(Vector(decontainer(v)))
+        self.vertices = verts
+        # self.vertices = [
+        #     Vector(decontainer(vertList[triface.vert[i]])) for i in range(3)]
         self.type = triface.type
         self.encodable = False
 

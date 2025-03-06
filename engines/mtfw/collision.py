@@ -5,7 +5,7 @@ import colorsys
 import numpy as np
 from mathutils import Vector
 from io import BytesIO
-
+import traceback
 
 from albam.registry import blender_registry
 from albam.vfs import VirtualFileData
@@ -159,9 +159,13 @@ def load_sbc156(file_item, context):
 
     for ix, ob_info in enumerate(sbc.groups):
         if ix < (len(sbc.groups) - 1):
-            fs, fc = ob_info.start_tris, (sbc.groups[ix + 1].start_tris - sbc.groups[ix].start_tris + 1)
-            vs, vc = ob_info.start_vertices, (sbc.groups[ix + 1].start_vertices - sbc.groups[ix].start_vertices + 1)
-            obj = SBCObject156(ob_info, triCollection[fs:fs+fc], vertCollection[vs:vs+vc])
+            try:
+                fs, fc = ob_info.start_tris, (sbc.groups[ix + 1].start_tris - sbc.groups[ix].start_tris)
+                vs, vc = ob_info.start_vertices, (sbc.groups[ix + 1].start_vertices - sbc.groups[ix].start_vertices)
+                obj = SBCObject156(ob_info, triCollection[fs:fs+fc], vertCollection[vs:vs+vc])
+            except Exception as e:
+                print(traceback.format_exc())
+                print(f'Error at group {ix}, Tri {fs}, Vert {vs}')
         else:
             fs = ob_info.start_tris
             vs = ob_info.start_vertices
@@ -362,14 +366,19 @@ def export_sbc156(bl_obj):
                "metric": bvh.Cluster.SAHMetric,
                "partition": bvh.morton_partition,
                "mode": bvh.CAPCOM}
-    for mesh in clones:
+    for i, mesh in enumerate(clones):
         try:
             vertices, tris, attr = mesh_to_tri156(mesh)
         except TriangulationRequiredError:
             errors.append("%s requires triangulating." % mesh.name)
         quads, sbc = bvh.primitive_to_sbc156(tris, **options)
-        vertList.append(vertices)
+        # trisList.append(tris[:-1]) #last tri duplicated from next mesh
+        # if i < len(clones) - 1:
+        #     vertList.append(vertices[:-1]) #last vert duplicated from next mesh
+        # else:
+        #     vertList.append(vertices) #last tri of last mesh is not duplicated
         trisList.append(tris)
+        vertList.append(vertices)
         sbcsList.append(sbc)
         attrList.append(attr)
     parent_tree = bvh.trees_to_sbc_col156(sbcsList, **options)
@@ -390,14 +399,16 @@ def build_sbc156(bl_obj, dst_sbc, verts, tris, sbcs, attr, parent_tree):
     groups = []
     vertices = []
     triangles = []
-    node_num = len(sbcs) - 1 or 1
+    node_num = (len(sbcs) - 1) or 1
     vert_num = 0
     tri_num = 0
     _init_sbc156_header(dst_sbc, parent_tree, len(sbcs), tally(tris) - 1 + len(sbcs) - 1, tally(verts), tally(tris))
     for i,sbc in enumerate(sbcs):
-        node_list, sbc_info = _serialize_bvhc156(dst_sbc, sbc, len(triangles[:-1]), len(vertices[:-1]), node_num)
+        node_list, sbc_info = _serialize_bvhc156(dst_sbc, sbc, len(triangles), len(vertices), node_num)
         nodes.extend(node_list)
         node_num += len(node_list)
+        #vert_num += len(verts[i]) - 1
+        #tri_num += len(tris[i]) - 1
         groups.append(sbc_info)
         triangles.extend(_serialize_faces156(dst_sbc, tris[i], attr[i]))
         vertices.extend(_serialize_vertices156(dst_sbc, verts[i]))
@@ -580,8 +591,8 @@ def _serialize_bvhc156(dst_sbc, bvhc_data, start_tri, start_vert, start_node):
     sbc_info.group_id = 0
     sbc_info.base = 0
     sbc_info.start_boxes = start_node
-    sbc_info.start_tris = start_tri
-    sbc_info.start_vertices = start_vert
+    sbc_info.start_tris = start_tri if start_tri >= 0 else 0
+    sbc_info.start_vertices = start_vert if start_vert >= 0 else 0
     sbc_info.child_index = [0, 0]
     node_list = []
 
