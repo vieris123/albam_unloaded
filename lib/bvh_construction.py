@@ -387,23 +387,33 @@ class BBVH(QBVH):
                 self.l = check(l)
                 self.r = check(r)
     
+    def childBoxes(self):
+        boxes = []
+        default = self.parent.childBoxes() if self.parent else [
+            self.node.boundingBox()]*2
+        for ix, child in enumerate(self.children()):
+            boxes.append(child.AABB() if child.isNode()
+                         or child.isPrimitive() else default[ix])
+        return boxes
+
     def typeMask(self):
         if not self.isNode():
             raise NotImplementedError(
                 "Empties and Primitives don't have a type mask.")
         else:
-            primitive, node = list(map(list, map(reversed, zip(
-                *[subnode.typePair() for subnode in [self.l, self.r]]))))
-
-            def lshiftOr(x, y): return (x << 1) | y
-            return [reduce(lshiftOr, primitive+node)]*4
+            node_type = 0
+            for i, side in enumerate(self.children()):
+                if side.type != Cluster.NODE:
+                    node_type |= (1 << (6 + i))
+            return node_type
 
     def nodeId(self):
+        def checkEmpty(node): return node.index() if node.type != Cluster.EMPTY else 0
         if not self.isNode():
             raise NotImplementedError(
                 "Empties and Primitives don't have subnodes.")
         else:
-            return [self.l.index(), self.r.index()]
+            return [checkEmpty(self.l), checkEmpty(self.r)]
 
     def children(self):
         if self.isNode():
@@ -710,6 +720,12 @@ def primitive_to_sbc156(primitives, clusteringFunction=spatialSplits, **kwargs):
     nodes, pairPrimitives = btree.separateTraverse()
     indexize_ob(nodes)
     return npairPrimitives, PrimitiveTree(btree).refine([vert for p in primitives for vert in p.vertices])
+
+def trees_to_sbc_col156(tree_list, clusteringFunction=spatialSplits, **kwargs):
+    indexize_ob(tree_list)
+    btree = next(iter(clusteringFunction(tree_list, **kwargs))).binary_collapse()
+    indexize_ob(btree.subnodes())
+    return PrimitiveTree(btree)
 
 def trees_to_sbc_col(tree_list, clusteringFunction=spatialSplits, **kwargs):
     indexize_ob(tree_list)

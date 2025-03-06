@@ -20,8 +20,9 @@ class Sbc156(ReadWriteKaitaiStruct):
             raise kaitaistruct.ValidationNotEqualError(b"\x53\x42\x43\x31", self.id_magic, self._io, u"/seq/0")
         self.version = self._io.read_u2le()
         self.num_groups = self._io.read_u2le()
-        self.num_groups_bb = self._io.read_u2le()
-        self.unk_num_03 = self._io.read_u2le()
+        self.num_groups_nodes = self._io.read_u2le()
+        self.max_parts_nest_count = self._io.read_u1()
+        self.max_nest_count = self._io.read_u1()
         self.num_boxes = self._io.read_u4le()
         self.num_faces = self._io.read_u4le()
         self.num_vertices = self._io.read_u4le()
@@ -79,8 +80,9 @@ class Sbc156(ReadWriteKaitaiStruct):
         self._io.write_bytes(self.id_magic)
         self._io.write_u2le(self.version)
         self._io.write_u2le(self.num_groups)
-        self._io.write_u2le(self.num_groups_bb)
-        self._io.write_u2le(self.unk_num_03)
+        self._io.write_u2le(self.num_groups_nodes)
+        self._io.write_u1(self.max_parts_nest_count)
+        self._io.write_u1(self.max_nest_count)
         self._io.write_u4le(self.num_boxes)
         self._io.write_u4le(self.num_faces)
         self._io.write_u4le(self.num_vertices)
@@ -228,21 +230,40 @@ class Sbc156(ReadWriteKaitaiStruct):
             self.start_boxes = self._io.read_u4le()
             self.start_vertices = self._io.read_u4le()
             self.group_id = self._io.read_u4le()
-            self.boxa = Sbc156.Tbox(self._io, self, self._root)
-            self.boxa._read()
-            self.boxb = Sbc156.Tbox(self._io, self, self._root)
-            self.boxb._read()
-            self.boxc = Sbc156.Tbox(self._io, self, self._root)
-            self.boxc._read()
-            self.ida = self._io.read_u2le()
-            self.idb = self._io.read_u2le()
+            self.bbox_this = Sbc156.Tbox(self._io, self, self._root)
+            self.bbox_this._read()
+            self.vmin = []
+            for i in range(2):
+                _t_vmin = Sbc156.Vec3(self._io, self, self._root)
+                _t_vmin._read()
+                self.vmin.append(_t_vmin)
+
+            self.vmax = []
+            for i in range(2):
+                _t_vmax = Sbc156.Vec3(self._io, self, self._root)
+                _t_vmax._read()
+                self.vmax.append(_t_vmax)
+
+            self.child_index = []
+            for i in range(2):
+                self.child_index.append(self._io.read_u2le())
+
 
 
         def _fetch_instances(self):
             pass
-            self.boxa._fetch_instances()
-            self.boxb._fetch_instances()
-            self.boxc._fetch_instances()
+            self.bbox_this._fetch_instances()
+            for i in range(len(self.vmin)):
+                pass
+                self.vmin[i]._fetch_instances()
+
+            for i in range(len(self.vmax)):
+                pass
+                self.vmax[i]._fetch_instances()
+
+            for i in range(len(self.child_index)):
+                pass
+
 
 
         def _write__seq(self, io=None):
@@ -252,27 +273,50 @@ class Sbc156(ReadWriteKaitaiStruct):
             self._io.write_u4le(self.start_boxes)
             self._io.write_u4le(self.start_vertices)
             self._io.write_u4le(self.group_id)
-            self.boxa._write__seq(self._io)
-            self.boxb._write__seq(self._io)
-            self.boxc._write__seq(self._io)
-            self._io.write_u2le(self.ida)
-            self._io.write_u2le(self.idb)
+            self.bbox_this._write__seq(self._io)
+            for i in range(len(self.vmin)):
+                pass
+                self.vmin[i]._write__seq(self._io)
+
+            for i in range(len(self.vmax)):
+                pass
+                self.vmax[i]._write__seq(self._io)
+
+            for i in range(len(self.child_index)):
+                pass
+                self._io.write_u2le(self.child_index[i])
+
 
 
         def _check(self):
             pass
-            if self.boxa._root != self._root:
-                raise kaitaistruct.ConsistencyError(u"boxa", self.boxa._root, self._root)
-            if self.boxa._parent != self:
-                raise kaitaistruct.ConsistencyError(u"boxa", self.boxa._parent, self)
-            if self.boxb._root != self._root:
-                raise kaitaistruct.ConsistencyError(u"boxb", self.boxb._root, self._root)
-            if self.boxb._parent != self:
-                raise kaitaistruct.ConsistencyError(u"boxb", self.boxb._parent, self)
-            if self.boxc._root != self._root:
-                raise kaitaistruct.ConsistencyError(u"boxc", self.boxc._root, self._root)
-            if self.boxc._parent != self:
-                raise kaitaistruct.ConsistencyError(u"boxc", self.boxc._parent, self)
+            if self.bbox_this._root != self._root:
+                raise kaitaistruct.ConsistencyError(u"bbox_this", self.bbox_this._root, self._root)
+            if self.bbox_this._parent != self:
+                raise kaitaistruct.ConsistencyError(u"bbox_this", self.bbox_this._parent, self)
+            if (len(self.vmin) != 2):
+                raise kaitaistruct.ConsistencyError(u"vmin", len(self.vmin), 2)
+            for i in range(len(self.vmin)):
+                pass
+                if self.vmin[i]._root != self._root:
+                    raise kaitaistruct.ConsistencyError(u"vmin", self.vmin[i]._root, self._root)
+                if self.vmin[i]._parent != self:
+                    raise kaitaistruct.ConsistencyError(u"vmin", self.vmin[i]._parent, self)
+
+            if (len(self.vmax) != 2):
+                raise kaitaistruct.ConsistencyError(u"vmax", len(self.vmax), 2)
+            for i in range(len(self.vmax)):
+                pass
+                if self.vmax[i]._root != self._root:
+                    raise kaitaistruct.ConsistencyError(u"vmax", self.vmax[i]._root, self._root)
+                if self.vmax[i]._parent != self:
+                    raise kaitaistruct.ConsistencyError(u"vmax", self.vmax[i]._parent, self)
+
+            if (len(self.child_index) != 2):
+                raise kaitaistruct.ConsistencyError(u"child_index", len(self.child_index), 2)
+            for i in range(len(self.child_index)):
+                pass
+
 
 
     class Vertex(ReadWriteKaitaiStruct):
@@ -455,13 +499,17 @@ class Sbc156(ReadWriteKaitaiStruct):
             self._root = _root
 
         def _read(self):
-            self.boxa = Sbc156.Pbox(self._io, self, self._root)
-            self.boxa._read()
-            self.boxb = Sbc156.Pbox(self._io, self, self._root)
-            self.boxb._read()
-            self.ida = self._io.read_u2le()
-            self.idb = self._io.read_u2le()
-            self.idc = self._io.read_u2le()
+            self.boxes = []
+            for i in range(2):
+                _t_boxes = Sbc156.Pbox(self._io, self, self._root)
+                _t_boxes._read()
+                self.boxes.append(_t_boxes)
+
+            self.bit = self._io.read_u2le()
+            self.child_index = []
+            for i in range(2):
+                self.child_index.append(self._io.read_u2le())
+
             self.nulls = []
             for i in range(10):
                 self.nulls.append(self._io.read_u1())
@@ -470,8 +518,13 @@ class Sbc156(ReadWriteKaitaiStruct):
 
         def _fetch_instances(self):
             pass
-            self.boxa._fetch_instances()
-            self.boxb._fetch_instances()
+            for i in range(len(self.boxes)):
+                pass
+                self.boxes[i]._fetch_instances()
+
+            for i in range(len(self.child_index)):
+                pass
+
             for i in range(len(self.nulls)):
                 pass
 
@@ -479,11 +532,15 @@ class Sbc156(ReadWriteKaitaiStruct):
 
         def _write__seq(self, io=None):
             super(Sbc156.Re5boxes, self)._write__seq(io)
-            self.boxa._write__seq(self._io)
-            self.boxb._write__seq(self._io)
-            self._io.write_u2le(self.ida)
-            self._io.write_u2le(self.idb)
-            self._io.write_u2le(self.idc)
+            for i in range(len(self.boxes)):
+                pass
+                self.boxes[i]._write__seq(self._io)
+
+            self._io.write_u2le(self.bit)
+            for i in range(len(self.child_index)):
+                pass
+                self._io.write_u2le(self.child_index[i])
+
             for i in range(len(self.nulls)):
                 pass
                 self._io.write_u1(self.nulls[i])
@@ -492,14 +549,20 @@ class Sbc156(ReadWriteKaitaiStruct):
 
         def _check(self):
             pass
-            if self.boxa._root != self._root:
-                raise kaitaistruct.ConsistencyError(u"boxa", self.boxa._root, self._root)
-            if self.boxa._parent != self:
-                raise kaitaistruct.ConsistencyError(u"boxa", self.boxa._parent, self)
-            if self.boxb._root != self._root:
-                raise kaitaistruct.ConsistencyError(u"boxb", self.boxb._root, self._root)
-            if self.boxb._parent != self:
-                raise kaitaistruct.ConsistencyError(u"boxb", self.boxb._parent, self)
+            if (len(self.boxes) != 2):
+                raise kaitaistruct.ConsistencyError(u"boxes", len(self.boxes), 2)
+            for i in range(len(self.boxes)):
+                pass
+                if self.boxes[i]._root != self._root:
+                    raise kaitaistruct.ConsistencyError(u"boxes", self.boxes[i]._root, self._root)
+                if self.boxes[i]._parent != self:
+                    raise kaitaistruct.ConsistencyError(u"boxes", self.boxes[i]._parent, self)
+
+            if (len(self.child_index) != 2):
+                raise kaitaistruct.ConsistencyError(u"child_index", len(self.child_index), 2)
+            for i in range(len(self.child_index)):
+                pass
+
             if (len(self.nulls) != 10):
                 raise kaitaistruct.ConsistencyError(u"nulls", len(self.nulls), 10)
             for i in range(len(self.nulls)):

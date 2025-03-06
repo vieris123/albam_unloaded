@@ -45,7 +45,9 @@ class ToolsSettings(bpy.types.PropertyGroup):
     bone_names_preset: bone_names_enum
     vg_a: bpy.props.StringProperty()
     vg_b: bpy.props.StringProperty()
-
+    face_group: bpy.props.IntProperty(name='Group')
+    surface_attr: bpy.props.IntProperty(name='Surface attributes')
+    special_attr: bpy.props.IntProperty(name='Behavior attributes')
 
 @blender_registry.register_blender_type
 class ALBAM_PT_ToolsPanel(bpy.types.Panel):
@@ -116,6 +118,64 @@ class ALBAM_PT_VGMerger(bpy.types.Panel):
             return False
 
 @blender_registry.register_blender_type
+class ALBAM_OT_ApplyFaceProps(bpy.types.Operator):
+    bl_idname = "albam.apply_face_props"
+    bl_label = "Apply Face Properties"
+
+    @classmethod
+    def poll(self, context):
+        ob = context.edit_object
+        if not ob:
+            return False
+        return True
+
+    def execute(self, context):
+        ob = context.edit_object
+        bm = bmesh.from_edit_mesh(ob.data)
+
+        group = bm.faces.layers.int.get('group')
+        surface_attr = bm.faces.layers.int.get('surface_attr')
+        special_attr = bm.faces.layers.int.get('special_attr')
+        
+        new_group = context.scene.albam.tools_settings.face_group
+        new_surface_attr = context.scene.albam.tools_settings.surface_attr
+        new_special_attr = context.scene.albam.tools_settings.special_attr
+
+        for f in bm.faces:
+            if f.select:
+                f[group] = new_group
+                f[surface_attr] = new_surface_attr
+                f[special_attr] = new_special_attr
+
+        bmesh.update_edit_mesh(ob.data)
+        return {'FINISHED'}
+
+
+
+@blender_registry.register_blender_type
+class ALBAM_PT_FACE_PROP_EDIT(bpy.types.Panel):
+    '''UI Tool subpanel in Mesh Object Data'''
+    bl_label = "Face properties editing"
+    bl_idname = "ALBAM_PT_FACE_PROP_EDIT"
+    bl_parent_id = "ALBAM_PT_ToolsPanel"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        
+        scn = context.scene.albam.tools_settings
+        row = layout.row()
+        row.prop(scn, 'face_group')
+        row = layout.row()
+        row.prop(scn, 'surface_attr')
+        row = layout.row()
+        row.prop(scn, 'special_attr')
+        row = layout.row()
+        row.operator("albam.apply_face_props")
+
+@blender_registry.register_blender_type
 class ALBAM_PT_FACE_PROP(bpy.types.Panel):
     '''UI Tool subpanel in Mesh Object Data'''
     bl_label = "Face properties"
@@ -141,6 +201,7 @@ class ALBAM_PT_FACE_PROP(bpy.types.Panel):
                 layout.label(text=f'Group: {f[group]}')
                 layout.label(text=f'Surface attribute: {hex(f[surface_attr])}')
                 layout.label(text=f'Special attribute: {hex(f[special_attr])}')
+                break
 
 
     @classmethod

@@ -10,8 +10,9 @@ seq:
   - {id: id_magic, contents: [0x53, 0x42, 0x43, 0x31]} # SBC1
   - {id: version, type: u2}
   - {id: num_groups, type: u2}
-  - {id: num_groups_bb, type: u2} # ?
-  - {id: unk_num_03, type: u2}
+  - {id: num_groups_nodes, type: u2}
+  - {id: max_parts_nest_count, type: u1}
+  - {id: max_nest_count, type: u1}
   - {id: num_boxes, type: u4}
   - {id: num_faces, type: u4}
   - {id: num_vertices, type: u4}
@@ -30,11 +31,10 @@ types:
       - {id: start_boxes, type: u4} # ?
       - {id: start_vertices, type: u4}
       - {id: group_id, type: u4}
-      - {id: boxa, type: tbox}
-      - {id: boxb, type: tbox}
-      - {id: boxc, type: tbox}
-      - {id: ida, type: u2}
-      - {id: idb, type: u2}
+      - {id: bbox_this, type: tbox}
+      - {id: vmin, type: vec3, repeat: expr, repeat-expr: 2}
+      - {id: vmax, type: vec3, repeat: expr, repeat-expr: 2}
+      - {id: child_index, type: u2, repeat: expr, repeat-expr: 2}
 
   re5triangle: #28 bytes
     seq:
@@ -49,11 +49,9 @@ types:
   
   re5boxes: # 80 bytes
     seq:
-      - {id: boxa, type: pbox}
-      - {id: boxb, type: pbox}
-      - {id: ida, type: u2} # always 0-255
-      - {id: idb, type: u2} # references to a box
-      - {id: idc, type: u2}
+      - {id: boxes, type: pbox, repeat: expr, repeat-expr: 2}
+      - {id: bit, type: u2}
+      - {id: child_index, type: u2, repeat: expr, repeat-expr: 2} # references to a box
       - {id: nulls, type: u1, repeat: expr, repeat-expr: 10}
       
   vertex:
