@@ -27,6 +27,19 @@ def mesh_filter(self, object):
 class AlbamMeshes(bpy.types.PropertyGroup):
     all_meshes: bpy.props.PointerProperty(type=bpy.types.Object, poll=mesh_filter)
 
+def face_preset_update(self, context):
+    presets = {
+        'PhysWall': (0x10, 0),
+        'IntWall': (0x13, 0),
+        'SpecWall': (0x0, 0x20000000),
+        'Ground': (0x20, 0),
+        'Leap': (0x0, 0x10000000),
+        'Auto': (0, 0)
+    }
+    id = context.scene.albam.tools_settings.face_preset
+    sur, spec = presets[id]
+    context.scene.albam.tools_settings.surface_attr = sur
+    context.scene.albam.tools_settings.special_attr = spec
 
 @blender_registry.register_blender_prop_albam(name="tools_settings")
 class ToolsSettings(bpy.types.PropertyGroup):
@@ -48,6 +61,21 @@ class ToolsSettings(bpy.types.PropertyGroup):
     face_group: bpy.props.IntProperty(name='Group')
     surface_attr: bpy.props.IntProperty(name='Surface attributes')
     special_attr: bpy.props.IntProperty(name='Behavior attributes')
+    face_preset_enum = bpy.props.EnumProperty(
+        name="",
+        description="Select face property",
+        items=[
+            ("PhysWall", "Physical Wall", "Stops bullets, can be jumped, etc.", 1),
+            ("IntWall", "Intangible Wall", "E.g. BP walls", 2),
+            ("SpecWall", "Special Wall", "Blocks camera, trigger effects, etc.", 3),
+            ("Ground", "Ground", "Ground", 4),
+            ("Leap", "Leapable Ledge", "Boundary for triggering leaps", 5),
+            ('Auto', 'Auto', 'Automatically assigns attributes, also used for ceiling', 6)
+        ],
+        default="Ground",
+        update=face_preset_update
+    )
+    face_preset: face_preset_enum
 
 @blender_registry.register_blender_type
 class ALBAM_PT_ToolsPanel(bpy.types.Panel):
@@ -155,7 +183,7 @@ class ALBAM_OT_ApplyFaceProps(bpy.types.Operator):
 @blender_registry.register_blender_type
 class ALBAM_PT_FACE_PROP_EDIT(bpy.types.Panel):
     '''UI Tool subpanel in Mesh Object Data'''
-    bl_label = "Face properties editing"
+    bl_label = "Face Properties Edit"
     bl_idname = "ALBAM_PT_FACE_PROP_EDIT"
     bl_parent_id = "ALBAM_PT_ToolsPanel"
     bl_space_type = "VIEW_3D"
@@ -165,7 +193,10 @@ class ALBAM_PT_FACE_PROP_EDIT(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         
+        
         scn = context.scene.albam.tools_settings
+        row = layout.row()
+        row.prop(scn, 'face_preset')
         row = layout.row()
         row.prop(scn, 'face_group')
         row = layout.row()
@@ -200,7 +231,7 @@ class ALBAM_PT_FACE_PROP(bpy.types.Panel):
                 layout.label(text=f'Index: {f.index}')
                 layout.label(text=f'Group: {f[group]}')
                 layout.label(text=f'Surface attribute: {hex(f[surface_attr])}')
-                layout.label(text=f'Special attribute: {hex(f[special_attr])}')
+                layout.label(text=f'Behavior attribute: {hex(f[special_attr])}')
                 break
 
 
