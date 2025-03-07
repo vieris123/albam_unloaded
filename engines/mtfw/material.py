@@ -1514,7 +1514,7 @@ class Mod153MaterialCustomProperties(bpy.types.PropertyGroup):
         name="LightmapFactor",  # noqa: F821
         size=4, default=(1.0, 1.0, 1.0, 0), options=set(), subtype="COLOR")  # noqa: F821
     detail_factor: bpy.props.FloatVectorProperty(
-        name="TransmitlFactor", size=4, default=(0.5, 10, 0.0, 0.5), options=set())  # noqa: F821
+        name="DetaillFactor", size=4, default=(0.5, 10, 0.0, 0.5), options=set())  # noqa: F821
     transmit_factor: bpy.props.FloatVectorProperty(
         name="TransmitlFactor", size=4, default=(0.5, 10, 0.0, 0.5), options=set())  # noqa: F821
     parallax_factor: bpy.props.FloatVectorProperty(
