@@ -161,19 +161,29 @@ class ALBAM_OT_ApplyFaceProps(bpy.types.Operator):
         ob = context.edit_object
         bm = bmesh.from_edit_mesh(ob.data)
 
-        group = bm.faces.layers.int.get('group')
-        surface_attr = bm.faces.layers.int.get('surface_attr')
-        special_attr = bm.faces.layers.int.get('special_attr')
+        group = bm.faces.layers.int.get('group', None)
+        surface_attr = bm.faces.layers.int.get('surface_attr', None)
+        special_attr = bm.faces.layers.int.get('special_attr', None)
         
         new_group = context.scene.albam.tools_settings.face_group
         new_surface_attr = context.scene.albam.tools_settings.surface_attr
         new_special_attr = context.scene.albam.tools_settings.special_attr
+        if group and surface_attr and special_attr:
+            for f in bm.faces:
+                if f.select:
+                    f[group] = new_group
+                    f[surface_attr] = new_surface_attr
+                    f[special_attr] = new_special_attr
+        else:
+            group = bm.faces.layers.int.new('group')
+            surface_attr = bm.faces.layers.int.new('surface_attr')
+            special_attr = bm.faces.layers.int.new('special_attr')
+            for f in bm.faces:
+                if f.select:
+                    f[group] = new_group
+                    f[surface_attr] = new_surface_attr
+                    f[special_attr] = new_special_attr
 
-        for f in bm.faces:
-            if f.select:
-                f[group] = new_group
-                f[surface_attr] = new_surface_attr
-                f[special_attr] = new_special_attr
 
         bmesh.update_edit_mesh(ob.data)
         return {'FINISHED'}
@@ -222,17 +232,18 @@ class ALBAM_PT_FACE_PROP(bpy.types.Panel):
         ob = context.edit_object
         bm = bmesh.from_edit_mesh(ob.data)
 
-        group = bm.faces.layers.int.get('group')
-        surface_attr = bm.faces.layers.int.get('surface_attr')
-        special_attr = bm.faces.layers.int.get('special_attr')
+        group = bm.faces.layers.int.get('group', None)
+        surface_attr = bm.faces.layers.int.get('surface_attr', None)
+        special_attr = bm.faces.layers.int.get('special_attr', None)
 
-        for f in bm.faces:
-            if f.select:
-                layout.label(text=f'Index: {f.index}')
-                layout.label(text=f'Group: {f[group]}')
-                layout.label(text=f'Surface attribute: {hex(f[surface_attr])}')
-                layout.label(text=f'Behavior attribute: {hex(f[special_attr])}')
-                break
+        if group and surface_attr and special_attr:
+            for f in bm.faces:
+                if f.select:
+                    layout.label(text=f'Index: {f.index}')
+                    layout.label(text=f'Group: {f[group]}')
+                    layout.label(text=f'Surface attribute: {hex(f[surface_attr])}')
+                    layout.label(text=f'Behavior attribute: {hex(f[special_attr])}')
+                    break
 
 
     @classmethod
