@@ -95,7 +95,7 @@ def load_lmt(file_item, context):
 
         #Events
         cumulative_frames = 0
-        action_group.coll_ev = block.block_header.events_params_01[:8]
+        action_group.coll_ev = block.block_header.events_params_01
         for event in block.block_header.events_01:
             marker = action.pose_markers.new(f'ev1_{cumulative_frames}_{event.group_id}')
             marker.frame = cumulative_frames
@@ -104,7 +104,7 @@ def load_lmt(file_item, context):
             cumulative_frames += event.frame
 
         cumulative_frames = 0
-        action_group.sfx_ev = block.block_header.events_params_01[:8]
+        action_group.sfx_ev = block.block_header.events_params_01
         for event in block.block_header.events_02:
             marker = action.pose_markers.new(f'ev2_{cumulative_frames}_{event.group_id}')
             marker.frame = cumulative_frames
@@ -743,6 +743,10 @@ class Lmt49ActionCustomProperties(bpy.types.PropertyGroup):
     #lmt_id: bpy.props.IntProperty(name='LMT index',default=0)
     num_frames: bpy.props.IntProperty(name='Frames')
     loop_frames: bpy.props.IntProperty(name='Loop frames')
+    #end_pos: bpy.props.FloatVectorProperty(name='Pos',size=3)
+    #end_quat: bpy.props.FloatVectorProperty(name='Quat',size=4)
+    events_params_01: bpy.props.IntVectorProperty(size=8)
+    events_params_02: bpy.props.IntVectorProperty(size=8)
 
     def copy_custom_properties_to(self, dst_obj):
         for attr_name in self.__annotations__:
@@ -821,7 +825,7 @@ class DMC4EventGroup(bpy.types.PropertyGroup):
     sword_trail: bpy.props.IntProperty()
     slots: bpy.props.BoolVectorProperty(name='Param',size=8)
     param_ev_type: bpy.props.StringProperty()
-    action: bpy.props.PointerProperty(type=Lmt49Action)
+    #action: bpy.props.PointerProperty(type=Lmt49Action)
 
     def setup(self, ev_type, value):
         for k, v in GroupHash.items():

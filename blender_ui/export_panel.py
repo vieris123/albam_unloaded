@@ -22,6 +22,7 @@ class AlbamExportSettings(bpy.types.PropertyGroup):
     remove_duplicate_materials_suffix: bpy.props.BoolProperty(default=True)
     export_visible: bpy.props.BoolProperty(default=False)
     force_lod255: bpy.props.BoolProperty(default=False)
+    null_zcoords: bpy.props.BoolProperty(default=False)
     no_vf_grouping: bpy.props.BoolProperty(default=False)  # dd weapons and armor requires it
     force_max_num_weights: bpy.props.BoolProperty(default=False)
 
@@ -98,6 +99,9 @@ class ALBAM_WM_OT_ExportOptions(bpy.types.Operator):
         layout.prop(export_settings,
                     "force_lod255",
                     text="Set LOD ID = 255 (always visible) for exported meshes")
+        layout.prop(export_settings,
+                    "null_zcoords",
+                    text="Prevent meshes culling (hack)")
         layout.label(text="Dragon's Dogma export hacks")
         layout.prop(export_settings, "no_vf_grouping", text="Don't group meshes by vertex format")
         layout.prop(export_settings, "force_max_num_weights", text="Set max weigth always more that 4")

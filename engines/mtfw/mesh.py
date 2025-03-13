@@ -1765,6 +1765,10 @@ def _set_static_mesh_weight_bounds(dst_mod, bl_mesh_ob, meshes_data):
     bsphere.z = -center_y * 100
     bsphere.w = radius * 100
 
+    export_settings = bpy.context.scene.albam.export_settings
+    if export_settings.null_zcoords:
+        bsphere.z = 0
+
     # bbox_min_export = (min_x * 100, min_z * 100, -max_y * 100, 0.0)
     bbox_min.x = min_x * 100
     bbox_min.y = min_z * 100
@@ -1882,6 +1886,10 @@ def _calculate_vertex_group_weight_bound(mesh_vertex_groups, armature, vertex_gr
     bsphere.y = bsphere_export[1]
     bsphere.z = bsphere_export[2]
     bsphere.w = bsphere_export[3]
+
+    export_settings = bpy.context.scene.albam.export_settings
+    if export_settings.null_zcoords:
+        bsphere.z = 0
 
     bbox_min = dst_mod.Vec4(_parent=wb, _root=wb._root)
     bbox_min.x = bbox_min_export[0]

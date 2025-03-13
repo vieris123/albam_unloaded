@@ -37,10 +37,12 @@ types:
       - {id: loop_frames, type: s4}
       - {id: end_pos, type: vec4}
       - {id: end_quat, type: vec4}
-      - {id: events_params_01, type: u2, repeat: expr, repeat-expr: 32}
+      - {id: events_params_01, type: u2, repeat: expr, repeat-expr: 8}
+      - {id: unused_ev_01, type: u2, repeat: expr, repeat-expr: 24}
       - {id: num_events_01, type: u4}
       - {id: event_buffer_01, type: u4}
-      - {id: events_params_02, type: u2, repeat: expr, repeat-expr: 32}
+      - {id: events_params_02, type: u2, repeat: expr, repeat-expr: 8}
+      - {id: unused_ev_02, type: u2, repeat: expr, repeat-expr: 24}
       - {id: num_events_02, type: u4}
       - {id: event_buffer_02, type: u4}
     instances:

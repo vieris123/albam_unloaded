@@ -114,14 +114,22 @@ class Lmt(ReadWriteKaitaiStruct):
             self.end_quat = Lmt.Vec4(self._io, self, self._root)
             self.end_quat._read()
             self.events_params_01 = []
-            for i in range(32):
+            for i in range(8):
                 self.events_params_01.append(self._io.read_u2le())
+
+            self.unused_ev_01 = []
+            for i in range(24):
+                self.unused_ev_01.append(self._io.read_u2le())
 
             self.num_events_01 = self._io.read_u4le()
             self.event_buffer_01 = self._io.read_u4le()
             self.events_params_02 = []
-            for i in range(32):
+            for i in range(8):
                 self.events_params_02.append(self._io.read_u2le())
+
+            self.unused_ev_02 = []
+            for i in range(24):
+                self.unused_ev_02.append(self._io.read_u2le())
 
             self.num_events_02 = self._io.read_u4le()
             self.event_buffer_02 = self._io.read_u4le()
@@ -134,7 +142,13 @@ class Lmt(ReadWriteKaitaiStruct):
             for i in range(len(self.events_params_01)):
                 pass
 
+            for i in range(len(self.unused_ev_01)):
+                pass
+
             for i in range(len(self.events_params_02)):
+                pass
+
+            for i in range(len(self.unused_ev_02)):
                 pass
 
             _ = self.tracks
@@ -169,11 +183,19 @@ class Lmt(ReadWriteKaitaiStruct):
                 pass
                 self._io.write_u2le(self.events_params_01[i])
 
+            for i in range(len(self.unused_ev_01)):
+                pass
+                self._io.write_u2le(self.unused_ev_01[i])
+
             self._io.write_u4le(self.num_events_01)
             self._io.write_u4le(self.event_buffer_01)
             for i in range(len(self.events_params_02)):
                 pass
                 self._io.write_u2le(self.events_params_02[i])
+
+            for i in range(len(self.unused_ev_02)):
+                pass
+                self._io.write_u2le(self.unused_ev_02[i])
 
             self._io.write_u4le(self.num_events_02)
             self._io.write_u4le(self.event_buffer_02)
@@ -189,14 +211,24 @@ class Lmt(ReadWriteKaitaiStruct):
                 raise kaitaistruct.ConsistencyError(u"end_quat", self.end_quat._root, self._root)
             if self.end_quat._parent != self:
                 raise kaitaistruct.ConsistencyError(u"end_quat", self.end_quat._parent, self)
-            if (len(self.events_params_01) != 32):
-                raise kaitaistruct.ConsistencyError(u"events_params_01", len(self.events_params_01), 32)
+            if (len(self.events_params_01) != 8):
+                raise kaitaistruct.ConsistencyError(u"events_params_01", len(self.events_params_01), 8)
             for i in range(len(self.events_params_01)):
                 pass
 
-            if (len(self.events_params_02) != 32):
-                raise kaitaistruct.ConsistencyError(u"events_params_02", len(self.events_params_02), 32)
+            if (len(self.unused_ev_01) != 24):
+                raise kaitaistruct.ConsistencyError(u"unused_ev_01", len(self.unused_ev_01), 24)
+            for i in range(len(self.unused_ev_01)):
+                pass
+
+            if (len(self.events_params_02) != 8):
+                raise kaitaistruct.ConsistencyError(u"events_params_02", len(self.events_params_02), 8)
             for i in range(len(self.events_params_02)):
+                pass
+
+            if (len(self.unused_ev_02) != 24):
+                raise kaitaistruct.ConsistencyError(u"unused_ev_02", len(self.unused_ev_02), 24)
+            for i in range(len(self.unused_ev_02)):
                 pass
 
 

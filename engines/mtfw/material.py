@@ -1188,7 +1188,7 @@ class Mod156MaterialCustomProperties(bpy.types.PropertyGroup):
         description="Select surface attribute",
         items=[
             ("0x1", "ATTR_BRIDGE", "", 1),
-            ("0x8", "ATTR_NUKI", "", 2),
+            ("0x8", "ATTR_NUKI", "Cards", 2),
             ("0x10", "ATTR_SOLID", "", 3),
             ("0x20", "ATTR_OVERLAP", "", 4),
             ("0x40", "ATTR_TRANSPARENT", "", 5),
