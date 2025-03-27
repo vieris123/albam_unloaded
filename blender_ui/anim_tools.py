@@ -27,12 +27,12 @@ class ALBAM_PT_LmtSection(bpy.types.Panel):
             context.scene.albam.lmt_groups,
             "anim_group",
             context.scene.albam.lmt_groups,
-            "active_group",
+            "active_group_id",
             sort_lock=True,
             rows=1,
             maxrows=3,
         )
-        index = context.scene.albam.lmt_groups.active_group
+        index = context.scene.albam.lmt_groups.active_group_id
         item = context.scene.albam.lmt_groups.anim_group[index]
 
         for k in item.__annotations__:
@@ -42,7 +42,7 @@ class ALBAM_PT_LmtSection(bpy.types.Panel):
 class ALBAM_PT_AlbamActionSection(bpy.types.Panel):
     bl_category = "Albam [Beta]"
     bl_idname = "ALBAM_PT_AlbamActionSection"
-    bl_label = "Albam action"
+    bl_label = "Albam Action"
     bl_space_type = "DOPESHEET_EDITOR"
     bl_context = 'action'
     bl_region_type = "UI"
@@ -50,7 +50,7 @@ class ALBAM_PT_AlbamActionSection(bpy.types.Panel):
     def draw(self, context):
         row = self.layout.row()
 
-        lmt_index = context.scene.albam.lmt_groups.active_group
+        lmt_index = context.scene.albam.lmt_groups.active_group_id
         lmt_item = context.scene.albam.lmt_groups.anim_group[lmt_index]
 
         row.template_list(
@@ -72,26 +72,33 @@ class ALBAM_PT_AlbamActionSection(bpy.types.Panel):
         self.layout.prop(action.albam_asset, 'lmt_index')
         custom_properties = action.albam_custom_properties.get_custom_properties_for_appid(app_id)
 
-        for k in custom_properties.__annotations__:
-            self.layout.prop(custom_properties, k)
-
+        self.layout.prop(custom_properties, 'num_frames')
+        self.layout.prop(custom_properties, 'loop_frames')
+        # for i in range(8):
+        #     self.layout.prop(custom_properties, f'events_params_01[{i}]')
+        #self.layout.prop_with_menu(custom_properties, 'events_params_02')
+        # for k in custom_properties.__annotations__:
+        #     self.layout.prop(custom_properties, k)
 
 @blender_registry.register_blender_type
 class ALBAM_PT_AlbamEventSection(bpy.types.Panel):
     bl_category = "Albam [Beta]"
     bl_idname = "ALBAM_PT_AlbamEventSection"
-    bl_label = "Albam events"
+    bl_label = "Albam Events"
     bl_space_type = "DOPESHEET_EDITOR"
     bl_context = 'action'
     bl_region_type = "UI"
 
     def draw(self, context):
+        # self.layout.use_property_split = True
+        # self.layout.use_property_decorate = False
         row = self.layout.row()
 
-        lmt_index = context.scene.albam.lmt_groups.active_group
+        lmt_index = context.scene.albam.lmt_groups.active_group_id
         lmt_item = context.scene.albam.lmt_groups.anim_group[lmt_index]
         action = lmt_item.actions[lmt_item.active_id].action
-        pose_marker = action.pose_markers
+        app_id = context.scene.albam.apps.app_selected
+        action_custom_prop = action.albam_custom_properties.get_custom_properties_for_appid(app_id)
 
         row.template_list(
             "ALBAM_UL_LmtList",
@@ -105,29 +112,66 @@ class ALBAM_PT_AlbamEventSection(bpy.types.Panel):
             maxrows=3,
         )
 
+@blender_registry.register_blender_type
+class ALBAM_PT_AlbamIndexedEventSection(bpy.types.Panel):
+    bl_category = "Albam [Beta]"
+    bl_idname = "ALBAM_PT_AlbamIndexedEventSection"
+    bl_parent_id = 'ALBAM_PT_AlbamEventSection'
+    bl_label = "Indexed Events"
+    bl_space_type = "DOPESHEET_EDITOR"
+    bl_context = 'action'
+    bl_region_type = "UI"
+
+    def draw(self, context):
+        lmt_index = context.scene.albam.lmt_groups.active_group_id
+        lmt_item = context.scene.albam.lmt_groups.anim_group[lmt_index]
+        action = lmt_item.actions[lmt_item.active_id].action
+        app_id = context.scene.albam.apps.app_selected
+        action_custom_prop = action.albam_custom_properties.get_custom_properties_for_appid(app_id)
         pose_marker = action.pose_markers.active
+        ev_custom_properties = pose_marker.dmc4_event_props
 
-        custom_properties = pose_marker.dmc4_event_props
-        for k in custom_properties.__annotations__:
-            if k == 'slots':
+        row = self.layout.row(align=True)
+        split = row.split(factor=0.3,align=True)
+
+        row_toggle = split.row()
+        col = row_toggle.column(align=True)
+        for i in range(8):
+            col.label(text=f'Event {i+1}')
+        col = row_toggle.column()    
+        col.prop(pose_marker.dmc4_event_props, 'slots', text='', toggle=0)
+
+        split = split.split()
+        col = split.column()
+        if ev_custom_properties.param_ev_type == 'Hitbox':
+            col.prop(action_custom_prop, 'events_params_01', text='', slider=True)
+        else:
+            col.prop(action_custom_prop, 'events_params_02', text='', slider=True)
+        self.layout.prop(ev_custom_properties, 'param_ev_type')
+
+@blender_registry.register_blender_type
+class ALBAM_PT_AlbamHashedEventSection(bpy.types.Panel):
+    bl_category = "Albam [Beta]"
+    bl_idname = "ALBAM_PT_AlbamHashedEventSection"
+    bl_parent_id = 'ALBAM_PT_AlbamEventSection'
+    bl_label = "Hashed Events"
+    bl_space_type = "DOPESHEET_EDITOR"
+    bl_context = 'action'
+    bl_region_type = "UI"
+
+    def draw(self, context):
+        lmt_index = context.scene.albam.lmt_groups.active_group_id
+        lmt_item = context.scene.albam.lmt_groups.anim_group[lmt_index]
+        action = lmt_item.actions[lmt_item.active_id].action
+        app_id = context.scene.albam.apps.app_selected
+        action_custom_prop = action.albam_custom_properties.get_custom_properties_for_appid(app_id)
+        pose_marker = action.pose_markers.active
+        ev_custom_properties = pose_marker.dmc4_event_props
+        
+        for k in ev_custom_properties.__annotations__:
+            if k in ['slots', 'param_ev_type']:
                 continue
-            self.layout.prop(custom_properties, k)
+            self.layout.prop(ev_custom_properties, k, slider=True)
 
-        col = self.layout.column()
-        for i, slot in enumerate(pose_marker.dmc4_event_props.slots):
-            if pose_marker.param_ev_type == 'Hitbox':
-                col.prop(pose_marker.action.coll_ev[i])
-            else:
-                col.prop(pose_marker.action.sfx_ev[i])
-            col.prop(slot)
-
-
-    # @classmethod
-    # def poll(self, context):
-    #     lmt_index = context.scene.albam.lmt_groups.active_group
-    #     lmt_item = context.scene.albam.lmt_groups.anim_group[lmt_index]
-
-    #     action = lmt_item.actions[lmt_item.active_id].action
-    #     pose_marker = action.pose_markers.active
-
-    #     return pose_marker
+class ActiveMarker(bpy.types.Operator):
+    pass

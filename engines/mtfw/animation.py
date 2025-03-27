@@ -8,6 +8,7 @@ import numpy as np
 import bpy
 from kaitaistruct import KaitaiStream
 from mathutils import Matrix, Vector, Quaternion
+from io import BytesIO
 import mathutils
 import numpy as np
 
@@ -763,6 +764,10 @@ class Lmt49ActionCustomProperties(bpy.types.PropertyGroup):
             except TypeError:
                 setattr(self, attr_name, hex(getattr(src_obj, attr_name)))
 
+    def copy_from_lmt(self, lmt_act):
+        self.num_frames = lmt_act.num_frames
+        self.loop_frames = lmt_act.loop_frames
+
 @blender_registry.register_blender_prop
 class Lmt49Action(bpy.types.PropertyGroup):
     action: bpy.props.PointerProperty(type=bpy.types.Action)
@@ -823,9 +828,8 @@ class DMC4EventGroup(bpy.types.PropertyGroup):
     face_swap: bpy.props.IntProperty()
     stand_sword_disp: bpy.props.IntProperty()
     sword_trail: bpy.props.IntProperty()
-    slots: bpy.props.BoolVectorProperty(name='Param',size=8)
+    slots: bpy.props.BoolVectorProperty(name='Toggles',size=8)
     param_ev_type: bpy.props.StringProperty()
-    #action: bpy.props.PointerProperty(type=Lmt49Action)
 
     def setup(self, ev_type, value):
         for k, v in GroupHash.items():
@@ -872,7 +876,8 @@ class AlbamActionGroup(bpy.types.PropertyGroup):
 class AlbamLmtGroups(bpy.types.PropertyGroup):
     #Meta collection of LMT files
     anim_group: bpy.props.CollectionProperty(type=AlbamActionGroup)
-    active_group: bpy.props.IntProperty()
+    active_group_id: bpy.props.IntProperty()
+    active_group: bpy.props.PointerProperty(type=AlbamActionGroup)
 
     def add(self, name=''):
         group = self.anim_group.add()
