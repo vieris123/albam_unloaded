@@ -278,6 +278,13 @@ class ALBAM_PT_AlbamIndexedEventSection(bpy.types.Panel):
             col.prop(action_custom_prop, 'events_params_02', text='', slider=True)
         self.layout.prop(ev_custom_properties, 'param_ev_type')
 
+    @classmethod
+    def poll(self, context):
+        lmt_index = context.scene.albam.lmt_groups.active_group_id
+        lmt_item = context.scene.albam.lmt_groups.anim_group[lmt_index]
+        action = lmt_item.actions[lmt_item.active_id].action
+        return action.pose_markers.active
+
 @blender_registry.register_blender_type
 class ALBAM_PT_AlbamHashedEventSection(bpy.types.Panel):
     bl_category = "Albam [Beta]"
@@ -301,6 +308,14 @@ class ALBAM_PT_AlbamHashedEventSection(bpy.types.Panel):
             if k in ['slots', 'param_ev_type']:
                 continue
             self.layout.prop(ev_custom_properties, k, slider=True)
+    
+    @classmethod
+    def poll(self, context):
+        lmt_index = context.scene.albam.lmt_groups.active_group_id
+        lmt_item = context.scene.albam.lmt_groups.anim_group[lmt_index]
+        action = lmt_item.actions[lmt_item.active_id].action
+        return action.pose_markers.active
+
 
 @blender_registry.register_blender_prop_albam(name="anim_exp_settings")
 class AnimExportSettings(bpy.types.PropertyGroup):
