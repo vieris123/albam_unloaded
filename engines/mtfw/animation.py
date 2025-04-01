@@ -91,7 +91,8 @@ def load_lmt(file_item, context):
         action.albam_asset.app_id = app_id
         action.albam_asset.lmt_index = block_index
         custom_property = action.albam_custom_properties.get_custom_properties_for_appid(app_id)
-        custom_property.copy_custom_properties_from(block.block_header)
+        #custom_property.copy_custom_properties_from(block.block_header)
+        custom_property.copy_from_lmt(block.block_header, block_index)
         #custom_property.copy_custom_properties_to(action)
 
         #Events
@@ -197,15 +198,19 @@ def load_lmt(file_item, context):
                 # TODO: print statistics of missing tracks
                 # print("Unknown buffer_type, skipping", track.buffer_type)
                 continue
-
-            group_name = f"{track.bone_index}.{bone_index}.{action_type}"
-            group = action.groups.get(group_name) or action.groups.new(group_name)
+            
+            # group_name = f"{track.bone_index}.{bone_index}.{action_type}"
+            # group = action.groups.get(group_name) or action.groups.new(group_name)
 
             #TOGGLE RENAMED BONES
             if renamed_bone_flag:
                 data_path = f"pose.bones[\"{armature.data.bones[bone_index].name}\"].{TRACK_MODE}"
+                group_name = f"{track.bone_index}.{armature.data.bones[bone_index].name}.{action_type}"
+                group = action.groups.get(group_name) or action.groups.new(group_name)
             else:
                 data_path = f"pose.bones[\"{bone_index}\"].{TRACK_MODE}"
+                group_name = f"{track.bone_index}.{bone_index}.{action_type}"
+                group = action.groups.get(group_name) or action.groups.new(group_name)
             try:
                 num_curv = len(decoded_frames[0])
             except IndexError:
@@ -331,17 +336,24 @@ class FrameQuat4_14(Structure):
         mag_safe = np.sqrt(1.0 - (quat[0] * quat[0]))
         mag = 1.0 if mag_safe < 0.00001 else mag_safe
 
-        phi = np.arcsin(quat[2] / mag)
-        theta = np.arcsin(quat[1] / (np.cos(phi) * mag))
+        phi = np.arcsin(np.clip((quat[2] / mag), -1.0, 1.0))
+        theta = np.arcsin(np.clip((quat[1] / (np.cos(phi) * mag)), -1.0, 1.0))
         test = theta * self.maskInv
-        self._x = int(theta * self.maskInv)
-        #self._x = struct.unpack('@Q', struct.pack('@d', (theta * self.maskInv)))[0]
-        #self._x = int(theta * self.maskInv)
-        self._y = int(phi * self.maskInv)
-        #self._y = struct.unpack('@Q', struct.pack('@d', (phi * self.maskInv)))[0]
-        self._wComp = int(R * self.maskW)
-        #self._wComp = struct.unpack('@Q', struct.pack('@d', (R * self.maskW)))[0]
-        self.duration = duration
+        try:
+            self._x = int(theta * self.maskInv)
+            #self._x = struct.unpack('@Q', struct.pack('@d', (theta * self.maskInv)))[0]
+            #self._x = int(theta * self.maskInv)
+            self._y = int(phi * self.maskInv)
+            #self._y = struct.unpack('@Q', struct.pack('@d', (phi * self.maskInv)))[0]
+            self._wComp = int(R * self.maskW)
+            #self._wComp = struct.unpack('@Q', struct.pack('@d', (R * self.maskW)))[0]
+            self.duration = duration
+        except ValueError:
+            print(f'X val: {quat[1]}')
+            print(f'Y val: {quat[2]}')
+            print(f'Phi: {phi}')
+            print(f'Theta: {theta}')
+            print(f'Mag: {mag}')
 
     def send(self):
         return buffer(self)[:]
@@ -503,7 +515,7 @@ def _get_or_create_root_motion_bone(armature):
     blender_bone.tail[2] += 0.01
     bpy.ops.object.mode_set(mode='OBJECT')
 
-    if armature.pose.bones[ROOT_BONE_NAME] is not None:
+    if ROOT_BONE_NAME in armature.pose.bones.keys():
         pose_bone = armature.pose.bones[ROOT_BONE_NAME]
     else:
         pose_bone = armature.pose.bones[ROOT_BONE_RENAMED]
@@ -622,18 +634,18 @@ def export_lmt(lmt_group):
 
     dst_lmt = Lmt()
     header_size = _serialize_top_level_lmt(dst_lmt, lmt_group)
-    block_size = _serialize_block(dst_lmt, lmt_group, header_size)
-    final_size = header_size + block_size
+    final_size = _serialize_block(dst_lmt, lmt_group, header_size)
+    #final_size = header_size + block_size
     stream = KaitaiStream(BytesIO(bytearray(final_size)))
     dst_lmt._check()
     dst_lmt._write(stream)
-    pass
+    return stream.to_byte_array()
 
 def _serialize_top_level_lmt(dst_lmt, lmt_group):
-    dst_lmt.id_magic = bytearray('\x4c\x4d\x54\x00')
+    dst_lmt.id_magic = bytearray('\x4c\x4d\x54\x00', encoding='utf-8')
     dst_lmt.version = 49
     dst_lmt.num_block_offsets = lmt_group.num_slots
-    return num_slots * 4 + 8 
+    return lmt_group.num_slots * 4 + 8 
 
 def _serialize_block(dst_lmt, lmt_group, header_size):
     dst_lmt.block_offsets = []
@@ -642,22 +654,58 @@ def _serialize_block(dst_lmt, lmt_group, header_size):
         block_offset.offset = 0
         dst_lmt.block_offsets.append(block_offset)
     
-    cml_size = header_size
-    for group in lmt_group.actions:
+    cml_size = header_size + len(lmt_group.actions) * 0xC0
+    for i, group in enumerate(lmt_group.actions):
         action = group.action
-        block = dst_lmt.BlockHeader49()
-        
-        
-        active_offset = dst_lmt.block_offsets[action.lmt_id]
+        custom_property = action.albam_custom_properties.get_custom_properties_for_appid('dmc4')
+
+        block = dst_lmt.BlockHeader49(_parent=dst_lmt, _root=dst_lmt._root)
+        block.num_frames = custom_property.num_frames
+        block.loop_frames = custom_property.loop_frames
+
+        active_offset = dst_lmt.block_offsets[custom_property.lmt_id]
+        active_offset.offset = header_size + i * 0xC0
         active_offset.block_header = block
-    
+        block.ofs_frame = cml_size
+        tracks, track_bf_size = _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size)
+        cml_size = track_bf_size
+        block.tracks = tracks
+        block.num_tracks = len(tracks)
+        block.end_pos = dst_lmt.Vec4(_parent=block, _root=dst_lmt._root)
+        block.end_pos.x = custom_property.end_pos[0]
+        block.end_pos.y = custom_property.end_pos[1]
+        block.end_pos.z = custom_property.end_pos[2]
+        block.end_pos.w = 0
+        block.end_quat = dst_lmt.Vec4(_parent=block, _root=dst_lmt._root)
+        block.end_quat.x = custom_property.end_quat[0]
+        block.end_quat.y = custom_property.end_quat[1]
+        block.end_quat.z = custom_property.end_quat[2]
+        block.end_quat.w = custom_property.end_quat[3]
+
+        events01, events02 = _serialize_events(dst_lmt, block, action)
+        block.events_01 = events01
+        block.events_02 = events02
+
+        block.event_buffer_01 = cml_size
+        block.num_events_01 = len(events01)
+        block.events_params_01 = custom_property.events_params_01
+        block.unused_ev_01 = [0] * 24
+        cml_size += block.num_events_01 * 8
+
+        block.event_buffer_02 = cml_size
+        block.num_events_02 = len(events02)
+        block.events_params_02 = custom_property.events_params_02
+        block.unused_ev_02 = [0] * 24
+        cml_size += block.num_events_02 * 8
+
     return cml_size
 
-def _serialize_tracks(dst_lmt, action):
+def _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size):
     tracks = []
-    cml_size = 0
+    armature = lmt_group.armature
+    cml_size += len(action.groups) * 32
     for curve_group in action.groups:
-        track = dst_lmt.Track49()
+        track = dst_lmt.Track49(_parent=block, _root=dst_lmt._root)
         name = curve_group.name
         retarget_index, index, action_type = name.split('.')
         track.joint_type = 0
@@ -676,62 +724,232 @@ def _serialize_tracks(dst_lmt, action):
             #     track.buffer_type = 4
             # else:
             track.buffer_type = 6
-            buffer, bf_size = _serialize_bone_rotation(dst_lmt, curve_group)
+            buffer, bf_size = _serialize_bone_rotation(dst_lmt, armature.data.bones[str(index)], track, curve_group)
         elif action_type == 'location':
-            track.usage = 1
-            buffer, bf_size = _serialize_bone_location(dst_lmt, curve_group)
+            if track.bone_index == 255:
+                track.usage = 4
+            else:
+                track.usage = 1
+            track.buffer_type = 9
+            buffer, bf_size = _serialize_bone_location(dst_lmt, armature.data.bones[str(index)], track, curve_group)
         elif action_type == 'scale':
             track.usage = 2
-            buffer, bf_size = _serialize_bone_scale(dst_lmt, curve_group)
+            track.buffer_type = 9
+            buffer, bf_size = _serialize_bone_scale(dst_lmt, track, curve_group)
         
-        track.data = buffer
+        track.weight = 1.0
+        track.data = buffer.to_byte_array()
         track.len_data = bf_size
         track.ofs_data = cml_size
         cml_size += bf_size
         tracks.append(track)
-    return tracks
+    return tracks, cml_size
 
-def _serialize_events(dst_lmt, action):
-    pass
+def _serialize_events(dst_lmt, dst_action, action):
+    pose_markers = action.pose_markers
+    ev1_markers = []
+    ev2_markers = []
+    for p in pose_markers:
+        event = dst_lmt.Event49(_parent=dst_action, _root=dst_lmt._root)
+        ev_custom_prop = p.dmc4_event_props
+        event.frame = p.frame
+        val = 0
+        for k, v in GroupHash.items():
+            bit = getattr(ev_custom_prop, k)
+            val |= (bit << v)
+        for i in range(8):
+            bit = ev_custom_prop.slots[i]
+            val |= bit << i
+        event.group_id = val
 
-def _serialize_bone_rotation(dst_lmt, fcurve_group):
+        if ev_custom_prop.param_ev_type == 'Hitbox':
+            ev1_markers.append(event)
+        else:
+            ev2_markers.append(event)
+
+    ev1_markers.sort(key=lambda x: x.frame)
+    ev2_markers.sort(key=lambda x: x.frame)
+
+    for i in range(len(ev1_markers) - 1):
+        ev1_markers[i].frame = ev1_markers[i+1].frame - ev1_markers[i].frame
+    ev1_markers[-1].frame = dst_action.num_frames - ev1_markers[-1].frame
+    for i in range(len(ev2_markers) - 1):
+        ev2_markers[i].frame = ev2_markers[i+1].frame - ev2_markers[i].frame
+    ev2_markers[-1].frame = dst_action.num_frames - ev2_markers[-1].frame
+    
+    return ev1_markers, ev2_markers
+
+def _serialize_bone_rotation(dst_lmt, bone, track, fcurve_group):
     kf_num = len(fcurve_group.channels[0].keyframe_points)
-    buffer = KaitaiStream(BytesIO(bytearray(kf_num * 8)))
     frame_counter = 1
-    for k in range(kf_num):
-        frame, w = fcurve_group.channels[0].keyframe_points[k].co
-        x = fcurve_group.channels[1].keyframe_points[k].co[1]
-        y = fcurve_group.channels[2].keyframe_points[k].co[1]
-        z = fcurve_group.channels[3].keyframe_points[k].co[1]
-        quat = FrameQuat4_14()
-        quat.from_quat([w, x, y, z], int(frame - frame_counter + 1))
-        buffer.write_bytes(bytes(quat))
-        frame_counter += frame
-    return buffer, (kf_num * 8)
+    if kf_num == 1:
+        buffer = KaitaiStream(BytesIO(bytearray(12)))
+        parent = bone.parent
+        parent_mat = parent.matrix_local.inverted() @ bone.matrix_local
+        parent_quat = parent_mat.to_quaternion() #convert back to bone space
+        track.buffer_type = 4
+        frame, w = fcurve_group.channels[0].keyframe_points[0].co
+        x = fcurve_group.channels[1].keyframe_points[0].co[1]
+        y = fcurve_group.channels[2].keyframe_points[0].co[1]
+        z = fcurve_group.channels[3].keyframe_points[0].co[1]
+        rot = parent_quat @ Quaternion([w, x, y, z])
+        track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+        track.ref_data.x = rot.x
+        track.ref_data.y = rot.y
+        track.ref_data.z = rot.z
+        track.ref_data.w = rot.w
+        buffer.write_bytes(struct.pack('fff', rot.x, rot.y, rot.z))
+        return buffer, 12
+    else:
+        buffer = KaitaiStream(BytesIO(bytearray(kf_num * 8)))
+        for k in range(kf_num):
+            parent = bone.parent
+            parent_mat = parent.matrix_local.inverted() @ bone.matrix_local
+            parent_quat = parent_mat.to_quaternion() #convert back to bone space
+            if k < kf_num - 1:
+                frame_next = fcurve_group.channels[0].keyframe_points[k + 1].co[0]
+            else:
+                frame_next = track._parent.num_frames
+            frame, w = fcurve_group.channels[0].keyframe_points[k].co
+            x = fcurve_group.channels[1].keyframe_points[k].co[1]
+            y = fcurve_group.channels[2].keyframe_points[k].co[1]
+            z = fcurve_group.channels[3].keyframe_points[k].co[1]
+            rot = parent_quat @ Quaternion([w, x, y, z])
+            if k == 0:
+                track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+                track.ref_data.x = rot.x
+                track.ref_data.y = rot.y
+                track.ref_data.z = rot.z
+                track.ref_data.w = rot.w
+            quat = FrameQuat4_14()
+            quat.from_quat([rot.w, rot.x, rot.y, rot.z], int(frame_next - frame - 1 if frame_next > frame else 0))
+            buffer.write_bytes(bytes(quat))
+            frame_counter += frame if frame > 0 else 1
+        return buffer, (kf_num * 8)
 
-def _serialize_bone_location(dst_lmt, fcurve_group):
+def _serialize_bone_location(dst_lmt, bone, track, fcurve_group):
     kf_num = len(fcurve_group.channels[0].keyframe_points)
-    buffer = KaitaiStream(BytesIO(bytearray(kf_num * 8)))
     frame_counter = 1
-    for k in range(kf_num):
-        frame, x = fcurve_group.channels[0].keyframe_points[k].co
-        y = fcurve_group.channels[1].keyframe_points[k].co[1]
-        z = fcurve_group.channels[2].keyframe_points[k].co[1]
-        buffer.write_bytes(struct.pack('fffI', x * 100.0, z * 100.0, -y * 100.0, int(frame - frame_counter + 1)))
-        frame_counter += frame
-    return buffer, (kf_num * 8)
+    if kf_num == 1:
+        buffer = KaitaiStream(BytesIO(bytearray(12)))
+        track.buffer_type = 2
+        frame, x = fcurve_group.channels[0].keyframe_points[0].co
+        y = fcurve_group.channels[1].keyframe_points[0].co[1]
+        z = fcurve_group.channels[2].keyframe_points[0].co[1]
+        track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
 
-def _serialize_bone_scale(dst_lmt, fcurve_group):
+        if bone.parent:
+            parent_space = bone.parent.matrix_local.inverted() @ bone.matrix_local
+            transform_mat = Matrix.Translation([x, y, z])
+            parent_space_frame = (parent_space @ transform_mat).to_translation()
+            x = parent_space_frame.x
+            y = parent_space_frame.y
+            z = parent_space_frame.z
+            track.ref_data.x = x * 100.0
+            track.ref_data.y = y * 100.0
+            track.ref_data.z = z * 100.0
+            track.ref_data.w = 1.0
+            buffer.write_bytes(struct.pack('fff', x * 100.0, y * 100.0, z * 100.0))
+        else:
+            if track.bone_index == 255:
+                track.ref_data.x = x * 100.0
+                track.ref_data.y = y * 100.0
+                track.ref_data.z = z * 100.0
+                track.ref_data.w = 1.0
+                buffer.write_bytes(struct.pack('fff', x * 100.0, y * 100.0, z * 100.0))
+            else:
+                track.ref_data.x = x * 100.0
+                track.ref_data.y = z * 100.0
+                track.ref_data.z = -y * 100.0
+                track.ref_data.w = 1.0
+                buffer.write_bytes(struct.pack('fff', x * 100.0, z * 100.0, -y * 100.0))
+        return buffer, 12
+    else:
+        buffer = KaitaiStream(BytesIO(bytearray(kf_num * 16)))
+        for k in range(kf_num):
+            frame, x = fcurve_group.channels[0].keyframe_points[k].co
+            y = fcurve_group.channels[1].keyframe_points[k].co[1]
+            z = fcurve_group.channels[2].keyframe_points[k].co[1]
+
+            if k < kf_num - 1:
+                frame_next = fcurve_group.channels[0].keyframe_points[k + 1].co[0]
+            else:
+                frame_next = track._parent.num_frames
+
+            if bone.parent:
+                parent_space = bone.parent.matrix_local.inverted() @ bone.matrix_local
+                transform_mat = Matrix.Translation([x, y, z])
+                parent_space_frame = (parent_space @ transform_mat).to_translation()
+                x = parent_space_frame.x
+                y = parent_space_frame.y
+                z = parent_space_frame.z
+
+                if k == 0:
+                    track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+                    track.ref_data.x = x * 100.0
+                    track.ref_data.y = y * 100.0
+                    track.ref_data.z = z * 100.0
+                    track.ref_data.w = 1.0
+                buffer.write_bytes(struct.pack('fffI', x * 100.0, y * 100.0,
+                                    z * 100.0, int(frame_next - frame if frame_next > frame else 0)))
+            else:
+                if track.bone_index == 255:
+                    if k == 0:
+                        track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+                        track.ref_data.x = x * 100.0
+                        track.ref_data.y = y * 100.0
+                        track.ref_data.z = z * 100.0
+                        track.ref_data.w = 1.0
+                    buffer.write_bytes(struct.pack('fffI', x * 100.0, y * 100.0,
+                                                    z * 100.0, int(frame_next - frame - 1 if frame_next > frame else 0)))
+                else:
+                    if k == 0:
+                        track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+                        track.ref_data.x = x * 100.0
+                        track.ref_data.y = z * 100.0
+                        track.ref_data.z = -y * 100.0
+                        track.ref_data.w = 1.0
+                    buffer.write_bytes(struct.pack('fffI', x * 100.0, z * 100.0,
+                                                    -y * 100.0, int(frame_next - frame - 1 if frame_next > frame else 0)))
+            frame_counter += frame if frame > 0 else 1
+        return buffer, (kf_num * 16)
+
+def _serialize_bone_scale(dst_lmt, track, fcurve_group):
     kf_num = len(fcurve_group.channels[0].keyframe_points)
-    buffer = KaitaiStream(BytesIO(bytearray(kf_num * 8)))
+
     frame_counter = 1
-    for k in range(kf_num):
-        frame, x = fcurve_group.channels[0].keyframe_points[k].co
-        y = fcurve_group.channels[1].keyframe_points[k].co[1]
-        z = fcurve_group.channels[2].keyframe_points[k].co[1]
-        buffer.write_bytes(struct.pack('fffI', x, y, z, int(frame - frame_counter + 1)))
-        frame_counter += frame
-    return buffer, (kf_num * 8)
+    if kf_num == 1:
+        buffer = KaitaiStream(BytesIO(bytearray(12)))
+        track.buffer_type = 2
+        frame, x = fcurve_group.channels[0].keyframe_points[0].co
+        y = fcurve_group.channels[1].keyframe_points[0].co[1]
+        z = fcurve_group.channels[2].keyframe_points[0].co[1]
+        track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+        track.ref_data.x = x
+        track.ref_data.y = y
+        track.ref_data.z = z
+        track.ref_data.w = 1.0
+        buffer.write_bytes(struct.pack('fff', x, y, z))
+        return buffer, 12
+    else:
+        buffer = KaitaiStream(BytesIO(bytearray(kf_num * 16)))
+        for k in range(kf_num):
+            frame, x = fcurve_group.channels[0].keyframe_points[k].co
+            y = fcurve_group.channels[1].keyframe_points[k].co[1]
+            z = fcurve_group.channels[2].keyframe_points[k].co[1]
+            if k < kf_num - 1:
+                frame_next = fcurve_group.channels[0].keyframe_points[k + 1].co[0]
+            else:
+                frame_next = track._parent.num_frames
+            if k == 0:
+                track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+                track.ref_data.x = x
+                track.ref_data.y = y
+                track.ref_data.z = z
+                track.ref_data.w = 1.0
+            buffer.write_bytes(struct.pack('fffI', x, y, z, int(frame_next - frame - 1 if frame_next > frame else 0)))
+            frame_counter += frame if frame > 0 else 1
+        return buffer, (kf_num * 16)
 
 def filter_armatures(self, obj):
     # TODO: filter by custom properties that indicate is
@@ -741,11 +959,11 @@ def filter_armatures(self, obj):
 @blender_registry.register_custom_properties_action("lmt_49", ("re5", "dmc4"))
 @blender_registry.register_blender_prop
 class Lmt49ActionCustomProperties(bpy.types.PropertyGroup):
-    #lmt_id: bpy.props.IntProperty(name='LMT index',default=0)
+    lmt_id: bpy.props.IntProperty(name='LMT index',default=0)
     num_frames: bpy.props.IntProperty(name='Frames')
     loop_frames: bpy.props.IntProperty(name='Loop frames')
-    #end_pos: bpy.props.FloatVectorProperty(name='Pos',size=3)
-    #end_quat: bpy.props.FloatVectorProperty(name='Quat',size=4)
+    end_pos: bpy.props.FloatVectorProperty(name='Pos',size=3)
+    end_quat: bpy.props.FloatVectorProperty(name='Quat',size=4)
     events_params_01: bpy.props.IntVectorProperty(size=8)
     events_params_02: bpy.props.IntVectorProperty(size=8)
 
@@ -764,9 +982,19 @@ class Lmt49ActionCustomProperties(bpy.types.PropertyGroup):
             except TypeError:
                 setattr(self, attr_name, hex(getattr(src_obj, attr_name)))
 
-    def copy_from_lmt(self, lmt_act):
+    def copy_from_lmt(self, lmt_act, index):
+        self.lmt_id = index
         self.num_frames = lmt_act.num_frames
         self.loop_frames = lmt_act.loop_frames
+        self.end_pos[0] = lmt_act.end_pos.x
+        self.end_pos[1] = lmt_act.end_pos.y
+        self.end_pos[2] = lmt_act.end_pos.z
+        self.end_quat[0] = lmt_act.end_quat.x
+        self.end_quat[1] = lmt_act.end_quat.y
+        self.end_quat[2] = lmt_act.end_quat.z
+        self.end_quat[3] = lmt_act.end_quat.w
+        self.events_params_01 = lmt_act.events_params_01
+        self.events_params_02 = lmt_act.events_params_02 
 
 @blender_registry.register_blender_prop
 class Lmt49Action(bpy.types.PropertyGroup):
@@ -888,7 +1116,8 @@ class AlbamLmtGroups(bpy.types.PropertyGroup):
 @blender_registry.register_blender_prop_albam(name='import_options_lmt')
 class ImportOptionsLMT(bpy.types.PropertyGroup):
     armature: bpy.props.PointerProperty(type=bpy.types.Object, poll=filter_armatures)
-    renamed_bone_flag: bpy.props.BoolProperty(name = 'Renamed bones')
+    renamed_bone_flag: bpy.props.BoolProperty(name = 'Renamed bones',
+                                              description='Check this box when bones are auto-renamed so import works properly')
 
 
 @blender_registry.register_import_options_custom_draw_func(extension='lmt')
