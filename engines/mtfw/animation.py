@@ -330,7 +330,7 @@ class FrameQuat4_14(Structure):
             self._z_sign = 1
             
         if quat[0] < 0.0:
-            quat *= -1.0
+            quat = [x * -1.0 for x in quat]
 
         R = np.sqrt(1.0 - quat[0])
         mag_safe = np.sqrt(1.0 - (quat[0] * quat[0]))
