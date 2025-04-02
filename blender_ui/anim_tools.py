@@ -107,6 +107,27 @@ class ALBAM_PT_AlbamActionRemoveAnim(bpy.types.Operator):
         return {"FINISHED"}
 
 @blender_registry.register_blender_type
+class ALBAM_PT_AlbamActionReorgFcurve(bpy.types.Operator):
+    bl_idname = "albam.reorganize_fcurves"
+    bl_label = "Reorganize F-Curves"
+    bl_description = "Clean up F-Curves for exporting. Use this for new animations before exporting"
+    def execute(self, context):
+        lmt_index = context.scene.albam.lmt_groups.active_group_id
+        lmt_item = context.scene.albam.lmt_groups.anim_group[lmt_index]
+        action = lmt_item.actions[lmt_item.active_id].action
+        for group in action.groups:
+            action.groups.remove(group)
+        for f in action.fcurves:
+            data_path = f.data_path
+            bone_name = data_path[data_path.find('[\"')+2:data_path.find('\"]')]
+            action_type = data_path.split('.')[-1]
+            group_name = f'{bone_name}.{action_type}'
+            group = action.groups.get(group_name) or action.groups.new(group_name)
+            f.group = group
+        return {"FINISHED"}
+    
+
+@blender_registry.register_blender_type
 class ALBAM_PT_AlbamActionSection(bpy.types.Panel):
     bl_category = "Albam [Beta]"
     bl_idname = "ALBAM_PT_AlbamActionSection"
@@ -136,14 +157,14 @@ class ALBAM_PT_AlbamActionSection(bpy.types.Panel):
             maxrows=5,
         )
         box.operator('albam.make_active')
-
+        box.operator('albam.reorganize_fcurves')
         action = lmt_item.actions[lmt_item.active_id].action
         #lmt_item.armature.animation_data.action = action
         #context.space_data.action = action
         app_id = action.albam_asset.app_id
-        self.layout.prop(action.albam_asset, 'lmt_index')
         custom_properties = action.albam_custom_properties.get_custom_properties_for_appid(app_id)
 
+        self.layout.prop(custom_properties, 'lmt_id')
         self.layout.prop(custom_properties, 'num_frames')
         self.layout.prop(custom_properties, 'loop_frames')
         self.layout.prop(custom_properties, 'end_pos')
@@ -222,8 +243,6 @@ class ALBAM_PT_AlbamEventSection(bpy.types.Panel):
         lmt_index = context.scene.albam.lmt_groups.active_group_id
         lmt_item = context.scene.albam.lmt_groups.anim_group[lmt_index]
         action = lmt_item.actions[lmt_item.active_id].action
-        app_id = context.scene.albam.apps.app_selected
-        action_custom_prop = action.albam_custom_properties.get_custom_properties_for_appid(app_id)
 
         row = self.layout.row()
         col = row.column()
@@ -299,8 +318,6 @@ class ALBAM_PT_AlbamHashedEventSection(bpy.types.Panel):
         lmt_index = context.scene.albam.lmt_groups.active_group_id
         lmt_item = context.scene.albam.lmt_groups.anim_group[lmt_index]
         action = lmt_item.actions[lmt_item.active_id].action
-        app_id = context.scene.albam.apps.app_selected
-        action_custom_prop = action.albam_custom_properties.get_custom_properties_for_appid(app_id)
         pose_marker = action.pose_markers.active
         ev_custom_properties = pose_marker.dmc4_event_props
         
