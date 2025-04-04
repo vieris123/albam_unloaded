@@ -103,7 +103,7 @@ class ALBAM_PT_AlbamActionRemoveAnim(bpy.types.Operator):
         lmt_item = context.scene.albam.lmt_groups.anim_group[lmt_index]
         action = lmt_item.actions[lmt_item.active_id].action
         lmt_item.actions.remove(lmt_item.active_id)
-        bpy.data.actions.remove(action)
+        #bpy.data.actions.remove(action)
         return {"FINISHED"}
 
 @blender_registry.register_blender_type

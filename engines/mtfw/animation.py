@@ -836,7 +836,7 @@ def _serialize_bone_rotation(dst_lmt, bone, track, fcurve_group):
                 y = fcurve_group.channels[2].keyframe_points[k].co[1]
                 z = fcurve_group.channels[3].keyframe_points[k].co[1]
                 rot = parent_quat @ Quaternion([w, x, y, z])
-                if k == 0:
+                if k == kf_num - 1:
                     track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
                     track.ref_data.x = rot.x
                     track.ref_data.y = rot.y
@@ -853,7 +853,7 @@ def _serialize_bone_rotation(dst_lmt, bone, track, fcurve_group):
                 x = fcurve_group.channels[1].keyframe_points[k].co[1]
                 y = fcurve_group.channels[2].keyframe_points[k].co[1]
                 z = fcurve_group.channels[3].keyframe_points[k].co[1]
-                if k == 0:
+                if k == kf_num - 1:
                     track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
                     track.ref_data.x = x
                     track.ref_data.y = y
@@ -922,7 +922,7 @@ def _serialize_bone_location(dst_lmt, bone, track, fcurve_group):
                 y = parent_space_frame.y
                 z = parent_space_frame.z
 
-                if k == 0:
+                if k == kf_num - 1:
                     track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
                     track.ref_data.x = x * 100.0
                     track.ref_data.y = y * 100.0
@@ -932,7 +932,7 @@ def _serialize_bone_location(dst_lmt, bone, track, fcurve_group):
                                     z * 100.0, int(frame_next - frame if frame_next > frame else 0)))
             else:
                 if track.bone_index == 255:
-                    if k == 0:
+                    if k == kf_num - 1:
                         track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
                         track.ref_data.x = x * 100.0
                         track.ref_data.y = y * 100.0
@@ -941,7 +941,7 @@ def _serialize_bone_location(dst_lmt, bone, track, fcurve_group):
                     buffer.write_bytes(struct.pack('fffI', x * 100.0, y * 100.0,
                                                     z * 100.0, int(frame_next - frame - 1 if frame_next > frame else 0)))
                 else:
-                    if k == 0:
+                    if k == kf_num - 1:
                         track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
                         track.ref_data.x = x * 100.0
                         track.ref_data.y = z * 100.0
@@ -979,7 +979,7 @@ def _serialize_bone_scale(dst_lmt, track, fcurve_group):
                 frame_next = fcurve_group.channels[0].keyframe_points[k + 1].co[0]
             else:
                 frame_next = track._parent.num_frames
-            if k == 0:
+            if k == kf_num - 1:
                 track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
                 track.ref_data.x = x
                 track.ref_data.y = y
