@@ -181,16 +181,29 @@ def load_lmt(file_item, context):
                     action_type = 'location'
                     decoded_frames = decode_type_9(track.data)
                     decoded_frames = _parent_space_to_local(decoded_frames, armature, bone_index)
+                    if block.block_header.loop_frames > 0:
+                        ref_frame = _parent_space_to_local([Vector([track.ref_data.x / 100.0, track.ref_data.y / 100.0,
+                                                                     track.ref_data.z / 100.0])],
+                                                            armature, bone_index)[0]
+                        decoded_frames[block.block_header.loop_frames - 1] = ref_frame
                 elif track.usage == 2:
                     TRACK_MODE = 'scale'
                     action_type = 'scale'
                     decoded_frames = decode_type_9_scale(track.data)
                     world_pos_fix(decoded_frames)
+                    if block.block_header.loop_frames > 0:
+                        ref_frame = [Vector([track.ref_data.x, track.ref_data.y, track.ref_data.z])]
+                        world_pos_fix(ref_frame)
+                        decoded_frames[block.block_header.loop_frames - 1] = ref_frame[0]
                 elif track.usage == 4:
                     TRACK_MODE = 'location'
                     action_type = 'location'
                     decoded_frames = decode_type_9(track.data)
                     world_pos_fix(decoded_frames)
+                    if block.block_header.loop_frames > 0:
+                        ref_frame = [Vector([track.ref_data.x / 100.0, track.ref_data.y / 100.0, track.ref_data.z / 100.0])]
+                        world_pos_fix(ref_frame)
+                        decoded_frames[block.block_header.loop_frames - 1] = ref_frame[0]
                 else:
                     continue
 
@@ -904,6 +917,11 @@ def _serialize_bone_location(dst_lmt, bone, track, fcurve_group):
         return buffer, 12
     else:
         buffer = KaitaiStream(BytesIO(bytearray(kf_num * 16)))
+        track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+        track.ref_data.x = 0.0
+        track.ref_data.y = 0.0
+        track.ref_data.z = 0.0
+        track.ref_data.w = 1.0
         for k in range(kf_num):
             frame, x = fcurve_group.channels[0].keyframe_points[k].co
             y = fcurve_group.channels[1].keyframe_points[k].co[1]
@@ -911,6 +929,11 @@ def _serialize_bone_location(dst_lmt, bone, track, fcurve_group):
 
             if k < kf_num - 1:
                 frame_next = fcurve_group.channels[0].keyframe_points[k + 1].co[0]
+                if frame_next == track._parent.loop_frames and track._parent.loop_frames > 0:
+                    if k < kf_num - 2:
+                        frame_next = fcurve_group.channels[0].keyframe_points[k + 2].co[0]
+                    else:
+                        frame_next = track._parent.num_frames
             else:
                 frame_next = track._parent.num_frames
 
@@ -921,32 +944,31 @@ def _serialize_bone_location(dst_lmt, bone, track, fcurve_group):
                 x = parent_space_frame.x
                 y = parent_space_frame.y
                 z = parent_space_frame.z
-
-                if k == kf_num - 1:
-                    track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+                if frame == track._parent.loop_frames and track._parent.loop_frames > 0:
                     track.ref_data.x = x * 100.0
                     track.ref_data.y = y * 100.0
                     track.ref_data.z = z * 100.0
                     track.ref_data.w = 1.0
+                    continue
                 buffer.write_bytes(struct.pack('fffI', x * 100.0, y * 100.0,
                                     z * 100.0, int(frame_next - frame if frame_next > frame else 0)))
             else:
                 if track.bone_index == 255:
-                    if k == kf_num - 1:
-                        track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+                    if frame == track._parent.loop_frames and track._parent.loop_frames > 0:
                         track.ref_data.x = x * 100.0
                         track.ref_data.y = y * 100.0
                         track.ref_data.z = z * 100.0
                         track.ref_data.w = 1.0
+                        continue
                     buffer.write_bytes(struct.pack('fffI', x * 100.0, y * 100.0,
                                                     z * 100.0, int(frame_next - frame - 1 if frame_next > frame else 0)))
                 else:
-                    if k == kf_num - 1:
-                        track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+                    if frame == track._parent.loop_frames and track._parent.loop_frames > 0:
                         track.ref_data.x = x * 100.0
                         track.ref_data.y = z * 100.0
                         track.ref_data.z = -y * 100.0
                         track.ref_data.w = 1.0
+                        continue
                     buffer.write_bytes(struct.pack('fffI', x * 100.0, z * 100.0,
                                                     -y * 100.0, int(frame_next - frame - 1 if frame_next > frame else 0)))
             frame_counter += frame if frame > 0 else 1
