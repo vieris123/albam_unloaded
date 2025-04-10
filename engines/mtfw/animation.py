@@ -147,7 +147,11 @@ def load_lmt(file_item, context):
                 action_type = 'rotation'
                 decoded_frames = decode_type_6(track.data)
                 decoded_frames = _parent_space_to_local_rot(decoded_frames, armature, bone_index)
-
+                if block.block_header.loop_frames > 0 and len(decoded_frames) > block.block_header.loop_frames:
+                    ref_frame = _parent_space_to_local_rot([Quaternion([track.ref_data.w, track.ref_data.x,
+                                                                track.ref_data.y, track.ref_data.z])],
+                                                                armature, bone_index)[0]
+                    decoded_frames[block.block_header.loop_frames - 1] = ref_frame
             elif track.buffer_type == 4:
                 TRACK_MODE = "rotation_quaternion"
                 action_type = 'rotation'
@@ -181,7 +185,7 @@ def load_lmt(file_item, context):
                     action_type = 'location'
                     decoded_frames = decode_type_9(track.data)
                     decoded_frames = _parent_space_to_local(decoded_frames, armature, bone_index)
-                    if block.block_header.loop_frames > 0:
+                    if block.block_header.loop_frames > 0 and len(decoded_frames) > block.block_header.loop_frames:
                         ref_frame = _parent_space_to_local([Vector([track.ref_data.x / 100.0, track.ref_data.y / 100.0,
                                                                      track.ref_data.z / 100.0])],
                                                             armature, bone_index)[0]
@@ -191,7 +195,7 @@ def load_lmt(file_item, context):
                     action_type = 'scale'
                     decoded_frames = decode_type_9_scale(track.data)
                     world_pos_fix(decoded_frames)
-                    if block.block_header.loop_frames > 0:
+                    if block.block_header.loop_frames > 0 and len(decoded_frames) > block.block_header.loop_frames:
                         ref_frame = [Vector([track.ref_data.x, track.ref_data.y, track.ref_data.z])]
                         world_pos_fix(ref_frame)
                         decoded_frames[block.block_header.loop_frames - 1] = ref_frame[0]
@@ -200,7 +204,7 @@ def load_lmt(file_item, context):
                     action_type = 'location'
                     decoded_frames = decode_type_9(track.data)
                     world_pos_fix(decoded_frames)
-                    if block.block_header.loop_frames > 0:
+                    if block.block_header.loop_frames > 0 and len(decoded_frames) > block.block_header.loop_frames:
                         ref_frame = [Vector([track.ref_data.x / 100.0, track.ref_data.y / 100.0, track.ref_data.z / 100.0])]
                         world_pos_fix(ref_frame)
                         decoded_frames[block.block_header.loop_frames - 1] = ref_frame[0]
@@ -734,28 +738,31 @@ def _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size):
         else:
             track.bone_index = int(retarget_index)
 
-        #Track type
-        if action_type in ['rotation', 'rotation_quaternion']:
-            track.usage = 0
-            track_range = curve_group.channels[0].range()
-            # if track_range[0] == track_range[1]:
-            #     track.buffer_type = 4
-            # else:
-            track.buffer_type = 6
-            buffer, bf_size = _serialize_bone_rotation(dst_lmt, bone, track, curve_group)
-        elif action_type == 'location':
-            if track.bone_index == 255:
-                track.usage = 4
+        try:
+            #Track type
+            if action_type in ['rotation', 'rotation_quaternion']:
+                track.usage = 0
+                track_range = curve_group.channels[0].range()
+                # if track_range[0] == track_range[1]:
+                #     track.buffer_type = 4
+                # else:
+                track.buffer_type = 6
+                buffer, bf_size = _serialize_bone_rotation(dst_lmt, bone, track, curve_group)
+            elif action_type == 'location':
+                if track.bone_index == 255:
+                    track.usage = 4
+                else:
+                    track.usage = 1
+                track.buffer_type = 9
+                buffer, bf_size = _serialize_bone_location(dst_lmt, bone, track, curve_group)
+            elif action_type == 'scale':
+                track.usage = 2
+                track.buffer_type = 9
+                buffer, bf_size = _serialize_bone_scale(dst_lmt, track, curve_group)
             else:
-                track.usage = 1
-            track.buffer_type = 9
-            buffer, bf_size = _serialize_bone_location(dst_lmt, bone, track, curve_group)
-        elif action_type == 'scale':
-            track.usage = 2
-            track.buffer_type = 9
-            buffer, bf_size = _serialize_bone_scale(dst_lmt, track, curve_group)
-        else:
-            raise Exception(f'No anim data at {data_path}')
+                raise Exception(f'No anim data at {data_path}')
+        except IndexError:
+            print('BAKE YOUR ANIM!!!!')
         
         track.weight = 1.0
         track.data = buffer.to_byte_array()
@@ -835,6 +842,11 @@ def _serialize_bone_rotation(dst_lmt, bone, track, fcurve_group):
             return buffer, 12
     else:
         buffer = KaitaiStream(BytesIO(bytearray(kf_num * 8)))
+        track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+        track.ref_data.x = 0.0
+        track.ref_data.y = 0.0
+        track.ref_data.z = 0.0
+        track.ref_data.w = 1.0
         for k in range(kf_num):
             if bone.parent:
                 parent = bone.parent
@@ -842,6 +854,11 @@ def _serialize_bone_rotation(dst_lmt, bone, track, fcurve_group):
                 parent_quat = parent_mat.to_quaternion() #convert back to bone space
                 if k < kf_num - 1:
                     frame_next = fcurve_group.channels[0].keyframe_points[k + 1].co[0]
+                    if frame_next == track._parent.loop_frames and track._parent.loop_frames > 0:
+                        if k < kf_num - 2:
+                            frame_next = fcurve_group.channels[0].keyframe_points[k + 2].co[0]
+                        else:
+                            frame_next = track._parent.num_frames
                 else:
                     frame_next = track._parent.num_frames
                 frame, w = fcurve_group.channels[0].keyframe_points[k].co
@@ -849,29 +866,34 @@ def _serialize_bone_rotation(dst_lmt, bone, track, fcurve_group):
                 y = fcurve_group.channels[2].keyframe_points[k].co[1]
                 z = fcurve_group.channels[3].keyframe_points[k].co[1]
                 rot = parent_quat @ Quaternion([w, x, y, z])
-                if k == kf_num - 1:
-                    track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
-                    track.ref_data.x = rot.x
-                    track.ref_data.y = rot.y
-                    track.ref_data.z = rot.z
-                    track.ref_data.w = rot.w
+                if frame == track._parent.loop_frames and track._parent.loop_frames > 0:
+                    track.ref_data.x = x
+                    track.ref_data.y = y
+                    track.ref_data.z = z
+                    track.ref_data.w = w
+                    continue
                 quat = FrameQuat4_14()
                 quat.from_quat([rot.w, rot.x, rot.y, rot.z], int(frame_next - frame - 1 if frame_next > frame else 0))
             else:
                 if k < kf_num - 1:
                     frame_next = fcurve_group.channels[0].keyframe_points[k + 1].co[0]
+                    if frame_next == track._parent.loop_frames and track._parent.loop_frames > 0:
+                        if k < kf_num - 2:
+                            frame_next = fcurve_group.channels[0].keyframe_points[k + 2].co[0]
+                        else:
+                            frame_next = track._parent.num_frames
                 else:
                     frame_next = track._parent.num_frames
                 frame, w = fcurve_group.channels[0].keyframe_points[k].co
                 x = fcurve_group.channels[1].keyframe_points[k].co[1]
                 y = fcurve_group.channels[2].keyframe_points[k].co[1]
                 z = fcurve_group.channels[3].keyframe_points[k].co[1]
-                if k == kf_num - 1:
-                    track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+                if frame == track._parent.loop_frames and track._parent.loop_frames > 0:
                     track.ref_data.x = x
                     track.ref_data.y = y
                     track.ref_data.z = z
                     track.ref_data.w = w
+                    continue
                 quat = FrameQuat4_14()
                 quat.from_quat([w, x, y, z], int(frame_next - frame - 1 if frame_next > frame else 0))
             buffer.write_bytes(bytes(quat))
