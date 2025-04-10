@@ -201,12 +201,14 @@ class ALBAM_PT_AlbamAddEvent(bpy.types.Operator):
         lmt_item = context.scene.albam.lmt_groups.anim_group[lmt_index]
         action = lmt_item.actions[lmt_item.active_id].action
         app_id = context.scene.albam.apps.app_selected
-        action_custom_prop = action.albam_custom_properties.get_custom_properties_for_appid(app_id)
+        action_custom_prop = action.albam_custom_properties.get_custom_properties_for_appid('dmc4')
 
         pose_marker = action.pose_markers.new(self.name)
         pose_marker.frame = context.scene.frame_current
-        pose_marker.dmc4_event_props.setup(self.ev_type, 0)
-        pose_marker.dmc4_event_props.action = lmt_item.actions[lmt_item.active_id]
+        event = action_custom_prop.event_markers.add()
+        event.setup(self.ev_type, 0)
+        event.action = lmt_item.actions[lmt_item.active_id]
+        event.name = pose_marker.name
 
         return {"FINISHED"}
 
@@ -223,7 +225,10 @@ class ALBAM_PT_AlbamRemoveEvent(bpy.types.Operator):
         lmt_index = context.scene.albam.lmt_groups.active_group_id
         lmt_item = context.scene.albam.lmt_groups.anim_group[lmt_index]
         action = lmt_item.actions[lmt_item.active_id].action
+        action_custom_prop = action.albam_custom_properties.get_custom_properties_for_appid('dmc4')
         pose_marker = action.pose_markers.active
+        index = action.pose_markers.active_index
+        action_custom_prop.event_markers.remove(index)
         action.pose_markers.remove(pose_marker)
         return {"FINISHED"}
 
@@ -275,9 +280,9 @@ class ALBAM_PT_AlbamIndexedEventSection(bpy.types.Panel):
         lmt_item = context.scene.albam.lmt_groups.anim_group[lmt_index]
         action = lmt_item.actions[lmt_item.active_id].action
         app_id = context.scene.albam.apps.app_selected
-        action_custom_prop = action.albam_custom_properties.get_custom_properties_for_appid(app_id)
+        action_custom_prop = action.albam_custom_properties.get_custom_properties_for_appid('dmc4')
         pose_marker = action.pose_markers.active
-        ev_custom_properties = pose_marker.dmc4_event_props
+        ev_custom_properties = action_custom_prop.event_markers[action.pose_markers.active_index]
 
         row = self.layout.row(align=True)
         split = row.split(factor=0.5,align=True)
@@ -287,7 +292,7 @@ class ALBAM_PT_AlbamIndexedEventSection(bpy.types.Panel):
         for i in range(8):
             col.label(text=f'Event {i+1}')
         col = row_toggle.column()    
-        col.prop(pose_marker.dmc4_event_props, 'slots', text='', toggle=0)
+        col.prop(ev_custom_properties, 'slots', text='', toggle=0)
 
         split = split.split()
         col = split.column()
@@ -318,11 +323,12 @@ class ALBAM_PT_AlbamHashedEventSection(bpy.types.Panel):
         lmt_index = context.scene.albam.lmt_groups.active_group_id
         lmt_item = context.scene.albam.lmt_groups.anim_group[lmt_index]
         action = lmt_item.actions[lmt_item.active_id].action
+        action_custom_prop = action.albam_custom_properties.get_custom_properties_for_appid('dmc4')
         pose_marker = action.pose_markers.active
-        ev_custom_properties = pose_marker.dmc4_event_props
+        ev_custom_properties = action_custom_prop.event_markers[action.pose_markers.active_index]
         
         for k in ev_custom_properties.__annotations__:
-            if k in ['slots', 'param_ev_type']:
+            if k in ['slots', 'param_ev_type', 'marker']:
                 continue
             self.layout.prop(ev_custom_properties, k, slider=True)
     

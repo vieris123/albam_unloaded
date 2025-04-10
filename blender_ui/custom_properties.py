@@ -199,7 +199,7 @@ def AlbamCustomPropertiesFactory(kind: str):
 
     # missing bl_label and bl_idname in cls dict?
     # https://projects.blender.org/blender/blender/issues/86719#issuecomment-232525
-    assert kind in ("mesh", "material", "image","action")
+    assert kind in ("mesh", "material", "image", "action")
     data, appid_map, appid_map_secondary = create_data_custom_properties(f"custom_properties_{kind}")
 
     return type(

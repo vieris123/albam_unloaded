@@ -99,19 +99,23 @@ def load_lmt(file_item, context):
         cumulative_frames = 0
         action_group.coll_ev = block.block_header.events_params_01
         for event in block.block_header.events_01:
+            event_prop = custom_property.event_markers.add()
             marker = action.pose_markers.new(f'ev1_{cumulative_frames}_{event.group_id}')
             marker.frame = cumulative_frames
-            marker.dmc4_event_props.setup('Hitbox', event.group_id)
-            marker.dmc4_event_props.action = action_group
+            event_prop.setup('Hitbox', event.group_id)
+            event_prop.action = action_group
+            event.name = marker.name
             cumulative_frames += event.frame
 
         cumulative_frames = 0
         action_group.sfx_ev = block.block_header.events_params_01
         for event in block.block_header.events_02:
+            event_prop = custom_property.event_markers.add()
             marker = action.pose_markers.new(f'ev2_{cumulative_frames}_{event.group_id}')
             marker.frame = cumulative_frames
-            marker.dmc4_event_props.setup('Sound', event.group_id)
-            marker.dmc4_event_props.action = action_group
+            event_prop.setup('Sound', event.group_id)
+            event_prop.action = action_group
+            event.name = marker.name
             cumulative_frames += event.frame
 
         #Loops
@@ -258,12 +262,6 @@ def load_lmt(file_item, context):
                     curve.keyframe_points.add(1)
                     curve.keyframe_points[-1].co = (frame_index + 1, frame_data[curve_idx])
                     curve.keyframe_points[-1].interpolation = 'CUBIC'
-
-    # exportable = context.scene.albam.exportable.file_list.add()
-    # exportable.bl_object = lmt_group
-
-    # context.scene.albam.exportable.file_list.update()
-
 
 def _create_bone_mapping(armature_obj):
     mapping = {}
@@ -774,22 +772,22 @@ def _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size):
 
 def _serialize_events(dst_lmt, dst_action, action):
     pose_markers = action.pose_markers
+    custom_prop = action.get_custom_properties_for_appid('dmc4')
     ev1_markers = []
     ev2_markers = []
-    for p in pose_markers:
+    for ev in custom_prop.event_markers:
         event = dst_lmt.Event49(_parent=dst_action, _root=dst_lmt._root)
-        ev_custom_prop = p.dmc4_event_props
-        event.frame = p.frame
+        event.frame = ev.marker.frame
         val = 0
         for k, v in GroupHash.items():
-            bit = getattr(ev_custom_prop, k)
+            bit = getattr(ev, k)
             val |= (bit << v)
         for i in range(8):
-            bit = ev_custom_prop.slots[i]
+            bit = ev.slots[i]
             val |= bit << i
         event.group_id = val
 
-        if ev_custom_prop.param_ev_type == 'Hitbox':
+        if ev.param_ev_type == 'Hitbox':
             ev1_markers.append(event)
         else:
             ev2_markers.append(event)
@@ -1038,6 +1036,50 @@ def filter_armatures(self, obj):
     # a RE5 compatible armature
     return obj.type == 'ARMATURE'
 
+#@blender_registry.register_blender_props_to_type('TimelineMarker', 'dmc4_event_props')
+@blender_registry.register_blender_prop
+class DMC4EventGroup(bpy.types.PropertyGroup):
+    main_sword_display: bpy.props.IntProperty()
+    dante_yamato_display: bpy.props.IntProperty()
+    stand_fade_efx: bpy.props.IntProperty()
+    ex_speedup: bpy.props.IntProperty()
+    stand_fade: bpy.props.IntProperty()
+    stand_flicker: bpy.props.IntProperty()
+    stand_transp: bpy.props.IntProperty()
+    right_foot_ik: bpy.props.IntProperty()
+    left_foot_ik: bpy.props.IntProperty()
+    gun_display: bpy.props.IntProperty()
+    face_swap: bpy.props.IntProperty()
+    stand_sword_disp: bpy.props.IntProperty()
+    sword_trail: bpy.props.IntProperty()
+    slots: bpy.props.BoolVectorProperty(name='Toggles',size=8)
+    param_ev_type: bpy.props.StringProperty()
+
+    def setup(self, ev_type, value):
+        for k, v in GroupHash.items():
+            val = (value >> v) & ((1 << GroupBitNum[k]) - 1)
+            setattr(self, k, val)
+            #self.__dict__.update({k:val})
+        for i in range(8):
+            self.slots[i] = ((value >> i) & 1)
+        self.param_ev_type = ev_type
+
+    def copy_custom_properties_to(self, dst_obj):
+        for attr_name in self.__annotations__:
+            if type(getattr(self, attr_name)) is str:
+                setattr(dst_obj, attr_name, int(getattr(self, attr_name), 16))
+            else:
+                setattr(dst_obj, attr_name, getattr(self, attr_name))
+
+    # FIXME: dedupe
+    def copy_custom_properties_from(self, src_obj):
+        for attr_name in self.__annotations__:
+            try:
+                setattr(self, attr_name, getattr(src_obj, attr_name))
+            except TypeError:
+                setattr(self, attr_name, hex(getattr(src_obj, attr_name)))
+
+
 @blender_registry.register_custom_properties_action("lmt_49", ("re5", "dmc4"))
 @blender_registry.register_blender_prop
 class Lmt49ActionCustomProperties(bpy.types.PropertyGroup):
@@ -1048,7 +1090,7 @@ class Lmt49ActionCustomProperties(bpy.types.PropertyGroup):
     end_quat: bpy.props.FloatVectorProperty(name='Quat',size=4)
     events_params_01: bpy.props.IntVectorProperty(size=8)
     events_params_02: bpy.props.IntVectorProperty(size=8)
-
+    event_markers: bpy.props.CollectionProperty(type=DMC4EventGroup)
     def copy_custom_properties_to(self, dst_obj):
         for attr_name in self.__annotations__:
             if type(getattr(self, attr_name)) is str:
@@ -1122,49 +1164,6 @@ GroupBitNum = {
     'stand_sword_disp': 1,
     'sword_trail': 1
 }
-
-@blender_registry.register_blender_props_to_type('TimelineMarker', 'dmc4_event_props')
-class DMC4EventGroup(bpy.types.PropertyGroup):
-    main_sword_display: bpy.props.IntProperty()
-    dante_yamato_display: bpy.props.IntProperty()
-    stand_fade_efx: bpy.props.IntProperty()
-    ex_speedup: bpy.props.IntProperty()
-    stand_fade: bpy.props.IntProperty()
-    stand_flicker: bpy.props.IntProperty()
-    stand_transp: bpy.props.IntProperty()
-    right_foot_ik: bpy.props.IntProperty()
-    left_foot_ik: bpy.props.IntProperty()
-    gun_display: bpy.props.IntProperty()
-    face_swap: bpy.props.IntProperty()
-    stand_sword_disp: bpy.props.IntProperty()
-    sword_trail: bpy.props.IntProperty()
-    slots: bpy.props.BoolVectorProperty(name='Toggles',size=8)
-    param_ev_type: bpy.props.StringProperty()
-
-    def setup(self, ev_type, value):
-        for k, v in GroupHash.items():
-            val = (value >> v) & ((1 << GroupBitNum[k]) - 1)
-            setattr(self, k, val)
-            #self.__dict__.update({k:val})
-        for i in range(8):
-            self.slots[i] = ((value >> i) & 1)
-        self.param_ev_type = ev_type
-
-    def copy_custom_properties_to(self, dst_obj):
-        for attr_name in self.__annotations__:
-            if type(getattr(self, attr_name)) is str:
-                setattr(dst_obj, attr_name, int(getattr(self, attr_name), 16))
-            else:
-                setattr(dst_obj, attr_name, getattr(self, attr_name))
-
-    # FIXME: dedupe
-    def copy_custom_properties_from(self, src_obj):
-        for attr_name in self.__annotations__:
-            try:
-                setattr(self, attr_name, getattr(src_obj, attr_name))
-            except TypeError:
-                setattr(self, attr_name, hex(getattr(src_obj, attr_name)))
-
 
 @blender_registry.register_blender_prop
 class AlbamActionGroup(bpy.types.PropertyGroup):
