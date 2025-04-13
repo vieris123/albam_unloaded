@@ -772,12 +772,12 @@ def _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size):
 
 def _serialize_events(dst_lmt, dst_action, action):
     pose_markers = action.pose_markers
-    custom_prop = action.get_custom_properties_for_appid('dmc4')
+    custom_prop = action.albam_custom_properties.get_custom_properties_for_appid('dmc4')
     ev1_markers = []
     ev2_markers = []
-    for ev in custom_prop.event_markers:
+    for ind, ev in enumerate(custom_prop.event_markers):
         event = dst_lmt.Event49(_parent=dst_action, _root=dst_lmt._root)
-        event.frame = ev.marker.frame
+        event.frame = action.pose_markers[ind].frame
         val = 0
         for k, v in GroupHash.items():
             bit = getattr(ev, k)
