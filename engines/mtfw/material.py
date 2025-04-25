@@ -1408,7 +1408,7 @@ class Mod153MaterialCustomProperties(bpy.types.PropertyGroup):
         options=set()
     )
     func_lighting_enum = bpy.props.EnumProperty(
-        name="func ligting",
+        name="func lighting",
         description="select lighting type",
         items=[
             ("0x0", "LIGHTING_NONE", "", 1),
@@ -1499,10 +1499,91 @@ class Mod153MaterialCustomProperties(bpy.types.PropertyGroup):
     func_lighting: func_lighting_enum
     func_normalmap: func_normalmap_enum
     func_specular: func_specular_enum
-    func_lightmap: func_lighting_enum
+    func_lightmap: func_lightmap_enum
     func_multitexture: func_multitexture_enum
-    htechnique: bpy.props.StringProperty(name="H-technique",  # noqa: F821
-                                         default="0x8727e606", options=set())  # noqa: F821
+    htechnique: bpy.props.EnumProperty(
+        name='H-technique',
+        items=[
+        ('0x17796f56', 'tXfScreenClear','', 0),
+        ('0xcab2a170', 'tXfScreenCopy','', 1),
+        ('0x7e4138dc', 'tXfResolve','', 2),
+        ('0xf7769eec', 'tXfBackBufferCopy','', 3),
+        ('0xb6855e0f', 'tXfDFAACopy','', 4),
+        ('0xfe9a5edf', 'tXfYUY2Copy','', 5),
+        ('0x3e5389ee', 'tXfRGBICopy','', 6),
+        ('0x3af9e19f', 'tXfSwizzleCopy','', 7),
+        ('0x7e9c2dee', 'tXfLDR2Copy','', 8),
+        ('0x26461f2a', 'tXfRGBICubeCopy','', 9),
+        ('0x48e2d4bb', 'tXfSubPixelCopy','', 10),
+        ('0x96f834af', 'tXfReductionZCopy','', 11),
+        ('0xacfae3e4', 'tXfOcclusion','', 12),
+        ('0x7d658231', 'tXfDPMap2CubaMap','', 13),
+        ('0x4c2f2887', 'tXfMaterialStreamOut','', 14),
+        ('0x3b810b10', 'tXfMaterialDebug','', 15),
+        ('0xaa626ffb', 'tXfMaterialZPass','', 16),
+        ('0x97471581', 'tXfMaterialVelocity','', 17),
+        ('0x53ae7416', 'tXfMaterialShadowReceiver','', 18),
+        ('0x30b6bdb8', 'tXfMaterialShadowCaster','', 19),
+        ('0x88367c19', 'tXfMaterialStandard','', 20),
+        ('0x8335b668', 'tXfMaterialFur','', 21),
+        ('0x91fc623e', 'tXfShapeBlend','', 22),
+        ('0xe0e727f0', 'tXfMaterialEdge','', 23),
+        ('0x9df75be4', 'tXfFilterLightScattering','', 24),
+        ('0x640e8a05', 'tXfFilterStandard','', 25),
+        ('0x2d5767f8', 'tXfFilterBloom','', 26),
+        ('0x185168f1', 'tXfFilterDOF','', 27),
+        ('0x2e1ad607', 'tXfFilterTVNoise','', 28),
+        ('0xaf9cb5e1', 'tXfFilterVolumeNoise','', 29),
+        ('0x2bb2716a', 'tXfFilterRadialBlur','', 30),
+        ('0xf4db0ad3', 'tXfFilterFeedbackBlur','', 31),
+        ('0xe8b68a03', 'tXfFilterToneMap','', 32),
+        ('0xd9f6f683', 'tXfFilterToneMapSub','', 33),
+        ('0xf7c48941', 'tXfFilterGaussianBlur','', 34),
+        ('0x5ce1a976', 'tXfFilterMotionBlur','', 35),
+        ('0x0e705104', 'tXfFilterMotionBlurI2G','', 36),
+        ('0xa8a5cb2e', 'tXfFilterMotionBlurCopyI2G','', 37),
+        ('0x9d1670d5', 'tXfFilterMerge','', 38),
+        ('0x414e40d3', 'tXfFilterImagePlane','', 39),
+        ('0x2b6ec81b', 'tXfFilterColorCorrect','', 40),
+        ('0x156c78a5', 'tXfFilterColorCorrect2','', 41),
+        ('0xb1c1f7f1', 'tXfFilterBlur','', 42),
+        ('0xb05be88a', 'tXfFilterI2GFur','', 43),
+        ('0xcc59e4b5', 'tXfFilterI2GDOF','', 44),
+        ('0x940f920a', 'tXfTextureConvertHeightMapToNormalMap','', 45),
+        ('0xe41f5dd1', 'nil','', 46),
+        ('0xcc11f30d', 'nil','', 47),
+        ('0x493a954c', 'nil','', 48),
+        ('0x1fe78683', 'nil','', 49),
+        ('0x6db59ed6', 'nil','', 50),
+        ('0xed2827cf', 'tXfPrimStandard','', 51),
+        ('0x312cb4e1', 'nil','', 52),
+        ('0xe5f39d43', 'nil','', 53),
+        ('0xfb4f06ed', 'nil','', 54),
+        ('0x399a88f9', 'nil','', 55),
+        ('0x5eecea3d', 'nil','', 56),
+        ('0x23e98e1c', 'nil','', 57),
+        ('0x49c0b237', 'nil','', 58),
+        ('0x05168f29', 'nil','', 59),
+        ('0x5fa8066f', 'nil','', 60),
+        ('0xfbc055e4', 'nil','', 61),
+        ('0x6cd7aba0', 'nil','', 62),
+        ('0xae243cee', 'nil','', 63),
+        ('0x83614817', 'nil','', 64),
+        ('0xc4dd56de', 'nil','', 65),
+        ('0xef36423a', 'nil','', 66),
+        ('0x0264bf16', 'nil','', 67),
+        ('0xfbb2f636', 'nil','', 68),
+        ('0x5a2a6823', 'nil','', 69),
+        ('0x2752e134', 'tXfPrimGpuParticleBatch','', 70),
+        ('0xb574e757', 'nil','', 71),
+        ('0x81f59164', 'nil','', 72),
+        ('0x85f8e35f', 'nil','', 73),
+        ('0x870fa5f6', 'nil','', 74),
+        ('0x63e103a5', 'nil','', 75),
+        ('0x00000000', 'nil','', 76),
+        ],
+        default='0x88367c19',
+        options=set())
     pipeline: bpy.props.IntProperty(name="Pipline", default=379, options=set())  # noqa: F821
     pvdeclbase: bpy.props.IntProperty(name="PV declaration base", default=0, options=set())  # noqa: F821
     pvdecl: bpy.props.StringProperty(name="PV declaration", default="0x0", options=set())  # noqa: F821

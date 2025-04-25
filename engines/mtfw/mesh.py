@@ -1394,13 +1394,15 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
         MOD153_VERTEX_MAPPER = {
             0: 0,
             1: 1,
-            2: 2
+            2: 2,
+            3: 3
         }
 
         MOD153_VERTEX_CLS_MAPPER = {
             0: Mod153.VfSkin,
             1: Mod153.VfSkinEx,
             2: Mod153.VfNonSkin,
+            3: Mod153.VfNonSkinCol
         }
         VertexCls = MOD153_VERTEX_CLS_MAPPER[dmc4_vertex_format]
         
