@@ -553,10 +553,16 @@ def _parent_space_to_local(decoded_frames, armature, bone_index):
         if bone.parent:
             parent_space = bone.parent.matrix_local.inverted() @ bone.matrix_local #child - parent matrix
 
-        else:
+        elif bone_index == 255:
             parent_space = Matrix([[1.0, 0.0, 0.0, 0.0],
                                     [0.0, 0.0, 1.0, 0.0],
                                     [0.0, -1.0, 0.0, 0.0],
+                                    [0.0, 0.0, 0.0, 1.0]])
+            
+        else:
+            parent_space = Matrix([[1.0, 0.0, 0.0, 0.0],
+                                    [0.0, 1.0, 0.0, 0.0],
+                                    [0.0, 0.0, 1.0, 0.0],
                                     [0.0, 0.0, 0.0, 1.0]])
         transform_mat = Matrix.Translation(frame)
     
