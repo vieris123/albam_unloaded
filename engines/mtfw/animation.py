@@ -257,7 +257,7 @@ def load_lmt(file_item, context):
                 for curve_idx, curve in enumerate(curves):
                     curve.keyframe_points.add(1)
                     curve.keyframe_points[-1].co = (frame_index + 1, frame_data[curve_idx])
-                    curve.keyframe_points[-1].interpolation = 'CUBIC'
+                    curve.keyframe_points[-1].interpolation = 'LINEAR'
 
     # exportable = context.scene.albam.exportable.file_list.add()
     # exportable.bl_object = lmt_group
