@@ -936,8 +936,8 @@ def _serialize_bone_location(dst_lmt, bone, track, fcurve_group):
                 buffer.write_bytes(struct.pack('fff', x * 100.0, y * 100.0, z * 100.0))
             else:
                 track.ref_data.x = x * 100.0
-                track.ref_data.y = z * 100.0
-                track.ref_data.z = -y * 100.0
+                track.ref_data.y = y * 100.0
+                track.ref_data.z = z * 100.0
                 track.ref_data.w = 1.0
                 buffer.write_bytes(struct.pack('fff', x * 100.0, z * 100.0, -y * 100.0))
         return buffer, 12
