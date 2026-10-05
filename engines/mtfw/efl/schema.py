@@ -32,11 +32,16 @@ _TUPLES = {
     "rangeu16": "<2H",   # MtRangeU16 {s, r}: value = s + rand % (r + 1)
     "vec3": "<3f",
     "vec4": "<4f",       # quaternions are stored (x, y, z, w)
-    "color": "<4B",      # MtColor r, g, b, a
+    "color": "<4B",      # MtColor stored as D3DCOLOR: bytes b, g, r, a (use efl.schema.bgra_to_rgba)
     "point": "<2i",      # MtPoint
     "easecurve": "<2f",  # MtEaseCurve
 }
 STR_SIZE = 64
+
+
+def bgra_to_rgba(color):
+    """MtColor bytes (b, g, r, a) -> (r, g, b, a)."""
+    return (color[2], color[1], color[0], color[3])
 
 
 def parse_type(ftype):
@@ -242,18 +247,21 @@ GENERATOR = Struct("EFL_GENERATOR", 0x1E0, "dx9", [
 # --- particle param (slot 1) -- plan 3.4/3.5; chain = COMMON [+ DRAW [+ PRIM]] + tail ------------
 
 PTCL_COMMON = [
-    F(0x00, "TransMode", "u8", "se"),
+    F(0x00, "TransMode", "u8", "dx9", "scene pass mask, not a blend mode: 1 main view, 2 reflections; 0 = not drawn in the main view"),
     F(0x01, "EntryType", "u8", "se"),
     F(0x02, "CullingFlag", "u16", "dx9", "bit0 ON -> culling draw variant"),
-    F(0x04, "ParticleOptionFlag", "u32", "dx9", "PARTICLE_OPTION_FLAG; 0x80000 EDGE_ALPHA_OFF"),
+    F(0x04, "ParticleOptionFlag", "u32", "dx9", "0x4 DEPTHBLEND (soft), 0x10 REFRACT, 0x80 NO_ZTEST, 0x200 WMAT_SCALE, "
+                                                 "0x1000 NO_FOG, 0x10000 PAT_CENTER, 0x80000 EDGE_ALPHA_OFF"),
     F(0x08, "LightGroupFlag", "u32", "se"),
     F(0x0C, "zOfs", "s32", "se"),
     F(0x10, "FixOtDepth", "u16", "se"),
-    F(0x12, "PrimMaterialFlags", "u16", "dx9", "nibbles -> calcPrimMaterial (initParticleBillboard 0x978110)"),
+    F(0x12, "PrimMaterialFlags", "u16", "dx9", "blend nibbles -> calcPrimMaterial 0x9DEBF0 -> render blend state"),
 ]
 PTCL_COMMON_BITS = [
-    B("PrimMaterialA", "PrimMaterialFlags", 0, 4, "dx9", "HIWORD(dword@0x10) & 0xF"),
-    B("PrimMaterialB", "PrimMaterialFlags", 8, 4, "dx9", "HIBYTE(dword@0x10) & 0xF"),
+    B("BlendSrc", "PrimMaterialFlags", 0, 4, "dx9", "D3DBLEND - 1 (4 = SRCALPHA); sRender::dispatchCommands 0x8F48A6"),
+    B("BlendDst", "PrimMaterialFlags", 4, 4, "dx9", "D3DBLEND - 1 (5 = INVSRCALPHA alpha blend, 1 = ONE additive)"),
+    B("BlendOp", "PrimMaterialFlags", 8, 4, "dx9", "D3DBLENDOP - 1 (0 = ADD, 2 = REVSUBTRACT)"),
+    B("PassBits", "PrimMaterialFlags", 12, 4, "dx9", "ORed into Generator.mFlags bits 8-11 (scene pass mask); unresolved"),
 ]
 PTCL_DRAW = [
     F(0x14, "uknDraw_0x14", "u32", "unknown", "always 0 in the DX9 corpus"),
@@ -269,6 +277,14 @@ PTCL_DRAW = [
     F(0x42, "KeyframeColorParamOffset", "rel16", "se", sub="kf:color"),
     F(0x44, "KeyframePatNoParamOffset", "rel16", "dx9", "initParticleBillboard 0x977E71; 12-byte keys (corpus)", sub="kf:f32"),
     F(0x46, "CullingParamOffset", "rel16", "dx9", "SE marks this padding", sub="culling"),
+    F(0x48, "Color0", "color", "dx9"),
+    F(0x4C, "Color1", "color", "dx9"),
+]
+PTCL_LIGHT_HEAD = [
+    F(0x40, "LightAttribute", "u32", "dx9", "low byte | 0x40 -> uLight attributes"),
+    F(0x44, "ColorFlag", "u8", "dx9"),
+    F(0x45, "LightTypeFlags", "u8", "dx9"),
+    F(0x46, "KeyframeColorParamOffset", "rel16", "dx9", sub="kf:color"),
     F(0x48, "Color0", "color", "dx9"),
     F(0x4C, "Color1", "color", "dx9"),
 ]
@@ -289,6 +305,18 @@ PTCL_PRIM = [
     F(0x130, "AnimPath", "str64", "dx9", ".ean"),
 ]
 
+# Polyline / Line header (file 0x170 / 0x50): LINE_TYPE 0 FOLLOW, 1 FIX, 2 FIX_END, 3 CHAIN, 4 LENGTH, 5 CLOTH.
+# A per-LineType extension follows the block's struct (LENGTH 0x50 bytes, FIX 0x70 + 16 per point); efl/sim.py
+# reads it from the raw bytes.
+LINE_BITS = [
+    B("LineType", "LineFlags", 0, 8, "dx9"),
+    B("LineOfsNum", "LineFlags", 8, 8, "dx9", "points per particle"),
+    B("ColorPlaceType", "LineFlags", 16, 4, "dx9", "colour gradient: as SizePlaceType"),
+    B("ColorPlaceInpType", "LineFlags", 20, 4, "dx9"),
+    B("ColorPlaceNo", "LineFlags", 24, 8, "dx9"),
+]
+LINE_TYPES = {0: "FOLLOW", 1: "FIX", 2: "FIX_END", 3: "CHAIN", 4: "LENGTH", 5: "CLOTH"}
+
 PTCL_TAILS = {
     0: ("Billboard", 0x1A0, "dx9", [
         F(0x170, "Angle", "rangef", "prior"),
@@ -298,20 +326,23 @@ PTCL_TAILS = {
         F(0x190, "KeyframeAngleParamOffset", "rel32", "prior", "width unverified", sub="kf:f32"),
     ], []),
     1: ("Polyline", 0x1B0, "corpus", [
-        F(0x170, "LineFlags", "u32", "prior", "bitfield word"),
-        F(0x178, "PlaceColor", "color[2]", "prior"),
-        F(0x180, "HeadSize", "rangef", "prior"),
-        F(0x188, "HeadSizeAdd", "rangef", "prior"),
-        F(0x190, "PlaceSize", "rangef", "prior"),
-        F(0x198, "PlaceSizeAdd", "rangef", "prior"),
-        F(0x1A4, "KeyframeHeadSizeParamOffset", "rel32", "prior", sub="kf:f32"),
-        F(0x1A8, "KeyframePlaceSizeParamOffset", "rel32", "prior", sub="kf:f32"),
-    ], [
-        B("LineType", "LineFlags", 0, 8, "prior"),
-        B("LineOfsNum", "LineFlags", 8, 8, "prior"),
-        B("ColorPlaceType", "LineFlags", 16, 4, "prior"),
-        B("ColorPlaceInpType", "LineFlags", 20, 4, "prior"),
-        B("ColorPlaceNo", "LineFlags", 24, 8, "prior"),
+        F(0x170, "LineFlags", "u32", "dx9", "initParticlePolyline 0x9786D0 / move sub_98E3E0"),
+        F(0x174, "SizePlaceFlags", "u32", "dx9"),
+        F(0x178, "PlaceColor", "color[2]", "dx9", "random pair, like Color0/1"),
+        F(0x180, "HeadSize", "rangef", "dx9", "ribbon half-width at the head, x Scale"),
+        F(0x188, "HeadSizeAdd", "rangef", "dx9"),
+        F(0x190, "PlaceSize", "rangef", "dx9"),
+        F(0x198, "PlaceSizeAdd", "rangef", "dx9"),
+        F(0x1A0, "KeyframePlaceColorParamOffset", "rel32", "dx9", "always 0 in the corpus", sub="kf:color"),
+        F(0x1A4, "KeyframeHeadSizeParamOffset", "rel32", "dx9", sub="kf:f32"),
+        F(0x1A8, "KeyframePlaceSizeParamOffset", "rel32", "dx9", sub="kf:f32"),
+        F(0x1AC, "member_0x1ac", "u32", "unknown"),
+    ], LINE_BITS + [
+        B("SizePlaceType", "SizePlaceFlags", 0, 4, "dx9", "0 none, 1 linear, 2 peak at No, 3 from No, 4 up to No"),
+        B("SizePlaceInpType", "SizePlaceFlags", 4, 4, "dx9", "0 linear, 1 sin, 2 1-cos, 3 smooth"),
+        B("SizePlaceNo", "SizePlaceFlags", 8, 8, "dx9"),
+        B("ClothType", "SizePlaceFlags", 16, 8, "dx9", "LineType 5 only"),
+        B("ClothParam", "SizePlaceFlags", 24, 8, "dx9"),
     ]),
     2: ("Polygon", 0x1E0, "dx9", [
         F(0x170, "Rot", "rangef[3]", "prior"),
@@ -332,6 +363,37 @@ PTCL_TAILS = {
         B("PolygonBillBoardType", "PolygonFlags", 20, 4, "prior"),
         B("CullingRotAxisType", "PolygonFlags", 24, 4, "prior"),
         B("CullingRotOrder", "PolygonFlags", 28, 4, "prior"),
+    ]),
+    3: ("Texline", 0x180, "dx9", [
+        F(0x170, "LineFlags", "u32", "dx9", "init 0x97A0B0, move sub_98F0C0; a textured 1-pixel line strip"),
+        F(0x174, "KeyframePlaceColorParamOffset", "rel16", "dx9", sub="kf:color"),
+        F(0x176, "ClothType", "u8", "dx9", "LineType 5 only"),
+        F(0x177, "ClothParam", "u8", "dx9"),
+        F(0x178, "PlaceColor", "color[2]", "dx9"),
+    ], LINE_BITS),
+    15: ("PolygonStrip", 0x1D0, "dx9", [
+        F(0x170, "LineOfsNum", "u8", "dx9", "trail samples, one per move tick (init 0x97E800, move sub_9915E0)"),
+        F(0x171, "StripColorFlags", "u8", "dx9"),
+        F(0x172, "ColorPlaceNo", "u8", "se", "not read in DX9"),
+        F(0x173, "SplineDivideNum", "u8", "dx9", "sub-quads per segment"),
+        F(0x174, "RotAxisOrder", "u8", "dx9", "width axis (getAxisVector) / RotOrder"),
+        F(0x175, "DirAxisType", "u8", "dx9", "6 = no velocity alignment"),
+        F(0x176, "KeyframePlaceColorParamOffset", "rel16", "dx9", sub="kf:color"),
+        F(0x178, "KeyframeRotParamOffset", "rel16", "dx9", sub="kf:vec3"),
+        F(0x17A, "KeyframeWidthParamOffset", "rel16", "dx9", sub="kf:f32"),
+        F(0x17C, "WidthPlaceRate", "f32", "dx9", "pivot across the width: 0.5 centred"),
+        F(0x180, "PlaceColor", "color[2]", "dx9", "tail colour when ColorPlaceType != 0"),
+        F(0x188, "RotAddCoef", "f32", "se", "not read in DX9"),
+        F(0x18C, "FollowFrame", "rangeu16", "se", "not read in DX9"),
+        F(0x190, "Rot", "rangef[3]", "dx9", "radians"),
+        F(0x1A8, "RotAdd", "rangef[3]", "dx9"),
+        F(0x1C0, "Width", "rangef", "dx9", "full width, cm"),
+        F(0x1C8, "WidthAdd", "rangef", "dx9", "per frame; width <= 0 ends the particle"),
+    ], [
+        B("ColorPlaceType", "StripColorFlags", 0, 4, "dx9", "!= 0: the tail colour is PlaceColor"),
+        B("LayerDivideNum", "StripColorFlags", 4, 4, "se", "not read in DX9"),
+        B("RotAxisType", "RotAxisOrder", 0, 4, "dx9"),
+        B("RotOrder", "RotAxisOrder", 4, 4, "dx9"),
     ]),
     6: ("PrimModel", 0x25C, "dx9", [
         F(0x170, "PrimFlags", "u32", "dx9", "nibble word"),
@@ -374,8 +436,45 @@ PTCL_TAILS = {
         B("ModelBillboardType", "PrimFlags", 24, 4, "dx9"),
         B("NormAttenuateFlag", "PrimFlags", 28, 4, "dx9", "bit 29 = one-sided"),
     ]),
-    5: ("Model", 0x90, "dx9", [
-        F(0x50, "ModelPath", "str64", "dx9", "resource loader; no PRIM_COMMON"),
+    4: ("Line", 0x60, "dx9", [
+        F(0x50, "LineFlags", "u32", "dx9", "same header as Polyline 0x170; drawn as a 1-pixel line strip"),
+        F(0x54, "member_0x54", "u32", "unknown", "always 0"),
+        F(0x58, "PlaceColor", "color[2]", "dx9"),
+    ], LINE_BITS),
+    5: ("Model", 0x130, "dx9", [
+        F(0x50, "ModelPath", "str64", "dx9", "rModel; initParticleModel 0x97AF80, move 0x98F9C0, renderModel 0x9A20C0"),
+        F(0x90, "ModelScale", "rangef[3]", "dx9"),
+        F(0xA8, "ModelScaleAdd", "rangef[3]", "dx9", "per frame"),
+        F(0xC0, "Rot", "rangef[3]", "dx9", "radians"),
+        F(0xD8, "RotAdd", "rangef[3]", "dx9", "radians per frame"),
+        F(0xF0, "ModelFlags", "u32", "dx9"),
+        F(0xF4, "PartsNoMax", "f32", "dx9", "clamp for the PatNo keyframe"),
+        F(0xF8, "AnimSpeed", "f32", "dx9", "part index step per frame"),
+        F(0xFC, "ModelAnimFlag", "u32", "dx9", "1 animate parts, 2 loop, 4 reverse, 8 kill at end, 0x10 UV scroll, 0x10000 ModelZofs"),
+        F(0x100, "ScrollU", "rangef", "dx9", "UV per frame"),
+        F(0x108, "ScrollV", "rangef", "dx9"),
+        F(0x110, "ModelZofs", "f32", "dx9", "cm along camera->particle; negative pulls toward the camera"),
+        F(0x120, "KeyframeRotParamOffset", "rel32", "dx9", sub="kf:vec3"),
+        F(0x124, "KeyframeModelScaleParamOffset", "rel32", "dx9", sub="kf:vec3"),
+        F(0x128, "KeyframeScrollUParamOffset", "rel32", "dx9", sub="kf:f32"),
+        F(0x12C, "KeyframeScrollVParamOffset", "rel32", "dx9", sub="kf:f32"),
+    ], [
+        B("RotOrder", "ModelFlags", 0, 4, "dx9"),
+        B("DirAxisType", "ModelFlags", 4, 4, "dx9", "6 = no velocity alignment"),
+        B("ModelBillboardType", "ModelFlags", 8, 4, "dx9", "1 = camera-facing"),
+        B("PartsNoMin", "ModelFlags", 12, 10, "dx9", "mesh group drawn: first mesh with this idx_group"),
+        B("PartsNoRange", "ModelFlags", 22, 10, "dx9"),
+    ]),
+    10: ("Light", 0x80, "dx9", [
+        F(0x50, "AttenuateStart", "rangef", "dx9", "cm; init 0x97DE80, move 0x991190, updateParticleLight 0x99C120"),
+        F(0x58, "AttenuateStartAdd", "rangef", "dx9", "per frame"),
+        F(0x60, "AttenuateEnd", "rangef", "dx9", "cm; linear falloff from start to end"),
+        F(0x68, "AttenuateEndAdd", "rangef", "dx9"),
+        F(0x70, "LightColorW", "f32", "dx9", "-> uLight colour w (1 or 2)"),
+        F(0x74, "LightMaskY", "f32", "se", "not read"),
+        F(0x78, "DiffuseFactor", "f32", "se", "not read"),
+        F(0x7C, "SpotFlags", "u16", "dx9", "spot lights only (none in the corpus)"),
+        F(0x7E, "KeyframeSpotRotParamOffset", "rel16", "dx9", sub="kf:vec3"),
     ], []),
     7: ("LensFlare", 0xE0, "dx9", [
         F(0xA0, "LensFlarePath", "str64", "dx9", "resource loader"),
@@ -384,16 +483,20 @@ PTCL_TAILS = {
         F(0x60, "TexturePath", "str64", "dx9", "resource loader; no PRIM_COMMON"),
     ], []),
 }
+PTCL_TAILS[12] = ("ClothPolyline",) + PTCL_TAILS[1][1:]   # same init as Polyline, LineType 5 (CLOTH)
+PTCL_TAILS[13] = ("ClothTexline",) + PTCL_TAILS[3][1:]
+PTCL_TAILS[14] = ("ClothLine",) + PTCL_TAILS[4][1:]
+
 # type -> (name, chain); chain says which shared parts the block starts with
 PTCL_TYPES = {
     0: ("Billboard", "prim"), 1: ("Polyline", "prim"), 2: ("Polygon", "prim"), 3: ("Texline", "prim"),
     4: ("Line", "draw"), 5: ("Model", "draw"), 6: ("PrimModel", "prim"), 7: ("LensFlare", "draw"),
-    8: ("MassBillboard", "draw"), 9: ("Filter", "common"), 10: ("Light", "common"), 11: ("Hit", "common"),
-    12: ("PolygonStrip", "prim"), 13: ("Texline(alt)", "prim"), 14: ("Line(alt)", "draw"),
-    15: ("PolygonStrip(alt)", "prim"), 16: ("LiteBillboard", "prim"), 17: ("SizeBillboard", "prim"),
+    8: ("MassBillboard", "draw"), 9: ("Filter", "common"), 10: ("Light", "draw"), 11: ("Hit", "common"),
+    12: ("ClothPolyline", "prim"), 13: ("ClothTexline", "prim"), 14: ("ClothLine", "draw"),
+    15: ("PolygonStrip", "prim"), 16: ("LiteBillboard", "prim"), 17: ("SizeBillboard", "prim"),
 }
 # minimum sizes seen in the corpus for types without a typed tail
-_PTCL_OBSERVED_SIZE = {3: 0x1D0, 4: 0x60, 9: 0x80, 10: 0x80, 11: 0x50, 12: 0x210, 15: 0x1D0}
+_PTCL_OBSERVED_SIZE = {9: 0x80, 11: 0x50}
 _CHAIN_SIZE = {"common": 0x14, "draw": 0x50, "prim": 0x170}
 
 
@@ -401,7 +504,10 @@ def _particle_struct(ptype):
     name, chain = PTCL_TYPES.get(ptype, (f"Unknown{ptype}", "common"))
     fields = list(PTCL_COMMON)
     bits = list(PTCL_COMMON_BITS)
-    if chain in ("draw", "prim"):
+    if ptype == 10:   # Light: DRAW_COMMON up to 0x3F, then light fields (updateParticleLight 0x99C120)
+        fields += [f for f in PTCL_DRAW if f.offset < 0x40] + PTCL_LIGHT_HEAD
+        bits += [B("LightType", "LightTypeFlags", 0, 4, "dx9", "0 point, 1 spot")]
+    elif chain in ("draw", "prim"):
         fields += PTCL_DRAW
     if chain == "prim":
         fields += PTCL_PRIM
@@ -465,11 +571,10 @@ MOVE_PATH = [
 _CHAIN = 0x80   # EFL_PARAM_CHAIN inside EFL_MOVE_PATH_CHAIN
 MOVE_CHAIN_PARAM = [
     F(_CHAIN + 0x00, "ChainOptionFlag", "u16", "dx9"),
-    F(_CHAIN + 0x02, "PreUpdateLoopNum", "u16", "dx9"),
+    F(_CHAIN + 0x02, "member_chain_0x02", "u16", "unknown", "not read by the chain code"),
     F(_CHAIN + 0x04, "ChainRotAxis", "u8", "dx9", "nibbles: RotAxisType, RotOrder"),
     F(_CHAIN + 0x05, "ChainBlendRotAxis", "u8", "dx9", "nibbles: BlendRotAxisType, BlendRotOrder"),
-    F(_CHAIN + 0x06, "HoldPosNum", "u8", "dx9"),
-    F(_CHAIN + 0x07, "ParamChain0807", "u8", "se"),
+    F(_CHAIN + 0x06, "PreUpdateLoopNum", "u16", "dx9", "rope steps run at spawn (0x98510A)"),
     F(_CHAIN + 0x08, "Length", "rangef", "dx9"),
     F(_CHAIN + 0x10, "LengthAdd", "rangef", "dx9"),
     F(_CHAIN + 0x18, "BlendRate", "rangef", "dx9"),

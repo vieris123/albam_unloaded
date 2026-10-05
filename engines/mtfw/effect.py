@@ -7,9 +7,12 @@ particles get an emissive material using their base texture. Nothing is simulate
 Not exported: the parser in .efl can write files, but nothing maps Blender edits back yet.
 
 Approximations (not verified in game, see the plan):
-- TransMode 1 is treated as additive and 0 as alpha blend.
-- Billboard quad edge = Scale * 100 cm, facing the scene camera; Polygon quads lie in the XY plane.
-- Intensity is used as the emission strength. Flipbooks (.ean) show the first frame (SeqNoMin, PatNoMin), not animated.
+Verified against DX9 (efl_import_plan.md):
+- Blending is the D3D9 equation from PrimMaterialFlags (BlendSrc / BlendDst / BlendOp = enum - 1), built as
+  Emission(src * Fs) + Transparent(Fd); reverse-subtract (darkening) becomes a Transparent factor.
+- TransMode is a scene-pass mask; particles without the main-view bit (1) get no geometry.
+- Billboards are Scale x pattern pixels (x AspectRatio) centimetres, facing the camera; colour = Color0 x Intensity.
+Approximations: static mode shows the first flipbook frame; Polygon quads lie in the XY plane.
 - With "Simulate particles", Billboard/Polygon/PrimModel records become animated particle systems
   (effect_sim.py + efl/sim.py); otherwise one static shape per record.
 """
@@ -18,21 +21,22 @@ from pathlib import PureWindowsPath
 from types import SimpleNamespace
 
 import bpy
-from mathutils import Matrix, Quaternion
+from mathutils import Euler, Matrix, Quaternion, Vector
 
 from albam.exceptions import AlbamCheckFailure
 from albam.registry import blender_registry
 from .efl import EffectList, EflError, VERSION_DX9
-from .efl import ean
+from .efl import ean, efs
+from .efl.schema import bgra_to_rgba
 from .efl.primmodel import build_from_block
-from .efl.sim import ROT_ORDERS
+from .efl.sim import CLOTH_TYPES, ROT_ORDERS, emission_space, keyframes_of as sim_keyframes_of
 from . import effect_sim
 from .texture import build_blender_textures
 
 SCALE = 0.01   # game centimetres -> metres
-BILLBOARD_UNIT = 100.0   # cm per Billboard Scale unit (assumed)
 EDGE_ALPHA_ATTR = "EdgeAlpha"
-SIMULATED_TYPES = (0, 2, 6)   # Billboard, Polygon, PrimModel
+SIMULATED_TYPES = (0, 2, 6)   # Billboard, Polygon, PrimModel: instanced shapes
+RIBBON_TYPES = (1, 3, 4, 12, 13, 14, 15)   # Polyline/Texline/Line (+ cloth), PolygonStrip: rebuilt meshes
 
 
 def _filter_armatures(self, obj):
@@ -108,6 +112,9 @@ class _EffectBuilder:
         self.options = options
         self.images = {}
         self.anims = {}
+        self.models = {}
+        self.efs = {}
+        self.current_generator = None
         self.materials = {}
         parent = context.collection or context.scene.collection
         self.collection = bpy.data.collections.new(f"EFL_{stem}")
@@ -153,9 +160,32 @@ class _EffectBuilder:
             ob.rotation_mode = "QUATERNION"
             ob.rotation_quaternion = _quaternion(gen.get("Quat"))
             ob.scale = [s for s, _ in gen.get("Scale")]
+            self.animate_generator(ob, gen, index)
         self._attach(ob, gen, root)
+        self.current_generator = ob
 
-        if ptcl is not None and self.options.build_geometry:
+        if ptcl is not None and ptcl.has("TransMode") and not ptcl.get("TransMode") & 1:
+            ob["efl_hidden"] = "TransMode has no main-view bit: the game doesn't draw it in the normal view"
+        elif ptcl is not None and self.options.build_geometry and self.options.simulate \
+                and ptcl.type == 5 and gen is not None:
+            source = self.model_source(ptcl.get("ModelPath"))
+            if source is not None:
+                info = self.sim_info(record)
+                info.update(model_groups=source[1], model_zofs=ptcl.get("ModelZofs")
+                            if ptcl.get("ModelAnimFlag") & 0x10000 or ptcl.get("ModelZofs") else 0.0)
+                parts = max(len(source[1]), 1)   # one identity UV row per mesh part (the "pattern" is the part)
+                info.update(effect_sim.table_info([[(ean.IDENTITY_AFFINE, 1, 1)] * parts]))
+                effect_sim.create_model_object(self.collection, ob.name, ob, root, index, info, source[0])
+            else:
+                ob["efl_missing_model"] = ptcl.get("ModelPath")
+        elif ptcl is not None and self.options.build_geometry and self.options.simulate \
+                and ptcl.type == 10 and gen is not None:
+            effect_sim.create_light_object(self.collection, ob.name, ob, root, index, self.sim_info(record))
+        elif ptcl is not None and self.options.build_geometry and self.options.simulate \
+                and ptcl.type in RIBBON_TYPES and gen is not None:
+            effect_sim.create_line_object(self.collection, ob.name, ob, root, index, self.sim_info(record),
+                                          self.material_for(ptcl))
+        elif ptcl is not None and self.options.build_geometry:
             simulated = self.options.simulate and ptcl.type in SIMULATED_TYPES and gen is not None
             shape_ob = self.build_particle_shape(ptcl, gen, ob.name, as_source=simulated)
             if shape_ob is not None:
@@ -167,14 +197,70 @@ class _EffectBuilder:
 
     def sim_info(self, record):
         ptcl, gen = record.ptcl, record.gen
-        rects = [(0.0, 0.0, 1.0, 1.0)]
+        image = None
+        if ptcl.has("BaseMapPath") and ptcl.get("BaseMapPath") and self.options.load_textures:
+            image = self.image_for(ptcl.get("BaseMapPath"))
+        tables = effect_sim.frame_tables(None, image, 0, ean)   # whole texture, its pixel size
         if ptcl.has("AnimPath") and ptcl.get("AnimPath") and ptcl.get("BaseMapPath"):
-            rects = effect_sim.frame_rects(self.anim_for(ptcl.get("AnimPath")), ptcl.get("SeqNoMin"),
-                                           self.images.get(ptcl.get("BaseMapPath")), ptcl.get("AnimFlag"), ean)
+            tables = effect_sim.frame_tables(self.anim_for(ptcl.get("AnimPath")),
+                                             self.images.get(ptcl.get("BaseMapPath")), ptcl.get("AnimFlag"), ean)
         rot_order = ptcl.get("RotOrder") if ptcl.has("PrimFlags") or ptcl.has("PolygonFlags") else 5
+        extra = {}
+        efs_parts = self.efs_for(gen.get("RangeStripPath")) if gen.get("RangeStripPath") else None
+        if efs_parts:
+            extra["range_strip"] = [c for part in efs_parts for point in part for c in point]
+            extra["range_strip_sizes"] = [len(part) for part in efs_parts]
+        move = record.move
+        if move is not None and move.type == 3 and move.get("PathStripPath"):
+            parts = self.efs_for(move.get("PathStripPath"))
+            if parts:
+                part = parts[min(max(move.get("PathStripPartsNo"), 0), len(parts) - 1)]
+                extra["strip"] = [c for point in part for c in point]
+        if ptcl.type in CLOTH_TYPES:
+            axes = self.world_axes()
+            if axes is not None:
+                extra["world_axes"] = axes
+        if move is not None and move.get("CollParamOffset"):
+            ground = self.ground_height(record)
+            if ground is not None:
+                extra["ground_y"] = ground
         return {"kind": ptcl.type, "frames": self.options.sim_frames, "rot_order": rot_order,
-                "particle_scale": gen.get("ParticleScale")[0] or 1.0,
-                "rects": [c for rect in rects for c in rect]}
+                "space": emission_space(record),
+                "particle_scale": gen.get("ParticleScale")[0] or 1.0, **effect_sim.table_info(tables), **extra}
+
+    def animate_generator(self, ob, gen, index):
+        """Generator keyframes (updateWorldMatrix 0x96BE10): 0x1D8 position, 0x1DC Euler rotation (AxisFlags
+        order), 0x1CC scale, on the generator timer; baked as F-curves on the generator Empty."""
+        keys = sim_keyframes_of(gen, {"KeyframeParamOffset_1d8": "pos", "KeyframeParamOffset_1dc": "rot",
+                                      "KeyframeScaleParamOffset": "scale"})
+        if not keys:
+            return
+        import random
+        from .efl import keyframe as kfm
+        rng = random.Random(1000 + index)
+        start = self.context.scene.frame_current
+        fps = self.context.scene.render.fps / (self.context.scene.render.fps_base or 1.0)
+        frames = self.options.sim_frames if self.options.simulate else 300
+        order = ROT_ORDERS[gen.get("Order")] if 0 <= gen.get("Order") < len(ROT_ORDERS) else "XYZ"
+        for name, kf in keys.items():
+            rates = kfm.draw_rates(kf, rng)
+            step = max(1, frames // 120)
+            for game_frame in list(range(0, frames, step)) + [frames]:
+                timer = max(game_frame - 1, 0) if kf.ref_type == 1 else game_frame
+                value = kfm.evaluate(kf, timer, rates)
+                if value is None:
+                    continue
+                scene_frame = start + game_frame * fps / 60.0
+                if name == "pos":
+                    ob.location = [c * SCALE for c in value]
+                    ob.keyframe_insert("location", frame=scene_frame)
+                elif name == "rot":
+                    ob.rotation_quaternion = Euler(value, order).to_quaternion()
+                    ob.keyframe_insert("rotation_quaternion", frame=scene_frame)
+                else:
+                    ob.scale = value
+                    ob.keyframe_insert("scale", frame=scene_frame)
+        ob["efl_animated"] = sorted(keys)
 
     def joint_bones(self):
         """MT joint number -> bone. ParentNo is the joint number (bone['mtfw.anim_retarget'], the .mod's
@@ -213,9 +299,12 @@ class _EffectBuilder:
             w, h = ptcl.get("Width")[0], ptcl.get("Height")[0]
             mesh = _quad_mesh(f"{name}_polygon", w, h)
         elif ptcl.type == 0 and ptcl.has("AspectRatio"):
-            size = BILLBOARD_UNIT if as_source else ptcl.get("Scale")[0] * BILLBOARD_UNIT
-            aspect = ptcl.get("AspectRatio")[0] or 1.0
-            mesh = _quad_mesh(f"{name}_billboard", size * aspect, size)
+            pivot = (0.0, 0.0)
+            if ptcl.get("ParticleOptionFlag") & 0x10000:   # PAT_CENTER: the particle sits at pixel (cx, cy) of the cell
+                w, h = self.frame_size(ptcl)
+                cx, cy = ptcl.get("PatCenter")
+                pivot = (0.5 - cx / w, cy / h - 0.5) if w and h else pivot
+            mesh = _quad_mesh(f"{name}_billboard", 1.0, 1.0, pivot)   # 1 cm; sized by scale x pattern pixels
         else:
             return None
         if mesh is None:
@@ -224,9 +313,10 @@ class _EffectBuilder:
         material = self.material_for(ptcl)
         if material is not None:
             mesh.materials.append(material)
-        if as_source:   # transforms and frame UVs are applied per particle
+        if as_source:   # transforms, tint and frame UVs are applied per particle
             return ob
         self.crop_to_frame(ptcl, mesh, ob)
+        _tint_mesh(mesh, ptcl)
 
         particle_scale = gen.get("ParticleScale")[0] if gen is not None else 1.0
         particle_scale = particle_scale or 1.0
@@ -240,14 +330,105 @@ class _EffectBuilder:
             ob.rotation_euler = [s for s, _ in ptcl.get("Rot")]
             ob.scale = [(ptcl.get("Scale")[0] or 1.0) * particle_scale] * 3
         else:
-            ob.scale = [particle_scale] * 3
+            w, h = self.frame_size(ptcl)
+            size = ptcl.get("Scale")[0] * particle_scale
+            ob.scale = (size * w * (ptcl.get("AspectRatio")[0] or 1.0), size * h, 1.0)
             camera = self.context.scene.camera
             if camera is not None:
                 track = ob.constraints.new("DAMPED_TRACK")
                 track.target = camera
                 track.track_axis = "TRACK_Z"
-            ob["efl_note"] = f"Billboard size assumed Scale x {BILLBOARD_UNIT:g} cm; faces the scene camera"
         return ob
+
+    def model_source(self, model_path):
+        """(collection of the model's meshes in game axes, idx_group per mesh), imported once per path."""
+        if model_path in self.models:
+            return self.models[model_path]
+        result = None
+        try:
+            item = self.context.scene.albam.rfs.get_vfile(self.app_id, model_path + ".mod")
+        except KeyError:
+            print(f"EFL: model {model_path}.mod not found under the Game Files roots")
+            item = None
+        if item is not None:
+            from .mesh import build_blender_model
+            exportable = self.context.scene.albam.exportable.file_list
+            count_before = len(exportable)
+            container = build_blender_model(item, self.context)
+            while len(exportable) > count_before:   # effect models aren't exported with the scene
+                exportable.remove(len(exportable) - 1)
+            meshes = sorted((c for c in container.children if c.type == "MESH"), key=lambda c: c.name)
+            source = bpy.data.collections.new(f"EFL_model_{PureWindowsPath(model_path).name}")
+            source.use_fake_user = True   # not linked to the scene; read by the Collection Info node
+            groups = []
+            game_axes = Matrix.Rotation(-math.pi / 2, 4, "X")   # Albam meshes are Z-up; particles use game axes
+            for i, mesh_ob in enumerate(meshes):
+                mesh_ob.parent = None
+                for modifier in list(mesh_ob.modifiers):
+                    mesh_ob.modifiers.remove(modifier)
+                for collection in list(mesh_ob.users_collection):
+                    collection.objects.unlink(mesh_ob)
+                mesh_ob.matrix_world = game_axes
+                mesh_ob.name = f"{i:03d}_{mesh_ob.name}"
+                source.objects.link(mesh_ob)
+                props = mesh_ob.data.albam_custom_properties.get_custom_properties_for_appid(self.app_id)
+                groups.append(int(getattr(props, "idx_group", i)))
+            armature_data = container.data if container.type == "ARMATURE" else None
+            bpy.data.objects.remove(container)
+            if armature_data is not None and not armature_data.users:
+                bpy.data.armatures.remove(armature_data)
+            result = (source, groups) if meshes else None
+        self.models[model_path] = result
+        return result
+
+    def efs_for(self, path):
+        """Parts of an .efs curve (cm), or None if it isn't under the Game Files roots."""
+        if path in self.efs:
+            return self.efs[path]
+        parts = None
+        try:
+            parts = efs.parse(self.context.scene.albam.rfs.get_vfile(self.app_id, path + ".efs").get_bytes())
+        except KeyError:
+            print(f"EFL: strip {path}.efs not found under the Game Files roots")
+        except efs.EfsError as err:
+            print(f"EFL: could not read {path}.efs: {err}")
+        self.efs[path] = parts
+        return parts
+
+    def ground_height(self, record):
+        """Ground plane (world z = 0, the character's feet) in the generator's game space at import, in cm;
+        None if the generator isn't roughly upright there."""
+        generator = self.current_generator
+        if generator is None:
+            return None
+        self.context.view_layer.update()
+        m = generator.matrix_world
+        up = m.to_3x3() @ Vector((0.0, 1.0, 0.0))   # game Y in world
+        if up.length < 1e-6 or up.normalized().z < 0.9:
+            return None
+        return -m.translation.z / (up.length * SCALE)
+
+    def world_axes(self):
+        """Game world axes -> the generator's game space at import (row-major 3x3), for world-fixed cloth pulls."""
+        generator = self.current_generator
+        if generator is None:
+            return None
+        self.context.view_layer.update()
+        rot = generator.matrix_world.to_quaternion().to_matrix()
+        game_to_blender = Matrix(((1.0, 0.0, 0.0), (0.0, 0.0, -1.0), (0.0, 1.0, 0.0)))
+        m = rot.transposed() @ game_to_blender
+        return [m[r][c] for r in range(3) for c in range(3)]
+
+    def frame_size(self, ptcl):
+        """Pixel size of the particle's first flipbook frame (the whole texture without a flipbook)."""
+        image = self.images.get(ptcl.get("BaseMapPath")) if ptcl.has("BaseMapPath") else None
+        anim = self.anim_for(ptcl.get("AnimPath")) if ptcl.has("AnimPath") and ptcl.get("AnimPath") else None
+        pattern = anim.pattern(ptcl.get("SeqNoMin"), ptcl.get("PatNoMin")) if anim is not None else None
+        if pattern is not None:
+            return abs(pattern[2]), abs(pattern[3])
+        if image is not None and image.size[0]:
+            return image.size[0], image.size[1]
+        return 64, 64
 
     def _prim_model_mesh(self, ptcl, name):
         prim = build_from_block(ptcl)
@@ -277,10 +458,10 @@ class _EffectBuilder:
         pattern = anim.pattern(seq_no, pat_no)
         if pattern is None or not width or not height:
             return
-        rect, rotate = ean.pattern_uv_rect(pattern, width, height, ptcl.get("AnimFlag"))
+        (a, b, ou), (c, d, ov) = ean.uv_affine(pattern, width, height, ptcl.get("AnimFlag"))
         for loop_uv in mesh.uv_layers[0].data:
-            u, v = ean.map_uv((loop_uv.uv[0], 1.0 - loop_uv.uv[1]), rect, rotate)
-            loop_uv.uv = (u, 1.0 - v)
+            u, v = loop_uv.uv
+            loop_uv.uv = (a * u + b * v + ou, c * u + d * v + ov)
         sequence = anim.sequences[min(seq_no, len(anim.sequences) - 1)]
         ob["efl_frame"] = {"sequence": seq_no, "pattern": pat_no, "pattern_count": len(sequence.patterns),
                            "rect_px": list(pattern)}
@@ -304,16 +485,15 @@ class _EffectBuilder:
         if not ptcl.has("TransMode"):
             return None
         base_path = ptcl.get("BaseMapPath") if ptcl.has("BaseMapPath") else ""
-        color = ptcl.get("Color0") if ptcl.has("Color0") else [255, 255, 255, 255]
-        intensity = ptcl.get("Intensity")[0] if ptcl.has("Intensity") else 1.0
-        trans_mode = ptcl.get("TransMode")
-        key = (base_path, trans_mode, tuple(color), intensity)
+        blend = (ptcl.get("BlendSrc") + 1, ptcl.get("BlendDst") + 1, ptcl.get("BlendOp") + 1)
+        key = (base_path, blend)
         if key in self.materials:
             return self.materials[key]
         image = self.image_for(base_path) if base_path and self.options.load_textures else None
         label = PureWindowsPath(base_path).name if base_path else ptcl.type_name
-        material = _build_material(f"EFL_{label}", image, color, intensity, additive=trans_mode == 1)
-        material["efl_trans_mode"] = trans_mode
+        material = _build_material(f"EFL_{label}", image, *blend)
+        material["efl_blend"] = f"src {_D3DBLEND.get(blend[0], blend[0])}, dst {_D3DBLEND.get(blend[1], blend[1])}, " \
+                                f"op {_D3DBLENDOP.get(blend[2], blend[2])}"
         material["efl_base_map"] = base_path
         self.materials[key] = material
         return material
@@ -350,12 +530,15 @@ def _euler_order(nibble):
     return ROT_ORDERS[nibble] if 0 <= nibble < len(ROT_ORDERS) else "XYZ"
 
 
-def _quad_mesh(name, width, height):
+def _quad_mesh(name, width, height, pivot=(0.0, 0.0)):
+    """Quad in the XY plane; pivot shifts it by a fraction of its size (PAT_CENTER billboards)."""
     if width <= 0 or height <= 0:
         return None
     hw, hh = width * SCALE / 2, height * SCALE / 2
+    ox, oy = pivot[0] * width * SCALE, pivot[1] * height * SCALE
     mesh = bpy.data.meshes.new(name)
-    mesh.from_pydata([(-hw, -hh, 0.0), (hw, -hh, 0.0), (hw, hh, 0.0), (-hw, hh, 0.0)], [], [(0, 1, 2, 3)])
+    mesh.from_pydata([(-hw + ox, -hh + oy, 0.0), (hw + ox, -hh + oy, 0.0), (hw + ox, hh + oy, 0.0),
+                      (-hw + ox, hh + oy, 0.0)], [], [(0, 1, 2, 3)])
     uv_layer = mesh.uv_layers.new(name="UVMap")
     for i, uv in enumerate(((0, 0), (1, 0), (1, 1), (0, 1))):
         uv_layer.data[i].uv = uv
@@ -364,14 +547,36 @@ def _quad_mesh(name, width, height):
     return mesh
 
 
-def _set_edge_alpha(mesh, alpha):
-    attr = mesh.color_attributes.new(name=EDGE_ALPHA_ATTR, type="FLOAT_COLOR", domain="POINT")
+def _set_edge_alpha(mesh, alpha, rgb=(1.0, 1.0, 1.0)):
+    """EdgeAlpha colour attribute: rgb = tint (colour x intensity), a = colour alpha x border fade."""
+    attr = mesh.color_attributes.get(EDGE_ALPHA_ATTR) or \
+        mesh.color_attributes.new(name=EDGE_ALPHA_ATTR, type="FLOAT_COLOR", domain="POINT")
     for i, a in enumerate(alpha):
-        attr.data[i].color = (1.0, 1.0, 1.0, a)
+        attr.data[i].color = (rgb[0], rgb[1], rgb[2], a)
 
 
-def _build_material(name, image, color, intensity, additive):
-    """Emission (texture rgb * Color0) with alpha = texture a * Color0 a * edge alpha."""
+def _tint_mesh(mesh, ptcl):
+    """Static meshes: bake Color0 x Intensity into EdgeAlpha (simulated particles get it per point)."""
+    attr = mesh.color_attributes.get(EDGE_ALPHA_ATTR)
+    if attr is None or not ptcl.has("Color0"):
+        return
+    r, g, b, a = bgra_to_rgba(ptcl.get("Color0"))
+    intensity = min(max(ptcl.get("Intensity")[0], 0.0), 127.0) if ptcl.has("Intensity") else 1.0
+    for item in attr.data:
+        edge = item.color[3]
+        item.color = (r / 255 * intensity, g / 255 * intensity, b / 255 * intensity, edge * a / 255)
+
+
+# D3D9 enums (the file stores them minus 1)
+_D3DBLEND = {1: "ZERO", 2: "ONE", 3: "SRCCOLOR", 4: "INVSRCCOLOR", 5: "SRCALPHA", 6: "INVSRCALPHA",
+             7: "DESTALPHA", 8: "INVDESTALPHA", 9: "DESTCOLOR", 10: "INVDESTCOLOR", 11: "SRCALPHASAT"}
+_D3DBLENDOP = {1: "ADD", 2: "SUBTRACT", 3: "REVSUBTRACT", 4: "MIN", 5: "MAX"}
+
+
+def _build_material(name, image, src, dst, op):
+    """result = src_colour * Fs (op) background * Fd, with src colour = texture rgb * EdgeAlpha rgb and
+    alpha = texture a * EdgeAlpha a. Built as Emission + Transparent; factors that depend on the background
+    (DEST*) fall back to ONE, MIN/MAX to ADD."""
     mat = bpy.data.materials.new(name)
     mat.use_nodes = True
     mat.use_backface_culling = False
@@ -382,71 +587,79 @@ def _build_material(name, image, color, intensity, additive):
     nodes, links = mat.node_tree.nodes, mat.node_tree.links
     nodes.clear()
     out = nodes.new("ShaderNodeOutputMaterial")
-    out.location = (900, 0)
+    out.location = (1100, 0)
 
-    rgb = nodes.new("ShaderNodeRGB")
-    rgb.location = (-600, 200)
-    rgb.outputs[0].default_value = (color[0] / 255, color[1] / 255, color[2] / 255, 1.0)
-    edge = nodes.new("ShaderNodeVertexColor")
-    edge.layer_name = EDGE_ALPHA_ATTR
-    edge.location = (-600, -200)
+    def node(kind, x, y, **props):
+        n = nodes.new(kind)
+        n.location = (x, y)
+        for key, value in props.items():
+            setattr(n, key, value)
+        return n
 
-    tint = nodes.new("ShaderNodeMix")
-    tint.data_type = "RGBA"
-    tint.blend_type = "MULTIPLY"
-    tint.inputs["Factor"].default_value = 1.0
-    tint.location = (-250, 200)
-    links.new(rgb.outputs[0], tint.inputs["B"])
+    def vmath(op_name, a, b, x, y):
+        n = node("ShaderNodeVectorMath", x, y, operation=op_name)
+        for i, value in enumerate((a, b)):
+            if isinstance(value, tuple):
+                n.inputs[i].default_value = value
+            else:
+                links.new(value, n.inputs[i])
+        return n.outputs["Vector"]
 
-    alpha = nodes.new("ShaderNodeMath")
-    alpha.operation = "MULTIPLY"
-    alpha.inputs[1].default_value = color[3] / 255
-    alpha.location = (-250, -150)
-    alpha_edge = nodes.new("ShaderNodeMath")
-    alpha_edge.operation = "MULTIPLY"
-    alpha_edge.location = (-50, -150)
-    links.new(alpha.outputs[0], alpha_edge.inputs[0])
-    links.new(edge.outputs["Alpha"], alpha_edge.inputs[1])
+    def splat(scalar, x, y):
+        n = node("ShaderNodeCombineXYZ", x, y)
+        for axis in "XYZ":
+            links.new(scalar, n.inputs[axis])
+        return n.outputs["Vector"]
 
+    tint = node("ShaderNodeVertexColor", -900, 200, layer_name=EDGE_ALPHA_ATTR)
     if image is not None:
-        tex = nodes.new("ShaderNodeTexImage")
+        tex = node("ShaderNodeTexImage", -900, -50)
         tex.image = image
-        tex.location = (-600, 0)
-        links.new(tex.outputs["Color"], tint.inputs["A"])
-        links.new(tex.outputs["Alpha"], alpha.inputs[0])
+        color = vmath("MULTIPLY", tex.outputs["Color"], tint.outputs["Color"], -650, 150)
+        alpha_node = node("ShaderNodeMath", -650, -100, operation="MULTIPLY")
+        links.new(tex.outputs["Alpha"], alpha_node.inputs[0])
+        links.new(tint.outputs["Alpha"], alpha_node.inputs[1])
+        alpha = alpha_node.outputs["Value"]
     else:
-        tint.inputs["A"].default_value = (1.0, 1.0, 1.0, 1.0)
-        alpha.inputs[0].default_value = 1.0
+        color = vmath("MULTIPLY", tint.outputs["Color"], (1.0, 1.0, 1.0), -650, 150)
+        alpha = tint.outputs["Alpha"]
+    alpha3 = splat(alpha, -450, -150)
 
-    emission = nodes.new("ShaderNodeEmission")
-    emission.location = (250, 150)
-    emission.inputs["Strength"].default_value = max(float(intensity), 0.0)
-    transparent = nodes.new("ShaderNodeBsdfTransparent")
-    transparent.location = (250, -100)
+    def factor(kind, x, y):
+        if kind == 1:
+            return (0.0, 0.0, 0.0)
+        if kind == 3:
+            return color
+        if kind == 4:
+            return vmath("SUBTRACT", (1.0, 1.0, 1.0), color, x, y)
+        if kind in (5, 11):
+            return alpha3
+        if kind == 6:
+            return vmath("SUBTRACT", (1.0, 1.0, 1.0), alpha3, x, y)
+        return (1.0, 1.0, 1.0)   # ONE, and the background-dependent factors
 
-    if additive:
-        # additive: transparent background + emission weighted by alpha
-        weighted = nodes.new("ShaderNodeMix")
-        weighted.data_type = "RGBA"
-        weighted.blend_type = "MULTIPLY"
-        weighted.inputs["Factor"].default_value = 1.0
-        weighted.location = (50, 250)
-        links.new(tint.outputs["Result"], weighted.inputs["A"])
-        links.new(alpha_edge.outputs[0], weighted.inputs["B"])
-        links.new(weighted.outputs["Result"], emission.inputs["Color"])
-        add = nodes.new("ShaderNodeAddShader")
-        add.location = (600, 0)
-        links.new(transparent.outputs[0], add.inputs[0])
-        links.new(emission.outputs[0], add.inputs[1])
-        links.new(add.outputs[0], out.inputs["Surface"])
+    fs, fd = factor(src, -250, 200), factor(dst, -250, -200)
+
+    def as_socket(value, x, y):
+        return vmath("MULTIPLY", value, (1.0, 1.0, 1.0), x, y) if isinstance(value, tuple) else value
+
+    emission = node("ShaderNodeEmission", 500, 150)
+    transparent = node("ShaderNodeBsdfTransparent", 500, -150)
+    if op == 3:   # REVSUBTRACT: background * Fd - src * Fs -> darkening only
+        darken = vmath("SUBTRACT", as_socket(fd, -50, -250), vmath("MULTIPLY", color, as_socket(fs, -50, 250), 100, 100),
+                       250, -100)
+        links.new(vmath("MAXIMUM", darken, (0.0, 0.0, 0.0), 350, -150), transparent.inputs["Color"])
+        emission.inputs["Strength"].default_value = 0.0
     else:
-        links.new(tint.outputs["Result"], emission.inputs["Color"])
-        mix = nodes.new("ShaderNodeMixShader")
-        mix.location = (600, 0)
-        links.new(alpha_edge.outputs[0], mix.inputs["Fac"])
-        links.new(transparent.outputs[0], mix.inputs[1])
-        links.new(emission.outputs[0], mix.inputs[2])
-        links.new(mix.outputs[0], out.inputs["Surface"])
+        links.new(vmath("MULTIPLY", color, as_socket(fs, -50, 250), 250, 200), emission.inputs["Color"])
+        if op == 2:   # SUBTRACT: src - background, approximated as the source alone
+            transparent.inputs["Color"].default_value = (0.0, 0.0, 0.0, 1.0)
+        else:
+            links.new(as_socket(fd, 250, -200), transparent.inputs["Color"])
+    add = node("ShaderNodeAddShader", 800, 0)
+    links.new(emission.outputs[0], add.inputs[0])
+    links.new(transparent.outputs[0], add.inputs[1])
+    links.new(add.outputs[0], out.inputs["Surface"])
     return mat
 
 

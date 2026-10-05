@@ -87,9 +87,23 @@ def pattern_uv_rect(pattern, tex_width, tex_height, anim_flag=0):
 
 
 def map_uv(uv, rect, rotate=False):
-    """Map a cell-local UV (0..1, v down) into a pattern's UV rectangle (v down)."""
+    """Map a cell-local UV (0..1, v down) into a pattern's UV rectangle (v down).
+    Rotate follows sub_9632F0's corner assignment: local (u, v) -> (1 - v, u)."""
     u, v = uv
     if rotate:
-        u, v = v, u
+        u, v = 1.0 - v, u
     u0, v0, u1, v1 = rect
     return u0 + (u1 - u0) * u, v0 + (v1 - v0) * v
+
+
+def uv_affine(pattern, tex_width, tex_height, anim_flag=0):
+    """Blender-space UV transform for a pattern: rows (a, b, off) with u' = a*u + b*v + off_u, v' likewise.
+    Input and output are Blender UVs (v up); the cell-local UV is the 0..1 square of the source mesh."""
+    (u0, v0, u1, v1), rotate = pattern_uv_rect(pattern, tex_width, tex_height, anim_flag)
+    du, dv = u1 - u0, v1 - v0
+    if rotate:
+        return (0.0, du, u0), (-dv, 0.0, 1.0 - v0)
+    return (du, 0.0, u0), (0.0, dv, 1.0 - v0 - dv)
+
+
+IDENTITY_AFFINE = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0))

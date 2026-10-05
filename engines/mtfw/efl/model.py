@@ -80,6 +80,8 @@ class Block:
         return schema.type_name(self.kind, self.type)
 
     def has(self, name):
+        if name in self.struct.bits_by_name:
+            name = self.struct.bits_by_name[name].field
         f = self.struct.by_name.get(name)
         return f is not None and f.offset + f.size <= len(self.data)
 
