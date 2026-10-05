@@ -79,6 +79,8 @@ def register():
 
     from albam.blender_ui.foot_ik import register_handlers
     register_handlers()
+    from albam.engines.mtfw.effect_sim import register_handlers as register_effect_handlers
+    register_effect_handlers()
 
 def cleanse_modules():
     for module_name in sorted(modules.keys()):
@@ -89,6 +91,8 @@ def cleanse_modules():
 def unregister():
     from albam.blender_ui.foot_ik import unregister_handlers
     unregister_handlers()
+    from albam.engines.mtfw.effect_sim import unregister_handlers as unregister_effect_handlers
+    unregister_effect_handlers()
 
     for _, cls in reversed(blender_registry.props):
         bpy.utils.unregister_class(cls)

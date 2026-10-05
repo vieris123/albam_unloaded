@@ -10,7 +10,8 @@ Approximations (not verified in game, see the plan):
 - TransMode 1 is treated as additive and 0 as alpha blend.
 - Billboard quad edge = Scale * 100 cm, facing the scene camera; Polygon quads lie in the XY plane.
 - Intensity is used as the emission strength. Flipbooks (.ean) show the first frame (SeqNoMin, PatNoMin), not animated.
-- RotOrder nibble -> Euler order assumes MT's usual XYZ, XZY, YXZ, YZX, ZXY, ZYX.
+- With "Simulate particles", Billboard/Polygon/PrimModel records become animated particle systems
+  (effect_sim.py + efl/sim.py); otherwise one static shape per record.
 """
 import math
 from pathlib import PureWindowsPath
@@ -24,12 +25,14 @@ from albam.registry import blender_registry
 from .efl import EffectList, EflError, VERSION_DX9
 from .efl import ean
 from .efl.primmodel import build_from_block
+from .efl.sim import ROT_ORDERS
+from . import effect_sim
 from .texture import build_blender_textures
 
 SCALE = 0.01   # game centimetres -> metres
-EULER_ORDERS = ("XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX")
 BILLBOARD_UNIT = 100.0   # cm per Billboard Scale unit (assumed)
 EDGE_ALPHA_ATTR = "EdgeAlpha"
+SIMULATED_TYPES = (0, 2, 6)   # Billboard, Polygon, PrimModel
 
 
 def _filter_armatures(self, obj):
@@ -47,6 +50,13 @@ class ImportOptionsEFL(bpy.types.PropertyGroup):
     load_textures: bpy.props.BoolProperty(
         name="Load textures", default=True,
         description="Load base textures from the Game Files folder (it must be the arc root)")
+    simulate: bpy.props.BoolProperty(
+        name="Simulate particles", default=True,
+        description="Emit and animate particles over time (approximation of the game's emitters), "
+                    "starting at the current frame. Off: one static shape per generator")
+    sim_frames: bpy.props.IntProperty(
+        name="Frames", default=300, min=1, max=3600,
+        description="Game frames (60 fps) to simulate; generators that loop forever stop emitting after this")
 
 
 @blender_registry.register_import_options_custom_draw_func(extension="efl")
@@ -57,6 +67,10 @@ def draw_efl_options(panel_instance, context):
     layout.prop(options, "armature")
     layout.prop(options, "build_geometry")
     layout.prop(options, "load_textures")
+    layout.prop(options, "simulate")
+    row = layout.row()
+    row.enabled = options.simulate
+    row.prop(options, "sim_frames")
 
 
 @blender_registry.register_import_options_custom_poll_func(extension="efl")
@@ -67,8 +81,9 @@ def poll_efl_options(panel_instance, context):
 @blender_registry.register_import_function(app_id="dmc4", extension="efl", file_category="EFFECT")
 def load_efl(file_item, context):
     app_id = file_item.app_id
+    efl_bytes = file_item.get_bytes()
     try:
-        efl = EffectList.from_bytes(file_item.get_bytes())
+        efl = EffectList.from_bytes(efl_bytes)
     except EflError as err:
         raise AlbamCheckFailure(
             "This .efl file can't be imported",
@@ -80,7 +95,7 @@ def load_efl(file_item, context):
     armature = options.armature
     stem = PureWindowsPath(file_item.display_name).stem
     builder = _EffectBuilder(app_id, context, stem, armature, options)
-    builder.build(efl, getattr(file_item, "relative_path", ""))
+    builder.build(efl, getattr(file_item, "relative_path", ""), efl_bytes)
     return None   # objects are linked into their own collection already
 
 
@@ -102,7 +117,7 @@ class _EffectBuilder:
         self.collection.objects.link(ob)
         return ob
 
-    def build(self, efl, relative_path):
+    def build(self, efl, relative_path, efl_bytes=b""):
         root = self.link(bpy.data.objects.new(f"EFL_{self.stem}", None))
         root.empty_display_type = "PLAIN_AXES"
         root.empty_display_size = 0.1
@@ -112,8 +127,10 @@ class _EffectBuilder:
         root["efl_path"] = relative_path
         root["efl_header"] = {"base_fps": efl.base_fps, "record_count": len(efl.records),
                               "has_unit_generator": efl.unit_gen is not None}
-        root["efl_note"] = ("Static preview: generator offsets and particle shapes only. Ranges are stored "
+        root["efl_note"] = ("Approximate preview (static shapes, or simulated particles). Ranges are stored "
                             "flattened as [s, r, ...]; value = s + random * r. See Vibed/RE/efl_import_plan.md")
+        if self.options.simulate:
+            effect_sim.store_source(root, efl_bytes, self.context.scene.frame_current)
         for index, record in enumerate(efl.records):
             self.build_record(index, record, root)
 
@@ -139,10 +156,25 @@ class _EffectBuilder:
         self._attach(ob, gen, root)
 
         if ptcl is not None and self.options.build_geometry:
-            shape_ob = self.build_particle_shape(ptcl, gen, ob.name)
+            simulated = self.options.simulate and ptcl.type in SIMULATED_TYPES and gen is not None
+            shape_ob = self.build_particle_shape(ptcl, gen, ob.name, as_source=simulated)
             if shape_ob is not None:
                 shape_ob.parent = ob
+                if simulated:
+                    effect_sim.create_sim_object(self.collection, ob.name, ob, shape_ob, root, index,
+                                                 self.sim_info(record))
         return ob
+
+    def sim_info(self, record):
+        ptcl, gen = record.ptcl, record.gen
+        rects = [(0.0, 0.0, 1.0, 1.0)]
+        if ptcl.has("AnimPath") and ptcl.get("AnimPath") and ptcl.get("BaseMapPath"):
+            rects = effect_sim.frame_rects(self.anim_for(ptcl.get("AnimPath")), ptcl.get("SeqNoMin"),
+                                           self.images.get(ptcl.get("BaseMapPath")), ptcl.get("AnimFlag"), ean)
+        rot_order = ptcl.get("RotOrder") if ptcl.has("PrimFlags") or ptcl.has("PolygonFlags") else 5
+        return {"kind": ptcl.type, "frames": self.options.sim_frames, "rot_order": rot_order,
+                "particle_scale": gen.get("ParticleScale")[0] or 1.0,
+                "rects": [c for rect in rects for c in rect]}
 
     def joint_bones(self):
         """MT joint number -> bone. ParentNo is the joint number (bone['mtfw.anim_retarget'], the .mod's
@@ -173,14 +205,15 @@ class _EffectBuilder:
 
     # -- particles ---------------------------------------------------------------------------
 
-    def build_particle_shape(self, ptcl, gen, name):
+    def build_particle_shape(self, ptcl, gen, name, as_source=False):
+        """Static shape, or with as_source the untransformed, uncropped shape the particle system instances."""
         if ptcl.type == 6:
             mesh = self._prim_model_mesh(ptcl, name)
         elif ptcl.type == 2 and ptcl.has("Width"):
             w, h = ptcl.get("Width")[0], ptcl.get("Height")[0]
             mesh = _quad_mesh(f"{name}_polygon", w, h)
         elif ptcl.type == 0 and ptcl.has("AspectRatio"):
-            size = ptcl.get("Scale")[0] * BILLBOARD_UNIT
+            size = BILLBOARD_UNIT if as_source else ptcl.get("Scale")[0] * BILLBOARD_UNIT
             aspect = ptcl.get("AspectRatio")[0] or 1.0
             mesh = _quad_mesh(f"{name}_billboard", size * aspect, size)
         else:
@@ -191,6 +224,8 @@ class _EffectBuilder:
         material = self.material_for(ptcl)
         if material is not None:
             mesh.materials.append(material)
+        if as_source:   # transforms and frame UVs are applied per particle
+            return ob
         self.crop_to_frame(ptcl, mesh, ob)
 
         particle_scale = gen.get("ParticleScale")[0] if gen is not None else 1.0
@@ -311,7 +346,8 @@ def _quaternion(xyzw):
 
 
 def _euler_order(nibble):
-    return EULER_ORDERS[nibble] if 0 <= nibble < len(EULER_ORDERS) else "XYZ"
+    """RotOrder enum (setMatFromAngle 0x95FF60): 0 ZYX, 1 ZXY, 2 YZX, 3 YXZ, 4 XZY, 5 XYZ."""
+    return ROT_ORDERS[nibble] if 0 <= nibble < len(ROT_ORDERS) else "XYZ"
 
 
 def _quad_mesh(name, width, height):
