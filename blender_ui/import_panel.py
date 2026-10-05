@@ -200,6 +200,7 @@ class ALBAM_UL_RealFileSystemUI(bpy.types.UIList):
         "MESH": "OUTLINER_OB_MESH",
         "ANIMATION": "ACTION",
         "COLLISION": "MOD_PHYSICS",
+        "EFFECT": "PARTICLES",
         "MATERIAL": "MATERIAL",
         "TEXTURE": "TEXTURE",
     }

@@ -11,8 +11,8 @@ Evidence tiers:
     corpus   inferred from value statistics over the 1,109-file DX9 corpus
     unknown  placeholder; the bytes are kept raw anyway
 
-The IDB's particle types (EFL_PARTICLE_*) are 4 bytes short from 0x14 on; the offsets here are
-the file offsets (IDB offset + 4 past 0x14), confirmed in initParticleBillboard 0x977E60.
+The DX9 IDB's EFL_GENERATOR and EFL_PARTICLE_* types were retyped to these offsets on 2026-10-05
+(confirmed in initParticleBillboard 0x977E60 and by the corpus round-trip).
 """
 from __future__ import annotations
 
@@ -256,7 +256,7 @@ PTCL_COMMON_BITS = [
     B("PrimMaterialB", "PrimMaterialFlags", 8, 4, "dx9", "HIBYTE(dword@0x10) & 0xF"),
 ]
 PTCL_DRAW = [
-    F(0x14, "uknDraw_0x14", "u32", "unknown", "missing from the IDB type"),
+    F(0x14, "uknDraw_0x14", "u32", "unknown", "always 0 in the DX9 corpus"),
     F(0x18, "Intensity", "rangef", "dx9"),
     F(0x20, "Scale", "rangef", "dx9"),
     F(0x28, "ScaleAdd", "rangef", "dx9"),

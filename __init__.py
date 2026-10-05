@@ -37,6 +37,7 @@ def register():
     importlib.import_module("albam.engines.mtfw.archive")
     importlib.import_module("albam.engines.mtfw.collision")
     importlib.import_module("albam.engines.mtfw.mesh")
+    importlib.import_module("albam.engines.mtfw.effect")
     importlib.import_module("albam.blender_ui.foot_ik")
     if os.getenv("ALBAM_ENABLE_REEN"):
         importlib.import_module("albam.engines.reng.archive")
