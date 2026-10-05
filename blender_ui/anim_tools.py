@@ -109,14 +109,17 @@ class ALBAM_PT_LmtSection(LmtPanelBase, bpy.types.Panel):
         layout = self.layout
         groups = context.scene.albam.lmt_groups
         if len(groups.anim_group) == 0:
-            layout.label(text="Import an .lmt from Game Files", icon="INFO")
+            layout.label(text="Import an .lmt from Game Files, or", icon="INFO")
+            layout.operator("albam.new_lmt", icon="ADD")
             return
 
         row = layout.row()
         row.template_list(
             "ALBAM_UL_LmtList", "lmt", groups, "anim_group", groups, "active_group_id", sort_lock=True, rows=2
         )
-        row.operator("albam.remove_lmt", icon="REMOVE", text="")
+        col = row.column(align=True)
+        col.operator("albam.new_lmt", icon="ADD", text="")
+        col.operator("albam.remove_lmt", icon="REMOVE", text="")
 
         lmt = get_active_lmt(context)
         if lmt is None:
@@ -171,8 +174,7 @@ class ALBAM_PT_AlbamActionSection(LmtPanelBase, bpy.types.Panel):
         sub.prop(props, "num_frames")
         sub.operator("albam.lmt_frames_from_action", text="", icon="FILE_REFRESH")
         col.prop(props, "loop_frames")
-
-        layout.operator("albam.reorganize_fcurves", icon="GROUP")
+        col.prop(props, "source_fps")
 
 
 @blender_registry.register_blender_type
@@ -271,6 +273,47 @@ class ALBAM_PT_AlbamHashedEventSection(LmtPanelBase, bpy.types.Panel):
         col.label(text=f"Event value: 0x{event.encode():08X}")
 
 
+def _filter_lmt_armature(self, obj):
+    return obj.type == "ARMATURE" and any(b.get("mtfw.anim_retarget") is not None for b in obj.data.bones)
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_LmtNew(bpy.types.Operator):
+    """Create an empty LMT, to add animations to"""
+    bl_idname = "albam.new_lmt"
+    bl_label = "New LMT"
+    bl_options = {"REGISTER", "UNDO"}
+
+    name: bpy.props.StringProperty(name="Name", default="new.lmt")
+    armature: bpy.props.StringProperty(name="Armature", description="Armature of an imported model")
+
+    def invoke(self, context, event):
+        obj = context.active_object
+        if obj is not None and _filter_lmt_armature(self, obj):
+            self.armature = obj.name
+        else:
+            self.armature = next((o.name for o in context.scene.objects if _filter_lmt_armature(self, o)), "")
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(self, "name")
+        layout.prop_search(self, "armature", context.scene, "objects", icon="ARMATURE_DATA")
+
+    def execute(self, context):
+        armature = context.scene.objects.get(self.armature)
+        if armature is None or not _filter_lmt_armature(self, armature):
+            self.report({"ERROR"}, "Pick the armature of an imported model")
+            return {"CANCELLED"}
+        groups = context.scene.albam.lmt_groups
+        lmt = groups.add(self.name)
+        lmt.armature = armature
+        groups.active_group_id = len(groups.anim_group) - 1
+        return {"FINISHED"}
+
+
 @blender_registry.register_blender_type
 class ALBAM_OT_LmtRemove(bpy.types.Operator):
     """Remove the selected LMT from the list. Its actions are kept"""
@@ -301,9 +344,11 @@ def _get_action_items(self, context):
 
 
 def _action_length(action, context):
+    """Length in game frames (60 fps, starting at 0), see animation.ExportTiming"""
     if action.fcurves:
-        return int(round(action.frame_range[1]))
-    return context.scene.frame_end
+        return _animation().game_length(action)
+    scene = context.scene
+    return int(round((scene.frame_end - scene.frame_start) * 60 / get_lmt_props(action).source_fps))
 
 
 @blender_registry.register_blender_type
@@ -352,6 +397,8 @@ class ALBAM_OT_LmtAddAnim(bpy.types.Operator):
         props = get_lmt_props(action)
         if props.num_frames == 0:
             # not an action from an LMT before, set it up as a new animation
+            render = context.scene.render
+            props.source_fps = render.fps / render.fps_base
             props.num_frames = _action_length(action, context)
             props.loop_frames = -1
         props.lmt_id = self.slot
@@ -394,33 +441,6 @@ class ALBAM_OT_LmtFramesFromAction(bpy.types.Operator):
     def execute(self, context):
         action = _active_action(context)
         get_lmt_props(action).num_frames = _action_length(action, context)
-        return {"FINISHED"}
-
-
-@blender_registry.register_blender_type
-class ALBAM_OT_LmtReorganizeFcurves(bpy.types.Operator):
-    """Group F-Curves by bone and property, as export expects. Use this on new animations before exporting"""
-    bl_idname = "albam.reorganize_fcurves"
-    bl_label = "Reorganize F-Curves"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        return _active_action(context) is not None
-
-    def execute(self, context):
-        action = _active_action(context)
-        for group in list(action.groups):
-            action.groups.remove(group)
-        for f in action.fcurves:
-            data_path = f.data_path
-            if not data_path.startswith('pose.bones["'):
-                continue
-            bone_name = data_path[data_path.find('[\"')+2:data_path.find('\"]')]
-            action_type = data_path.split('.')[-1]
-            group_name = f'{bone_name}.{action_type}'
-            group = action.groups.get(group_name) or action.groups.new(group_name)
-            f.group = group
         return {"FINISHED"}
 
 
@@ -525,7 +545,13 @@ class ALBAM_OT_LmtExport(bpy.types.Operator):
             bpy.ops.albam.error_handler_popup("INVOKE_DEFAULT")
             return {"FINISHED"}
         lmt.export_path = self.filepath
-        self.report({"INFO"}, f"Exported {os.path.basename(self.filepath)}")
+        message = f"Exported {os.path.basename(self.filepath)}"
+        if self.notes:
+            # also in the console, the status bar only fits so much
+            print(message + ":" + "".join("\n  " + note for note in self.notes))
+            self.report({"WARNING"}, message + ". " + "; ".join(self.notes))
+        else:
+            self.report({"INFO"}, message)
         return {"FINISHED"}
 
     def _execute(self, context, lmt):
@@ -533,6 +559,7 @@ class ALBAM_OT_LmtExport(bpy.types.Operator):
             if item.action:
                 link_legacy_events(item.action)
         export_function = blender_registry.export_registry[("dmc4", "lmt")]
-        data = export_function(lmt)
+        self.notes = []
+        data = export_function(lmt, self.notes)
         with open(self.filepath, "wb") as f:
             f.write(data)

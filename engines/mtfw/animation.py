@@ -123,12 +123,7 @@ def load_lmt(file_item, context):
                 action_type = 'rotation'
                 decoded_frames = decode_type_6(track.data)
                 decoded_frames = _parent_space_to_local_rot(decoded_frames, armature, bone_index)
-                #if block.block_header.loop_frames > 0 and len(decoded_frames) > block.block_header.loop_frames:
-                ref_frame = _parent_space_to_local_rot([Quaternion([track.ref_data.w, track.ref_data.x,
-                                                            track.ref_data.y, track.ref_data.z])],
-                                                            armature, bone_index)[0]
-                decoded_frames = [ref_frame] + decoded_frames
-                    
+
             elif track.buffer_type == 4:
                 TRACK_MODE = "rotation_quaternion"
                 action_type = 'rotation'
@@ -162,34 +157,18 @@ def load_lmt(file_item, context):
                     action_type = 'location'
                     decoded_frames = decode_type_9(track.data)
                     decoded_frames = _parent_space_to_local(decoded_frames, armature, bone_index)
-                    #if block.block_header.loop_frames > 0 and len(decoded_frames) > block.block_header.loop_frames:
-                    ref_frame = _parent_space_to_local([Vector([track.ref_data.x / 100.0, track.ref_data.y / 100.0,
-                                                                    track.ref_data.z / 100.0])],
-                                                        armature, bone_index)[0]
-                    #decoded_frames[block.block_header.num_frames - block.block_header.loop_frames + 1] = ref_frame
-                    decoded_frames = [ref_frame] + decoded_frames
 
                 elif track.usage == 2:
                     TRACK_MODE = 'scale'
                     action_type = 'scale'
                     decoded_frames = decode_type_9_scale(track.data)
                     world_pos_fix(decoded_frames)
-                    #if block.block_header.loop_frames > 0 and len(decoded_frames) > block.block_header.loop_frames:
-                    ref_frame = [Vector([track.ref_data.x, track.ref_data.y, track.ref_data.z])]
-                    world_pos_fix(ref_frame)
-                    #decoded_frames[block.block_header.num_frames - block.block_header.loop_frames + 1] = ref_frame[0]
-                    decoded_frames = [ref_frame[0]] + decoded_frames
 
                 elif track.usage == 4:
                     TRACK_MODE = 'location'
                     action_type = 'location'
                     decoded_frames = decode_type_9(track.data)
                     world_pos_fix(decoded_frames)
-                    #if block.block_header.loop_frames > 0 and len(decoded_frames) > block.block_header.loop_frames:
-                    ref_frame = [Vector([track.ref_data.x / 100.0, track.ref_data.y / 100.0, track.ref_data.z / 100.0])]
-                    world_pos_fix(ref_frame)
-                    #decoded_frames[block.block_header.num_frames - block.block_header.loop_frames + 1] = ref_frame[0]
-                    decoded_frames = [ref_frame[0]] + decoded_frames
                 else:
                     continue
 
@@ -233,20 +212,14 @@ def load_lmt(file_item, context):
                     print('unknown error:', err)
                     curves.append(action.fcurves.new(data_path=data_path+'[1]', index=i, action_group=group_name))
 
+            # stored keys start at frame 0, the game's frames (see decode_type_6)
             for frame_index, frame_data in enumerate(decoded_frames):
                 if frame_data is None:
                     continue
-
-                if len(decoded_frames) > 1:
-                    for curve_idx, curve in enumerate(curves):
-                        curve.keyframe_points.add(1)
-                        curve.keyframe_points[-1].co = (frame_index, frame_data[curve_idx])
-                        curve.keyframe_points[-1].interpolation = 'LINEAR'
-                else:
-                    for curve_idx, curve in enumerate(curves):
-                        curve.keyframe_points.add(1)
-                        curve.keyframe_points[-1].co = (frame_index + 1, frame_data[curve_idx])
-                        curve.keyframe_points[-1].interpolation = 'LINEAR'
+                for curve_idx, curve in enumerate(curves):
+                    curve.keyframe_points.add(1)
+                    curve.keyframe_points[-1].co = (frame_index, frame_data[curve_idx])
+                    curve.keyframe_points[-1].interpolation = 'LINEAR'
                         
     lmt_groups = context.scene.albam.lmt_groups
     lmt_groups.active_group_id = len(lmt_groups.anim_group) - 1
@@ -379,7 +352,7 @@ def decode_type_9(data):
         floats = (u[0] / 100, u[1] / 100, u[2] / 100)
         duration = u[3]
         decoded_frames.append(floats)
-        decoded_frames.extend([None] * (duration))
+        decoded_frames.extend([None] * max(duration - 1, 0))
     return decoded_frames
 
 def decode_type_9_scale(data):
@@ -392,7 +365,7 @@ def decode_type_9_scale(data):
         floats = (u[0], u[1], u[2])
         duration = u[3]
         decoded_frames.append(floats)
-        decoded_frames.extend([None] * (duration))
+        decoded_frames.extend([None] * max(duration - 1, 0))
     return decoded_frames
 
 def decode_type_2(data):
@@ -450,6 +423,12 @@ def decode_type_4_euler(data):
     return decoded_frames
 
 def decode_type_6(data):
+    """
+    Keys in game frames, None where there's no key. Stored keys start at frame 0 (the first one
+    equals the track's ref_data) and a key's duration is the number of frames to the next key,
+    0 on the last key, which holds. Confirmed in uModel::calcMotionQuaternion (0xAE0400) and
+    against all DX9 files: durations always add up to num_frames - 1
+    """
     decoded_frames = []
 
     for idx, start in enumerate(range(0, len(data), 8)):
@@ -459,7 +438,7 @@ def decode_type_6(data):
         frame.calc_components()
 
         decoded_frames.append((frame.w, frame.x, frame.y, frame.z))
-        decoded_frames.extend([None] * frame.duration)
+        decoded_frames.extend([None] * max(frame.duration - 1, 0))
 
     return decoded_frames
 
@@ -592,18 +571,77 @@ def world_pos_fix(decoded_frames):
 
 
 @blender_registry.register_export_function(app_id="dmc4", extension="lmt")
-def export_lmt(lmt_group):
-    _check_lmt_group(lmt_group)
+def export_lmt(lmt_group, notes=None):
+    """
+    The LMT file as bytes. Adjustments made on the way (timing conversion, ignored F-Curves)
+    are appended to notes, if given
+    """
+    notes = notes if notes is not None else []
+    timings = {item.action.name: ExportTiming(item.action) for item in lmt_group.actions if item.action}
+    _check_lmt_group(lmt_group, timings)
     dst_lmt = Lmt()
     header_size = _serialize_top_level_lmt(dst_lmt, lmt_group)
-    final_size = _serialize_block(dst_lmt, lmt_group, header_size)
+    final_size = _serialize_block(dst_lmt, lmt_group, header_size, timings, notes)
     stream = KaitaiStream(BytesIO(bytearray(final_size)))
     dst_lmt._check()
     dst_lmt._write(stream)
     return stream.to_byte_array()
 
 
-def _check_lmt_group(lmt_group):
+class ExportTiming:
+    """
+    Maps action frames to game frames. The game plays at 60 fps and starts at frame 0 (frame 0
+    is the tracks' reference value), so actions are shifted to start at their first keyframe and
+    scaled from the scene frame rate. Keys are then written on whole game frames. The Blender
+    action is never changed
+    """
+
+    def __init__(self, action):
+        self.fps = get_lmt_props(action).source_fps
+        self.scale = FRAMERATE / self.fps
+        key_frames = [kp.co[0] for fc in action.fcurves if fc.data_path.startswith('pose.bones["')
+                      for kp in fc.keyframe_points]
+        # events count too: an LMT block with only constant tracks has its keys on frame 1
+        # but its first events on frame 0
+        props = get_lmt_props(action)
+        markers = (find_event_marker(action, event, i) for i, event in enumerate(props.event_markers))
+        event_frames = [marker.frame for marker in markers if marker is not None]
+        # without keyframes there's nothing to line up, leave events where they are
+        self.start = min(key_frames + event_frames) if key_frames else 0
+        self.fractional = any(abs(f - round(f)) > 1e-4 for f in key_frames)
+
+    @property
+    def is_identity(self):
+        return self.start == 0 and abs(self.scale - 1.0) < 1e-9 and not self.fractional
+
+    def to_game(self, frame):
+        return (frame - self.start) * self.scale
+
+    def to_action(self, game_frame):
+        return self.start + game_frame / self.scale
+
+    def describe(self):
+        changes = []
+        if self.start != 0:
+            changes.append(f"shifted {-self.start:+g} frames to start at 0")
+        if abs(self.scale - 1.0) >= 1e-9:
+            changes.append(f"converted from {self.fps:g} to {FRAMERATE} fps")
+        if self.fractional:
+            changes.append("keys between whole frames resampled")
+        return ", ".join(changes)
+
+
+def game_length(action):
+    """Length of the action in game frames, for the Frames property"""
+    timing = ExportTiming(action)
+    return max(0, int(round(timing.to_game(action.frame_range[1]))))
+
+
+def _event_game_frame(timing, marker):
+    return int(round(timing.to_game(marker.frame)))
+
+
+def _check_lmt_group(lmt_group, timings):
     """Raise AlbamCheckFailure for problems that would produce a broken or crashing export"""
     if not lmt_group.armature:
         raise AlbamCheckFailure(
@@ -634,6 +672,7 @@ def _check_lmt_group(lmt_group):
     for item in lmt_group.actions:
         action = item.action
         props = get_lmt_props(action)
+        timing = timings[action.name]
         seen = set()
         for i, event in enumerate(props.event_markers):
             marker = find_event_marker(action, event, i)
@@ -641,11 +680,14 @@ def _check_lmt_group(lmt_group):
             if marker is None:
                 problems.append(f"{action.name}: {label} has no marker")
                 continue
-            if not 0 <= marker.frame < props.num_frames:
-                problems.append(f"{action.name}: {label} is on frame {marker.frame}, outside 0-{props.num_frames - 1}")
-            key = (event.param_ev_type, marker.frame)
+            frame = _event_game_frame(timing, marker)
+            if not 0 <= frame < props.num_frames:
+                problems.append(
+                    f"{action.name}: {label} is on frame {marker.frame} (game frame {frame}), "
+                    f"outside game frames 0-{props.num_frames - 1}")
+            key = (event.param_ev_type, frame)
             if key in seen:
-                problems.append(f"{action.name}: two {event.param_ev_type} events on frame {marker.frame}")
+                problems.append(f"{action.name}: two {event.param_ev_type} events on game frame {frame}")
             seen.add(key)
     if problems:
         raise AlbamCheckFailure(
@@ -660,7 +702,7 @@ def _serialize_top_level_lmt(dst_lmt, lmt_group):
     dst_lmt.num_block_offsets = lmt_group.num_slots
     return lmt_group.num_slots * 4 + 8
 
-def _serialize_block(dst_lmt, lmt_group, header_size):
+def _serialize_block(dst_lmt, lmt_group, header_size, timings, notes):
     dst_lmt.block_offsets = []
     for i in range(dst_lmt.num_block_offsets):
         block_offset = dst_lmt.BlockOffset(_parent=dst_lmt, _root=dst_lmt._root)
@@ -671,6 +713,9 @@ def _serialize_block(dst_lmt, lmt_group, header_size):
     for i, group in enumerate(lmt_group.actions):
         action = group.action
         custom_property = get_lmt_props(action)
+        timing = timings[action.name]
+        if not timing.is_identity:
+            notes.append(f"{action.name}: {timing.describe()}")
 
         block = dst_lmt.BlockHeader49(_parent=dst_lmt, _root=dst_lmt._root)
         block.num_frames = custom_property.num_frames
@@ -680,7 +725,7 @@ def _serialize_block(dst_lmt, lmt_group, header_size):
         active_offset.offset = header_size + i * 0xC0
         active_offset.block_header = block
         block.ofs_frame = cml_size
-        tracks, track_bf_size = _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size)
+        tracks, track_bf_size = _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size, timing, notes)
         cml_size = track_bf_size
         block.tracks = tracks
         block.num_tracks = len(tracks)
@@ -695,7 +740,7 @@ def _serialize_block(dst_lmt, lmt_group, header_size):
         block.end_quat.z = custom_property.end_quat[2]
         block.end_quat.w = custom_property.end_quat[3]
 
-        events01, events02 = _serialize_events(dst_lmt, block, action)
+        events01, events02 = _serialize_events(dst_lmt, block, action, timing)
         block.events_01 = events01
         block.events_02 = events02
 
@@ -715,56 +760,75 @@ def _serialize_block(dst_lmt, lmt_group, header_size):
 
 
 EULER_ORDERS = {'XYZ', 'XZY', 'YXZ', 'YZX', 'ZXY', 'ZYX'}
+MAX_KEY_GAP = 255  # FrameQuat4_14 durations are 8 bits
+ROTATION_PROPS = ('rotation_quaternion', 'rotation_euler', 'rotation_axis_angle')
+TRACK_PROP_ORDER = {'rotation': 0, 'location': 1, 'scale': 2}
 
 
-def _get_export_fcurve_groups(action, armature):
+def _get_export_tracks(action, armature, notes):
     """
-    (fcurve group, bone name, animated property) for each group to export as a track.
-    Skips groups without keyframes or that don't animate a bone. When a bone has both quaternion and euler
-    rotation curves, only the ones matching the bone's rotation mode are kept.
+    [(bone name, property, {array_index: fcurve})], one per exported track, ordered like the
+    game's files: root motion first, then bones in skeleton order, rotation > location > scale.
+    Built from the F-Curves themselves, so their grouping doesn't matter. When a bone has
+    curves for several rotation modes, the bone's current rotation mode picks which one
     """
-    groups = []
-    for curve_group in action.groups:
-        if not any(c.keyframe_points for c in curve_group.channels):
+    tracks = {}
+    ignored = {}
+    for fc in action.fcurves:
+        data_path = fc.data_path
+        if not data_path.startswith('pose.bones["') or not fc.keyframe_points:
             continue
-        data_path = curve_group.channels[0].data_path
-        if not data_path.startswith('pose.bones["'):
-            continue
-        bone_name = data_path[data_path.find('[\"')+2:data_path.find('\"]')]
-        groups.append((curve_group, bone_name, data_path.split('.')[-1]))
+        end = data_path.find('"].')
+        bone_name, prop = data_path[len('pose.bones["'):end], data_path[end + 3:]
+        if prop in ('location', 'scale') or prop in ROTATION_PROPS:
+            tracks.setdefault((bone_name, prop), {})[fc.array_index] = fc
+        else:
+            ignored[prop] = ignored.get(prop, 0) + 1
+    if ignored:
+        notes.append(f"{action.name}: ignored F-Curves the LMT format can't store: "
+                     + ", ".join(f"{prop} ({count})" for prop, count in sorted(ignored.items())))
 
     rotation_props = {}
-    for _, bone_name, prop in groups:
-        if prop in ('rotation_quaternion', 'rotation_euler'):
+    for bone_name, prop in tracks:
+        if prop in ROTATION_PROPS:
             rotation_props.setdefault(bone_name, set()).add(prop)
+    for bone_name, props in rotation_props.items():
+        if len(props) < 2:
+            continue
+        pose_bone = armature.pose.bones.get(bone_name)
+        mode = pose_bone.rotation_mode if pose_bone else 'QUATERNION'
+        keep = ('rotation_euler' if mode in EULER_ORDERS else
+                'rotation_axis_angle' if mode == 'AXIS_ANGLE' else 'rotation_quaternion')
+        if keep not in props:
+            keep = 'rotation_quaternion' if 'rotation_quaternion' in props else sorted(props)[0]
+        for prop in props - {keep}:
+            del tracks[(bone_name, prop)]
 
-    filtered = []
-    for curve_group, bone_name, prop in groups:
-        if len(rotation_props.get(bone_name, ())) > 1:
-            pose_bone = armature.pose.bones.get(bone_name)
-            uses_euler = pose_bone is not None and pose_bone.rotation_mode in EULER_ORDERS
-            if prop == ('rotation_quaternion' if uses_euler else 'rotation_euler'):
-                continue
-        filtered.append((curve_group, bone_name, prop))
-    return filtered
+    bone_order = {bone.name: i for i, bone in enumerate(armature.data.bones)}
+
+    def sort_key(item):
+        bone_name, prop = item[0]
+        kind = 'rotation' if prop in ROTATION_PROPS else prop
+        return (bone_name != ROOT_MOTION_BONE_NAME, bone_order.get(bone_name, len(bone_order)), TRACK_PROP_ORDER[kind])
+
+    return [(bone_name, prop, channels) for (bone_name, prop), channels in sorted(tracks.items(), key=sort_key)]
 
 
-def _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size):
+def _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size, timing, notes):
     tracks = []
     armature = lmt_group.armature
-    curve_groups = _get_export_fcurve_groups(action, armature)
-    cml_size += len(curve_groups) * 32
-    for curve_group, bone_name, action_type in curve_groups:
+    export_tracks = _get_export_tracks(action, armature, notes)
+    cml_size += len(export_tracks) * 32
+    for bone_name, action_type, channels in export_tracks:
         track = dst_lmt.Track49(_parent=block, _root=dst_lmt._root)
         track.joint_type = 0
 
-        data_path = curve_group.channels[0].data_path
         bone = armature.data.bones.get(bone_name)
         if bone is None:
             raise AlbamCheckFailure(
                 f"Animation {action.name} animates a bone that isn't in the armature",
                 f"Bone: {bone_name}, armature: {armature.name}",
-                "Delete those F-Curves, or set the LMT's armature to the right one")
+                "Retarget the animation onto the LMT's armature, or set the LMT's armature to the right one")
         #Bone index
         if bone_name == ROOT_MOTION_BONE_NAME:
             track.bone_index = ROOT_MOTION_BONE_ID
@@ -778,16 +842,13 @@ def _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size):
             track.bone_index = int(retarget_index)
 
         #Track type
-        if action_type in ['rotation', 'rotation_quaternion', 'rotation_euler']:
+        if action_type in ROTATION_PROPS:
             # the root motion bone's rotation is absolute, like in the game's files
             track.usage = 3 if track.bone_index == ROOT_MOTION_BONE_ID else 0
             track.buffer_type = 6
-            if action_type == 'rotation_euler':
-                pose_bone = armature.pose.bones.get(bone_name)
-                order = pose_bone.rotation_mode if pose_bone and pose_bone.rotation_mode in EULER_ORDERS else 'XYZ'
-                keys = _euler_rotation_keys(curve_group, order)
-            else:
-                keys = _quaternion_rotation_keys(curve_group)
+            pose_bone = armature.pose.bones.get(bone_name)
+            order = pose_bone.rotation_mode if pose_bone and pose_bone.rotation_mode in EULER_ORDERS else 'XYZ'
+            keys = _rotation_keys(channels, action_type, order, timing)
             buffer, bf_size = _serialize_bone_rotation(dst_lmt, bone, track, keys)
         elif action_type == 'location':
             if track.bone_index == ROOT_MOTION_BONE_ID:
@@ -795,18 +856,13 @@ def _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size):
             else:
                 track.usage = 1
             track.buffer_type = 9
-            keys = _track_keys(curve_group, (0.0, 0.0, 0.0))
+            keys = _track_keys(channels, (0.0, 0.0, 0.0), timing)
             buffer, bf_size = _serialize_bone_location(dst_lmt, bone, track, keys)
-        elif action_type == 'scale':
+        else:
             track.usage = 2
             track.buffer_type = 9
-            keys = _track_keys(curve_group, (1.0, 1.0, 1.0))
+            keys = _track_keys(channels, (1.0, 1.0, 1.0), timing)
             buffer, bf_size = _serialize_bone_scale(dst_lmt, track, keys)
-        else:
-            raise AlbamCheckFailure(
-                f"Animation {action.name} has F-Curves the LMT format can't store",
-                f"Data path: {data_path}",
-                "Only bone location, rotation (quaternion or euler) and scale can be exported")
 
         track.weight = 1.0
         track.data = buffer.to_byte_array()
@@ -817,7 +873,7 @@ def _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size):
     return tracks, cml_size
 
 
-def _serialize_events(dst_lmt, dst_action, action):
+def _serialize_events(dst_lmt, dst_action, action, timing):
     """
     Events are stored per table (Hitbox, Sound) as (value, duration) pairs that cover
     the whole animation, so a value holds until the next event. The game's files always
@@ -829,7 +885,7 @@ def _serialize_events(dst_lmt, dst_action, action):
     for ind, ev in enumerate(custom_prop.event_markers):
         marker = find_event_marker(action, ev, ind)
         tables[ev.param_ev_type if ev.param_ev_type in tables else 'Hitbox'].append(
-            (int(marker.frame), ev.encode()))
+            (_event_game_frame(timing, marker), ev.encode()))
 
     serialized = []
     for frames_values in tables.values():
@@ -847,29 +903,68 @@ def _serialize_events(dst_lmt, dst_action, action):
     return serialized[0], serialized[1]
 
 
-def _track_keys(fcurve_group, defaults):
+def _track_keys(channels, defaults, timing):
     """
-    (frame, [values]) for every frame where any channel of the track has a keyframe, with
-    every channel evaluated at that frame. The file stores all components of a track per key,
-    so channels keyed on different frames are filled in from their curves.
-    Channels missing from the group take their value from defaults (indexed by array_index)
+    (game frame, [values]) for every game frame where any channel of the track has a keyframe,
+    with every channel evaluated there. The file stores all components of a track per key, so
+    channels keyed on different frames are filled in from their curves. Keyframes are mapped to
+    whole game frames (see ExportTiming). Animated tracks always get a key on frame 0, where the
+    game starts reading them, and gaps longer than 255 frames are split, the most a rotation
+    key's 8-bit duration can hold. Channels missing from the track take their value from defaults
     """
-    channels = {c.array_index: c for c in fcurve_group.channels}
-    frames = sorted({kp.co[0] for c in channels.values() for kp in c.keyframe_points})
+    frames = {round(timing.to_game(kp.co[0])) for c in channels.values() for kp in c.keyframe_points}
+    if len(frames) > 1:
+        frames.add(0)
+        ordered = sorted(frames)
+        for before, after in zip(ordered, ordered[1:]):
+            frames.update(range(before + MAX_KEY_GAP, after, MAX_KEY_GAP))
     return [
-        (frame, [channels[i].evaluate(frame) if i in channels else default for i, default in enumerate(defaults)])
-        for frame in frames
+        (float(frame), [channels[i].evaluate(timing.to_action(frame)) if i in channels else default
+                        for i, default in enumerate(defaults)])
+        for frame in sorted(frames)
     ]
 
 
-def _quaternion_rotation_keys(fcurve_group):
-    """(frame, Quaternion) for a rotation_quaternion group"""
-    return [(frame, Quaternion(wxyz)) for frame, wxyz in _track_keys(fcurve_group, (1.0, 0.0, 0.0, 0.0))]
+def _rotation_keys(channels, prop, euler_order, timing):
+    """(game frame, Quaternion) for a rotation track in any of Blender's rotation modes"""
+    if prop == 'rotation_euler':
+        return [(frame, Euler(xyz, euler_order).to_quaternion())
+                for frame, xyz in _track_keys(channels, (0.0, 0.0, 0.0), timing)]
+    if prop == 'rotation_axis_angle':
+        keys = []
+        for frame, (angle, x, y, z) in _track_keys(channels, (0.0, 0.0, 1.0, 0.0), timing):
+            axis = Vector((x, y, z))
+            keys.append((frame, Quaternion(axis.normalized(), angle) if axis.length > 1e-9 else Quaternion()))
+        return keys
+    return _quaternion_keys(channels, timing)
 
 
-def _euler_rotation_keys(fcurve_group, order):
-    """(frame, Quaternion) for a rotation_euler group, converted with the bone's rotation order"""
-    return [(frame, Euler(xyz, order).to_quaternion()) for frame, xyz in _track_keys(fcurve_group, (0.0, 0.0, 0.0))]
+def _quaternion_keys(channels, timing):
+    """
+    (game frame, Quaternion) for a rotation_quaternion track. Between keyframes, Blender
+    interpolates each component on its own, which goes wrong when neighbouring keys are in
+    opposite hemispheres (q and -q, same rotation; imported animations have these). So keys
+    are evaluated where they are and slerped in between
+    """
+    defaults = (1.0, 0.0, 0.0, 0.0)
+
+    def at(frame):
+        return Quaternion([channels[i].evaluate(frame) if i in channels else defaults[i] for i in range(4)])
+
+    key_times = sorted({kp.co[0] for c in channels.values() for kp in c.keyframe_points})
+    keys = []
+    for game_frame, _ in _track_keys(channels, defaults, timing):
+        t = timing.to_action(game_frame)
+        after = next((i for i, kt in enumerate(key_times) if kt >= t - 1e-6), len(key_times))
+        if after == len(key_times) or after == 0 or abs(key_times[after] - t) < 1e-6:
+            keys.append((game_frame, at(t)))
+            continue
+        before_time, after_time = key_times[after - 1], key_times[after]
+        q0, q1 = at(before_time).normalized(), at(after_time).normalized()
+        if q0.dot(q1) < 0.0:
+            q1.negate()
+        keys.append((game_frame, q0.slerp(q1, (t - before_time) / (after_time - before_time))))
+    return keys
 
 
 def _normalized_rotation(quat):
@@ -884,45 +979,41 @@ def _normalized_rotation(quat):
     return quat
 
 
+def _key_durations(keys):
+    """
+    Duration per key, as the game reads them: frames to the next key, 0 on the last key
+    (which holds). See decode_type_6
+    """
+    return [int(keys[k + 1][0] - keys[k][0]) for k in range(len(keys) - 1)] + [0]
+
+
 def _serialize_bone_rotation(dst_lmt, bone, track, keys):
-    keys = [(frame, _normalized_rotation(quat)) for frame, quat in keys]
-    kf_num = len(keys)
     parent_quat = None
     if bone.parent:
         parent_mat = bone.parent.matrix_local.inverted() @ bone.matrix_local
         parent_quat = parent_mat.to_quaternion() #convert back to bone space
 
+    # to the game's space, which is what the file stores (keys and ref_data alike)
+    keys = [(frame, _normalized_rotation(parent_quat @ quat if parent_quat is not None else quat))
+            for frame, quat in keys]
+    kf_num = len(keys)
     track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+    first = keys[0][1]
+    track.ref_data.x = first.x
+    track.ref_data.y = first.y
+    track.ref_data.z = first.z
+    track.ref_data.w = first.w
     if kf_num == 1:
         # constant rotation: quaternion x, y, z, w is implied
         buffer = KaitaiStream(BytesIO(bytearray(12)))
         track.buffer_type = 4
-        rot = keys[0][1]
-        if parent_quat is not None:
-            rot = _normalized_rotation(parent_quat @ rot)
-        track.ref_data.x = rot.x
-        track.ref_data.y = rot.y
-        track.ref_data.z = rot.z
-        track.ref_data.w = rot.w
-        buffer.write_bytes(struct.pack('fff', rot.x, rot.y, rot.z))
+        buffer.write_bytes(struct.pack('fff', first.x, first.y, first.z))
         return buffer, 12
 
     buffer = KaitaiStream(BytesIO(bytearray(kf_num * 8)))
-    track.ref_data.x = 0.0
-    track.ref_data.y = 0.0
-    track.ref_data.z = 0.0
-    track.ref_data.w = 1.0
-    for k, (frame, quat) in enumerate(keys):
-        frame_next = keys[k + 1][0] if k < kf_num - 1 else track._parent.num_frames
-        if frame == 0:
-            track.ref_data.x = quat.x
-            track.ref_data.y = quat.y
-            track.ref_data.z = quat.z
-            track.ref_data.w = quat.w
-            continue
-        rot = _normalized_rotation(parent_quat @ quat) if parent_quat is not None else quat
+    for (frame, rot), duration in zip(keys, _key_durations(keys)):
         frame_quat = FrameQuat4_14()
-        frame_quat.from_quat([rot.w, rot.x, rot.y, rot.z], int(frame_next - frame - 1 if frame_next > frame else 0))
+        frame_quat.from_quat([rot.w, rot.x, rot.y, rot.z], duration)
         buffer.write_bytes(bytes(frame_quat))
     return buffer, (kf_num * 8)
 
@@ -955,25 +1046,15 @@ def _serialize_bone_location(dst_lmt, bone, track, keys):
         return buffer, 12
 
     buffer = KaitaiStream(BytesIO(bytearray(kf_num * 16)))
-    track.ref_data.x = 0.0
-    track.ref_data.y = 0.0
-    track.ref_data.z = 0.0
-    track.ref_data.w = 1.0
-    for k, (frame, (x, y, z)) in enumerate(keys):
-        frame_next = keys[k + 1][0] if k < kf_num - 1 else track._parent.num_frames
-
+    for k, ((frame, (x, y, z)), duration) in enumerate(zip(keys, _key_durations(keys))):
         if parent_space is not None:
             parent_space_frame = (parent_space @ Matrix.Translation([x, y, z])).to_translation()
             x, y, z = parent_space_frame.x, parent_space_frame.y, parent_space_frame.z
-            duration = int(frame_next - frame if frame_next > frame else 0)
-        else:
-            duration = int(frame_next - frame - 1 if frame_next > frame else 0)
-        if frame == 0:
+        if k == 0:
             track.ref_data.x = x * 100.0
             track.ref_data.y = y * 100.0
             track.ref_data.z = z * 100.0
             track.ref_data.w = 1.0
-            continue
         buffer.write_bytes(struct.pack('fffI', x * 100.0, y * 100.0, z * 100.0, duration))
     return buffer, (kf_num * 16)
 
@@ -981,26 +1062,20 @@ def _serialize_bone_location(dst_lmt, bone, track, keys):
 def _serialize_bone_scale(dst_lmt, track, keys):
     kf_num = len(keys)
     track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+    x, y, z = keys[0][1]
+    track.ref_data.x = x
+    track.ref_data.y = y
+    track.ref_data.z = z
+    track.ref_data.w = 1.0
     if kf_num == 1:
         buffer = KaitaiStream(BytesIO(bytearray(12)))
         track.buffer_type = 2
-        x, y, z = keys[0][1]
-        track.ref_data.x = x
-        track.ref_data.y = y
-        track.ref_data.z = z
-        track.ref_data.w = 1.0
         buffer.write_bytes(struct.pack('fff', x, y, z))
         return buffer, 12
 
     buffer = KaitaiStream(BytesIO(bytearray(kf_num * 16)))
-    for k, (frame, (x, y, z)) in enumerate(keys):
-        frame_next = keys[k + 1][0] if k < kf_num - 1 else track._parent.num_frames
-        if k == kf_num - 1:
-            track.ref_data.x = x
-            track.ref_data.y = y
-            track.ref_data.z = z
-            track.ref_data.w = 1.0
-        buffer.write_bytes(struct.pack('fffI', x, y, z, int(frame_next - frame - 1 if frame_next > frame else 0)))
+    for (frame, (x, y, z)), duration in zip(keys, _key_durations(keys)):
+        buffer.write_bytes(struct.pack('fffI', x, y, z, duration))
     return buffer, (kf_num * 16)
 
 
@@ -1144,6 +1219,13 @@ class Lmt49ActionCustomProperties(bpy.types.PropertyGroup):
         description="Frame the animation loops back to. -1 means it doesn't loop",
         default=-1,
         min=-1,
+    )
+    source_fps: bpy.props.FloatProperty(
+        name="Frame Rate",
+        description="Frame rate the action was made at. The game plays at 60 fps, export converts. "
+                    "Frames and Loop Start are in game frames",
+        default=FRAMERATE,
+        min=1.0,
     )
     end_pos: bpy.props.FloatVectorProperty(name='End Position', size=3)
     end_quat: bpy.props.FloatVectorProperty(name='End Rotation', size=4)
