@@ -31,9 +31,9 @@ from .efl import ean, efs
 from .efl.edit import block_props, keyframe_props, sub_props
 from .efl.schema import bgra_to_rgba
 from .efl.primmodel import build_from_block
-from .efl.sim import CLOTH_TYPES, ROT_ORDERS, emission_space, keyframes_of as sim_keyframes_of
+from .efl.sim import CLOTH_TYPES, ROT_ORDERS, emission_space, keyframes_of as sim_keyframes_of, refracts
 from . import effect_filter, effect_sim
-from .texture import build_blender_textures
+from .texture import MISSING_TEXTURE_PROP, build_blender_textures
 
 SCALE = 0.01   # game centimetres -> metres
 EDGE_ALPHA_ATTR = "EdgeAlpha"
@@ -43,6 +43,10 @@ RIBBON_TYPES = (1, 3, 4, 12, 13, 14, 15)   # Polyline/Texline/Line (+ cloth), Po
 
 def _filter_armatures(self, obj):
     return obj.type == "ARMATURE"
+
+
+def _on_darken_strength(options, context):
+    set_darken_strength(options.darken_strength)
 
 
 @blender_registry.register_blender_prop_albam(name="import_options_efl")
@@ -66,6 +70,12 @@ class ImportOptionsEFL(bpy.types.PropertyGroup):
     group_all: effect_filter.group_all_prop()
     group_bits: effect_filter.group_bits_prop()
     surface: effect_filter.surface_prop()
+    darken_strength: bpy.props.FloatProperty(
+        name="Darkening Strength", default=1.5, min=1.0, max=4.0, update=_on_darken_strength,
+        description="How strongly darkening particles (BlendOp REVSUBTRACT) darken what's behind them. The game "
+                    "subtracts their colour, which Blender can't do, so they dim the background instead: 1 is right "
+                    "over white and too light over darker areas, higher values darken more but turn bright areas "
+                    "too dark. Changes every imported effect at once; tune it by eye in Material Preview")
 
 
 @blender_registry.register_import_options_custom_draw_func(extension="efl")
@@ -80,6 +90,7 @@ def draw_efl_options(panel_instance, context):
     row = layout.row()
     row.enabled = options.simulate
     row.prop(options, "sim_frames")
+    layout.prop(options, "darken_strength")
     layout.label(text="Spawn filter (change it later in the Effect Editor):")
     effect_filter.draw_filter(layout, options)
 
@@ -177,6 +188,7 @@ class _EffectBuilder:
         self.efs = {}
         self.current_generator = None
         self.materials = {}
+        self.missing_textures = set()   # texture paths that couldn't be loaded (shown in the Effect Editor)
         parent = parent_collection or context.collection or context.scene.collection
         self.collection = bpy.data.collections.new(f"EFL_{stem}")
         parent.children.link(self.collection)
@@ -210,6 +222,7 @@ class _EffectBuilder:
         root.albam_asset.extension = "efl"
         exportable = self.context.scene.albam.exportable.file_list.add()
         exportable.bl_object = root
+        root["efl_missing_textures"] = sorted(self.missing_textures)
         effect_filter.set_masks(root, *self.masks)
         effect_filter.apply_filter(root)
         return root
@@ -276,12 +289,13 @@ class _EffectBuilder:
     def sim_info(self, record):
         ptcl, gen = record.ptcl, record.gen
         image = None
-        if ptcl.has("BaseMapPath") and ptcl.get("BaseMapPath") and self.options.load_textures:
-            image = self.image_for(ptcl.get("BaseMapPath"))
+        base_map = _base_map(ptcl)
+        if base_map and self.options.load_textures:
+            image = self.image_for(base_map)
         tables = effect_sim.frame_tables(None, image, 0, ean)   # whole texture, its pixel size
-        if ptcl.has("AnimPath") and ptcl.get("AnimPath") and ptcl.get("BaseMapPath"):
+        if ptcl.has("AnimPath") and ptcl.get("AnimPath") and base_map:
             tables = effect_sim.frame_tables(self.anim_for(ptcl.get("AnimPath")),
-                                             self.images.get(ptcl.get("BaseMapPath")), ptcl.get("AnimFlag"), ean)
+                                             self.images.get(base_map), ptcl.get("AnimFlag"), ean)
         rot_order = ptcl.get("RotOrder") if ptcl.has("PrimFlags") or ptcl.has("PolygonFlags") else 5
         extra = {}
         efs_parts = self.efs_for(gen.get("RangeStripPath")) if gen.get("RangeStripPath") else None
@@ -498,7 +512,7 @@ class _EffectBuilder:
 
     def frame_size(self, ptcl):
         """Pixel size of the particle's first flipbook frame (the whole texture without a flipbook)."""
-        image = self.images.get(ptcl.get("BaseMapPath")) if ptcl.has("BaseMapPath") else None
+        image = self.images.get(_base_map(ptcl)) or None
         anim = self.anim_for(ptcl.get("AnimPath")) if ptcl.has("AnimPath") and ptcl.get("AnimPath") else None
         pattern = anim.pattern(ptcl.get("SeqNoMin"), ptcl.get("PatNoMin")) if anim is not None else None
         if pattern is not None:
@@ -557,10 +571,10 @@ class _EffectBuilder:
 
     def crop_to_frame(self, ptcl, mesh, ob):
         """Effect textures are flipbook sheets; show only the particle's first frame, as the game does at spawn."""
-        if not (ptcl.has("AnimPath") and ptcl.get("AnimPath") and ptcl.get("BaseMapPath")):
+        if not (ptcl.has("AnimPath") and ptcl.get("AnimPath") and _base_map(ptcl)):
             return
         anim = self.anim_for(ptcl.get("AnimPath"))
-        image = self.images.get(ptcl.get("BaseMapPath"))
+        image = self.images.get(_base_map(ptcl))
         if anim is None or image is None:
             return
         width, height = image.size
@@ -594,16 +608,24 @@ class _EffectBuilder:
     def material_for(self, ptcl):
         if not ptcl.has("TransMode"):
             return None
-        base_path = ptcl.get("BaseMapPath") if ptcl.has("BaseMapPath") else ""
+        base_path = _base_map(ptcl)
         blend = (ptcl.get("BlendSrc") + 1, ptcl.get("BlendDst") + 1, ptcl.get("BlendOp") + 1)
-        key = (base_path, blend)
+        refract = refracts(ptcl)
+        # refraction strength = the record's base Intensity (keyframed intensity isn't followed)
+        strength = min(max(ptcl.get("Intensity")[0], 0.0), 127.0) if refract and ptcl.has("Intensity") else 0.0
+        key = (base_path, blend, refract, strength)
         if key in self.materials:
             return self.materials[key]
         image = self.image_for(base_path) if base_path and self.options.load_textures else None
         label = PureWindowsPath(base_path).name if base_path else ptcl.type_name
-        material = _build_material(f"EFL_{label}", image, *blend)
+        if refract:
+            material = _build_refract_material(f"EFL_{label}_refract", image, *blend, intensity=strength)
+            if material.get("efl_distortion") and hasattr(self.context.scene.eevee, "use_raytracing"):
+                self.context.scene.eevee.use_raytracing = True   # EEVEE refraction needs it (else world colour)
+        else:
+            material = _build_material(f"EFL_{label}", image, *blend)
         material["efl_blend"] = f"src {_D3DBLEND.get(blend[0], blend[0])}, dst {_D3DBLEND.get(blend[1], blend[1])}, " \
-                                f"op {_D3DBLENDOP.get(blend[2], blend[2])}"
+                                f"op {_D3DBLENDOP.get(blend[2], blend[2])}" + (", refraction" if refract else "")
         material["efl_base_map"] = base_path
         self.materials[key] = material
         return material
@@ -611,25 +633,46 @@ class _EffectBuilder:
     def image_for(self, texture_path):
         if texture_path in self.images:
             return self.images[texture_path]
-        image = next((im for im in bpy.data.images if im.get("efl_texture") == texture_path), None)
+        image = next((im for im in bpy.data.images if im.get("efl_texture") == texture_path
+                      and not im.get(MISSING_TEXTURE_PROP)), None)
         if image is not None:   # loaded by an earlier import or rebuild
             self.images[texture_path] = image
             return image
         source = SimpleNamespace(materials_data=SimpleNamespace(textures=[texture_path]))
+        image = None
         try:
             images = build_blender_textures(self.app_id, self.context, source)
             image = images[0] if images else None
+            if image is not None and image.get(MISSING_TEXTURE_PROP):
+                # the texture loader's placeholder is a black 4x4 image with alpha 1: it would turn every particle
+                # using it into a solid black shape, so the particle colour alone is used instead
+                image = None
             if image is not None:
                 image["efl_texture"] = texture_path
         except KeyError:
             print(f"EFL: texture {texture_path}.tex not found under the Game Files roots")
         except Exception as err:   # a bad texture shouldn't stop the effect import
             print(f"EFL: could not load {texture_path}.tex: {err}")
+        if image is None:
+            self.missing_textures.add(texture_path)
         self.images[texture_path] = image
         return image
 
 
 # ---------------------------------------------------------------------------------------------
+
+UNTEXTURED_PRIM_MODELS = (0, 2, 4)   # Ring, Sphere, Grid: renderPrimModelRing / Sphere / Grid never fetch a texture
+
+
+def _base_map(ptcl):
+    """The texture the game draws the particle with: BaseMapPath, except for the untextured PrimModel types (Ring,
+    Sphere, Grid draw in a solid colour; their Tex variants 1 / 3 / 5 use the texture)."""
+    if not ptcl.has("BaseMapPath"):
+        return ""
+    if ptcl.type == 6 and ptcl.has("PrimModelType") and ptcl.get("PrimModelType") in UNTEXTURED_PRIM_MODELS:
+        return ""
+    return ptcl.get("BaseMapPath")
+
 
 # Polygon pivots (PolygonFixType): ((a0, a1), (b0, b1)) in units of the half-extents W, H
 POLYGON_PIVOTS = {0: ((-1, 1), (-1, 1)), 1: ((0, 2), (-2, 0)), 2: ((-2, 0), (-2, 0)), 3: ((0, 2), (0, 2)),
@@ -700,9 +743,188 @@ def _tint_mesh(mesh, ptcl):
         return
     r, g, b, a = bgra_to_rgba(ptcl.get("Color0"))
     intensity = min(max(ptcl.get("Intensity")[0], 0.0), 127.0) if ptcl.has("Intensity") else 1.0
+    if refracts(ptcl):   # intensity only scales the refraction offset
+        intensity = 1.0
     for item in attr.data:
         edge = item.color[3]
         item.color = (r / 255 * intensity, g / 255 * intensity, b / 255 * intensity, edge * a / 255)
+
+
+DARKEN_GROUP = "ALBAM_EFL_Darken_v3"   # v3: Strength only (v2's Enabled switch was dropped)
+
+
+def _darken_group():
+    """Shared node group for REVSUBTRACT transmittance: max(Fd - Strength x Source, 0). One Strength value for every
+    effect material, set by the Darkening Strength option."""
+    group = bpy.data.node_groups.get(DARKEN_GROUP)
+    if group is not None:
+        return group
+    group = bpy.data.node_groups.new(DARKEN_GROUP, "ShaderNodeTree")
+    group.interface.new_socket("Fd", in_out="INPUT", socket_type="NodeSocketVector")
+    group.interface.new_socket("Source", in_out="INPUT", socket_type="NodeSocketVector")
+    group.interface.new_socket("Transmittance", in_out="OUTPUT", socket_type="NodeSocketVector")
+    nodes, links = group.nodes, group.links
+    inp, out = nodes.new("NodeGroupInput"), nodes.new("NodeGroupOutput")
+    strength = nodes.new("ShaderNodeValue")
+    strength.name = strength.label = "Strength"
+    albam = getattr(getattr(bpy.context, "scene", None), "albam", None)
+    strength.outputs[0].default_value = albam.import_options_efl.darken_strength if albam else 1.5
+    scale = nodes.new("ShaderNodeVectorMath")
+    scale.operation = "SCALE"
+    links.new(inp.outputs["Source"], scale.inputs[0])
+    links.new(strength.outputs[0], scale.inputs["Scale"])
+    sub = nodes.new("ShaderNodeVectorMath")
+    sub.operation = "SUBTRACT"
+    links.new(inp.outputs["Fd"], sub.inputs[0])
+    links.new(scale.outputs["Vector"], sub.inputs[1])
+    clamp = nodes.new("ShaderNodeVectorMath")
+    clamp.operation = "MAXIMUM"
+    links.new(sub.outputs["Vector"], clamp.inputs[0])
+    clamp.inputs[1].default_value = (0.0, 0.0, 0.0)
+    links.new(clamp.outputs["Vector"], out.inputs["Transmittance"])
+    for i, n in enumerate((inp, strength, scale, sub, clamp, out)):
+        n.location = (i * 200 - 500, 0)
+    return group
+
+
+def set_darken_strength(value):
+    _darken_group().nodes["Strength"].outputs[0].default_value = value
+
+
+REFRACT_IOR = 1.5
+REFRACT_GAIN = 2.0   # normal tilt per unit of screen offset: deviation ~ tilt x (1 - 1 / IOR), screen ~ 0.7 rad wide
+
+
+def _build_refract_material(name, image, src, dst, op, intensity=0.0):
+    """Refraction particles (ParticleOptionFlag 0x10, XfPrim PRIM_EX_REFRACT pixel shader): the game draws the screen
+    behind them, offset by (BaseMap.rg - 0.5) x Intensity / 100, times the particle colour, with alpha = BaseMap.a x
+    particle alpha, through the normal blend equation. Blender materials can't sample the screen, so the offset is left
+    out and the source colour is taken as background x colour: transmittance = colour x Fs (op) Fd. The texture only
+    gives alpha."""
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    mat.use_backface_culling = False
+    if hasattr(mat, "surface_render_method"):   # Blender 4.2+
+        mat.surface_render_method = "BLENDED"
+    if hasattr(mat, "blend_method"):
+        mat.blend_method = "BLEND"
+    nodes, links = mat.node_tree.nodes, mat.node_tree.links
+    nodes.clear()
+    out = nodes.new("ShaderNodeOutputMaterial")
+    out.location = (900, 0)
+
+    def node(kind, x, y, **props):
+        n = nodes.new(kind)
+        n.location = (x, y)
+        for key, value in props.items():
+            setattr(n, key, value)
+        return n
+
+    def vmath(op_name, a, b, x, y):
+        n = node("ShaderNodeVectorMath", x, y, operation=op_name)
+        for i, value in enumerate((a, b)):
+            if isinstance(value, tuple):
+                n.inputs[i].default_value = value
+            else:
+                links.new(value, n.inputs[i])
+        return n.outputs["Vector"]
+
+    tint = node("ShaderNodeVertexColor", -900, 200, layer_name=EDGE_ALPHA_ATTR)
+    color = vmath("MULTIPLY", tint.outputs["Color"], (1.0, 1.0, 1.0), -650, 200)
+    if image is not None:
+        tex = node("ShaderNodeTexImage", -900, -100)
+        tex.image = image
+        alpha_node = node("ShaderNodeMath", -650, -50, operation="MULTIPLY")
+        links.new(tex.outputs["Alpha"], alpha_node.inputs[0])
+        links.new(tint.outputs["Alpha"], alpha_node.inputs[1])
+        alpha = alpha_node.outputs["Value"]
+    else:
+        alpha = tint.outputs["Alpha"]
+    if image is not None and intensity > 0 and (src, dst, op) == (5, 6, 1):
+        # alpha blend: lerp(background, refracted x colour, alpha) = mix(Transparent, Refraction(colour), alpha).
+        # The bend tilts the normal (facing the camera) along the camera axes by the game's screen offset
+        # (BaseMap.rg - 0.5) x Intensity / 100, +v down. The texture is read raw, as the game does (undo sRGB).
+        # EEVEE refracts only Dithered materials with raytracing (weakly); Cycles bends properly.
+        mat.surface_render_method = "DITHERED"
+        if hasattr(mat, "use_raytrace_refraction"):
+            mat.use_raytrace_refraction = True
+        if hasattr(mat, "thickness_mode"):
+            mat.thickness_mode = "SLAB"
+        raw = node("ShaderNodeGamma", -650, -300)
+        links.new(tex.outputs["Color"], raw.inputs["Color"])
+        raw.inputs["Gamma"].default_value = 1.0 / 2.2
+        sep = node("ShaderNodeSeparateXYZ", -450, -300)
+        links.new(raw.outputs[0], sep.inputs[0])
+        k = intensity / 100.0 * REFRACT_GAIN
+
+        def offset(channel, sign, x, y):
+            n = node("ShaderNodeMath", x, y, operation="MULTIPLY_ADD")   # (c - 0.5) * k = c * k - 0.5 * k
+            links.new(sep.outputs[channel], n.inputs[0])
+            n.inputs[1].default_value = sign * k
+            n.inputs[2].default_value = -0.5 * sign * k
+            return n.outputs["Value"]
+
+        def camera_axis(vector, y):
+            n = node("ShaderNodeVectorTransform", -250, y, vector_type="VECTOR", convert_from="CAMERA",
+                     convert_to="WORLD")
+            n.inputs[0].default_value = vector
+            return n.outputs[0]
+
+        geometry = node("ShaderNodeNewGeometry", -250, -150)
+        bend_u = vmath("SCALE", camera_axis((1.0, 0.0, 0.0), -450), (0.0, 0.0, 0.0), -50, -450)
+        links.new(offset("X", 1.0, -250, -600), bend_u.node.inputs["Scale"])
+        bend_v = vmath("SCALE", camera_axis((0.0, 1.0, 0.0), -750), (0.0, 0.0, 0.0), -50, -750)
+        links.new(offset("Y", -1.0, -250, -900), bend_v.node.inputs["Scale"])
+        normal = vmath("NORMALIZE", vmath("ADD", vmath("ADD", geometry.outputs["Incoming"], bend_u, 150, -400),
+                                          bend_v, 300, -500), (0.0, 0.0, 0.0), 450, -500)
+        refraction = node("ShaderNodeBsdfRefraction", 600, -250)
+        refraction.inputs["IOR"].default_value = REFRACT_IOR
+        refraction.inputs["Roughness"].default_value = 0.0
+        links.new(color, refraction.inputs["Color"])
+        links.new(normal, refraction.inputs["Normal"])
+        clear = node("ShaderNodeBsdfTransparent", 600, 0)
+        mix = node("ShaderNodeMixShader", 780, 0)
+        links.new(alpha, mix.inputs["Fac"])
+        links.new(clear.outputs[0], mix.inputs[1])
+        links.new(refraction.outputs[0], mix.inputs[2])
+        links.new(mix.outputs[0], out.inputs["Surface"])
+        mat["efl_distortion"] = True
+        return mat
+
+    splat = node("ShaderNodeCombineXYZ", -450, -100)
+    for axis in "XYZ":
+        links.new(alpha, splat.inputs[axis])
+    alpha3 = splat.outputs["Vector"]
+
+    def factor(kind, x, y):
+        if kind == 1:
+            return (0.0, 0.0, 0.0)
+        if kind == 3:
+            return color
+        if kind == 4:
+            return vmath("SUBTRACT", (1.0, 1.0, 1.0), color, x, y)
+        if kind in (5, 11):
+            return alpha3
+        if kind == 6:
+            return vmath("SUBTRACT", (1.0, 1.0, 1.0), alpha3, x, y)
+        return (1.0, 1.0, 1.0)   # ONE, and the background-dependent factors
+
+    def as_socket(value, x, y):
+        return vmath("MULTIPLY", value, (1.0, 1.0, 1.0), x, y) if isinstance(value, tuple) else value
+
+    fs, fd = factor(src, -250, 200), factor(dst, -250, -200)
+    source = vmath("MULTIPLY", color, as_socket(fs, -50, 250), 50, 150)   # background x colour x Fs, over background
+    fd = as_socket(fd, 50, -200)
+    if op == 3:     # REVSUBTRACT: background * Fd - background * colour * Fs
+        trans = vmath("MAXIMUM", vmath("SUBTRACT", fd, source, 250, 0), (0.0, 0.0, 0.0), 450, 0)
+    elif op == 2:   # SUBTRACT: background * colour * Fs - background * Fd
+        trans = vmath("MAXIMUM", vmath("SUBTRACT", source, fd, 250, 0), (0.0, 0.0, 0.0), 450, 0)
+    else:
+        trans = vmath("ADD", source, fd, 250, 0)
+    transparent = node("ShaderNodeBsdfTransparent", 650, 0)
+    links.new(trans, transparent.inputs["Color"])
+    links.new(transparent.outputs[0], out.inputs["Surface"])
+    return mat
 
 
 # D3D9 enums (the file stores them minus 1)
@@ -783,10 +1005,13 @@ def _build_material(name, image, src, dst, op):
 
     emission = node("ShaderNodeEmission", 500, 150)
     transparent = node("ShaderNodeBsdfTransparent", 500, -150)
-    if op == 3:   # REVSUBTRACT: background * Fd - src * Fs -> darkening only
-        darken = vmath("SUBTRACT", as_socket(fd, -50, -250), vmath("MULTIPLY", color, as_socket(fs, -50, 250), 100, 100),
-                       250, -100)
-        links.new(vmath("MAXIMUM", darken, (0.0, 0.0, 0.0), 350, -150), transparent.inputs["Color"])
+    if op == 3:   # REVSUBTRACT: background * Fd - src * Fs. Blender can't subtract light per layer, so the background
+        # is dimmed instead, by max(Fd - Strength * src * Fs, 0) (_darken_group; Strength 1 = exact over white)
+        darken = node("ShaderNodeGroup", 250, -150)
+        darken.node_tree = _darken_group()
+        links.new(as_socket(fd, -50, -250), darken.inputs["Fd"])
+        links.new(vmath("MULTIPLY", color, as_socket(fs, -50, 250), 100, 100), darken.inputs["Source"])
+        links.new(darken.outputs["Transmittance"], transparent.inputs["Color"])
         emission.inputs["Strength"].default_value = 0.0
     else:
         links.new(vmath("MULTIPLY", color, as_socket(fs, -50, 250), 250, 200), emission.inputs["Color"])

@@ -936,6 +936,17 @@ class ALBAM_PT_EflEditor(bpy.types.Panel):
         row = layout.row(align=True)
         row.operator("albam.efl_apply_edits", text="Apply", icon="PLAY")
         row.operator("albam.efl_rebuild", text="Rebuild", icon="FILE_REFRESH")
+        layout.prop(context.scene.albam.import_options_efl, "darken_strength")
+        missing = list(root.get("efl_missing_textures") or [])
+        if missing:
+            box = layout.box()
+            box.label(text=f"{len(missing)} texture(s) missing: particles show as solid shapes", icon="ERROR")
+            for path in missing[:3]:
+                box.label(text=path)
+            if len(missing) > 3:
+                box.label(text=f"... and {len(missing) - 3} more")
+            box.label(text="Add the folder containing effect\\tex (e.g. the base game's) as a Game Files root,")
+            box.label(text="then press Rebuild")
 
         box = layout.box()
         box.row().prop(state, "show_filter", icon="TRIA_DOWN" if state.show_filter else "TRIA_RIGHT",

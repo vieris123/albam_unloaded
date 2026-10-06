@@ -74,6 +74,14 @@ ANIM_MOVE, ANIM_LOOP, ANIM_REVERSE, ANIM_FINISH = 1, 2, 4, 8
 NO_LIFE_FRAMES = 120          # records without a life block: show particles this long
 MAX_PARTICLES = 4000          # per record, to keep previews responsive
 INTENSITY_MAX = 127.0         # initParticleBillboard / the shader clamp intensity to [0, 127]
+REFRACT_FLAG = 0x10           # ParticleOptionFlag: refraction (initGeneratorParam 0x96B612 -> prim ATTR_REFRACT)
+OCCLUSION_FLAG = 0x200        # CullingFlag: occlusion test, checked first, so it disables refraction
+
+
+def refracts(ptcl):
+    """True for particles drawn with the refraction shader (XfPrim PRIM_EX_REFRACT): the screen behind them, offset by
+    (BaseMap.rg - 0.5) x Intensity / 100, times the particle colour; Intensity doesn't tint them."""
+    return ptcl is not None and ptcl.has("ParticleOptionFlag") and bool(ptcl.get("ParticleOptionFlag") & REFRACT_FLAG)         and not (ptcl.has("CullingFlag") and ptcl.get("CullingFlag") & OCCLUSION_FLAG)
 
 SPACE_FOLLOW = "follow"                   # re-placed from the generator every frame (move None)
 SPACE_WORLD = "world"                     # stays where it was emitted
@@ -204,6 +212,7 @@ class Particle:
     _path: list = None
     _track: list = None
     end: int = None       # birth + lifetime, set by callers that filter by life window
+    refract: bool = False  # refraction shader: the colour isn't multiplied by intensity
 
     def lifetime(self):
         return sum(self.life) if self.life else NO_LIFE_FRAMES
@@ -660,7 +669,7 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
     particle = Particle(birth, offset, d, speed, accel, coef, gravity, life_frames, scale, scale_add, angle, angle_add,
                     rot, rot_add, model_scale, model_scale_add, color, intensity, aspect, sequence, pattern,
                     pat_speed, pat_count, anim_flag, key_is_speed, axis, order, keys, path, line, strip, light,
-                    shape=shape, scroll=scroll)
+                    shape=shape, scroll=scroll, refract=refracts(ptcl))
     if line is not None and line.get("rope") is not None:
         line["rope"].birth = birth   # generator-timer rope keys run from the particle's birth frame
     c = template.collision
@@ -1618,6 +1627,8 @@ def state_at(p, frame):
     color = bgra_to_rgba(color) if color is not None else p.color
     intensity = p.keyed("intensity", n)
     intensity = min(max(intensity if intensity is not None else p.intensity, 0.0), INTENSITY_MAX)
+    if p.refract:   # intensity only scales the refraction offset
+        intensity = 1.0
     angle = p.keyed_or("angle", n, p.angle, p.angle_add)
     rot = tuple(p.keyed_or("rot", n, tuple(p.rot), tuple(p.rot_add)))
     model_scale = tuple(max(c, 0.0) for c in p.keyed_or("model_scale", n, tuple(p.model_scale),
