@@ -1,6 +1,7 @@
 from binascii import crc32
 import functools
 import io
+import math
 import re
 
 import bpy
@@ -218,6 +219,8 @@ def build_blender_materials(mod_file_item, context, parsed_mod, name_prefix="mat
         link(shader_node_group.outputs[0], material_output.inputs[0])
 
         assign_textures(material, blender_material, textures, mrl=mrl)
+        if parsed_mod.header.version == 153:
+            setup_dmc4_material(material, blender_material)
 
         if not bool(mrl):
             materials[idx_material] = blender_material
@@ -320,7 +323,9 @@ def serialize_materials_data(model_asset, bl_objects, src_mod, dst_mod):
     serialize_func = MAPPER_SERIALIZE_FUNCS[dst_mod.header.version]()
     materials_data, mrl = serialize_func(model_asset, bl_materials, exported_textures, src_mod, dst_mod)
 
-    return materials_data, mrl, [t["serialized_vfile"] for t in exported_textures.values()]
+    # placeholders for missing textures keep their table entry but write no file
+    return materials_data, mrl, [t["serialized_vfile"] for t in exported_textures.values()
+                                 if t["serialized_vfile"] is not None and t["serialized_vfile"].data_bytes]
 
 
 def _serialize_materials_data_156(model_asset, bl_materials, exported_textures, src_mod, dst_mod):
@@ -351,6 +356,16 @@ def _serialize_materials_data_156(model_asset, bl_materials, exported_textures, 
         mat.shadowblendmap = 0
         mat.heightmap = 0
         mat.glossmap = 0
+        if dst_mod.header.version == 153:
+            check_material_153(bl_mat.name, mat)
+            # DMC4 slots, symmetric with the import (texture.TEX_TYPE_MAP_2 / _find_texture_index)
+            mat.shadowmap = tex_types.get(TextureType.UNK_01, -1) + 1
+            mat.additionalmap = tex_types.get(TextureType.ALPHAMAP, -1) + 1
+            mat.heightmap = tex_types.get(TextureType.NORMAL_DETAIL, -1) + 1
+            # the packed state key the game derives from the func bits (exact on all 2,625 corpus records;
+            # rModel load recomputes it anyway)
+            mat.pipeline = (mat.func_skin + 7 * mat.func_lighting + 35 * mat.func_normalmap +
+                            140 * mat.func_specular + 700 * mat.func_lightmap + 5600 * mat.func_multitexture)
         mat.func_reserved = 0
         mat.func_reserved2 = 0
         mat.reserved1 = 0
@@ -852,14 +867,27 @@ def _create_cb_resource(app_id, mrl_mat, custom_props, cb_name, onlyif=True):
     return resource
 
 
+def _group_socket_name(output, depth=4):
+    """Name of the MT Framework group socket an image output ends up in (through math / mix nodes), or None."""
+    for link in output.links:
+        node = link.to_node
+        if node.type == "GROUP" and link.to_socket.name in NODE_NAMES_TO_TYPES:
+            return link.to_socket.name
+        if depth > 0:
+            for out in node.outputs:
+                name = _group_socket_name(out, depth - 1)
+                if name is not None:
+                    return name
+    return None
+
+
 def _gather_tex_types(bl_mat, exported_textures, textures_list, mrl=None):
     tex_types = {}
     image_nodes = [node for node in bl_mat.node_tree.nodes if node.type == "TEX_IMAGE"]
     for im_node in image_nodes:
-        links = im_node.outputs["Color"].links
-        if not links:
+        mtfw_shader_link_name = _group_socket_name(im_node.outputs["Color"])
+        if mtfw_shader_link_name is None:
             continue
-        mtfw_shader_link_name = links[0].to_socket.name
         tex_type = NODE_NAMES_TO_TYPES[mtfw_shader_link_name]
         if not im_node.image:
             # dummy texture, index 0
@@ -897,10 +925,380 @@ def _gather_tex_types(bl_mat, exported_textures, textures_list, mrl=None):
     return tex_types
 
 
+# -- DMC4 (mod 153) material display --------------------------------------------------------------
+# How the DX9 runtime draws a v153 material (Vibed/RE/mod153_materials.md): attr picks the draw state
+# (0x10 opaque, alpha ignored; 0x08 alpha test > alpha_ref; 0x20 / 0x40 blended; 0x01 never drawn),
+# every material is single-sided, the additional map is an alpha mask only for MULTITEXTURE_ALPHA,
+# lightmap / shadow / alpha-mask textures use TEXCOORD2, the lightmap is rgb * a * lightmap_factor * the
+# texture header range, LIGHTMAP_VCOLOR uses the vertex colour instead, and a basemap whose header
+# range.w is 0 uses its alpha as a colour multiplier (opacity 1).
+
+FUNC_RADIX_153 = {"func_skin": 7, "func_lighting": 5, "func_normalmap": 4, "func_specular": 5,
+                  "func_lightmap": 8, "func_multitexture": 7}
+NO_DX9_SHADER_153 = {"func_lightmap": (3, 4, 7), "func_multitexture": (3,)}   # absent from XfMaterialStandard
+LIGHTMAP_VCOLOR = (5, 6)
+
+
+def _second_uv_name(record):
+    """TEXCOORD2: Albam's uv3 for static meshes (vtype 2), the second stream elsewhere (vtype 3, decl 9)."""
+    return "uv3" if record.vtype == 2 else "uv_stream2"
+
+
+def _image_nodes_into(nt, group, socket_name):
+    out = []
+    for link in nt.links:
+        if link.to_node == group and link.to_socket.name == socket_name:
+            node = link.from_node
+            if node.type == "TEX_IMAGE":
+                out.append((node, link))
+    return out
+
+
+def _uv_input(nt, tex_node, uv_name):
+    uv_node = None
+    if tex_node.inputs[0].links:
+        candidate = tex_node.inputs[0].links[0].from_node
+        if candidate.type == "UVMAP":
+            uv_node = candidate
+    if uv_node is None:
+        uv_node = nt.nodes.new("ShaderNodeUVMap")
+        uv_node.location = (tex_node.location[0] - 200, tex_node.location[1])
+        nt.links.new(uv_node.outputs[0], tex_node.inputs[0])
+    uv_node.uv_map = uv_name
+
+
+def _tex_range(image):
+    """The tex 112 header colour range (r, g, b, a), or None."""
+    try:
+        props = image.albam_custom_properties.get_custom_properties_for_appid("dmc4")
+        return props.red, props.green, props.blue, props.alpha
+    except Exception:
+        return None
+
+
+def _scaled_color(nt, color_socket, scale_rgb=None, alpha_socket=None, location=(0, 0)):
+    """color * alpha * scale_rgb as a socket (nodes added only as needed)."""
+    out = color_socket
+    x, y = location
+    if alpha_socket is not None:
+        node = nt.nodes.new("ShaderNodeVectorMath")
+        node.operation = "SCALE"
+        node.location = (x, y)
+        nt.links.new(out, node.inputs[0])
+        nt.links.new(alpha_socket, node.inputs["Scale"])
+        out = node.outputs["Vector"]
+        x += 160
+    if scale_rgb is not None and any(abs(c - 1.0) > 1e-4 for c in scale_rgb):
+        node = nt.nodes.new("ShaderNodeVectorMath")
+        node.operation = "MULTIPLY"
+        node.location = (x, y)
+        node.inputs[1].default_value = scale_rgb
+        nt.links.new(out, node.inputs[0])
+        out = node.outputs["Vector"]
+    return out
+
+
+def _set_surface(bl_mat, mode):
+    """mode: OPAQUE / CLIP / BLEND; works with EEVEE Legacy and Next."""
+    if hasattr(bl_mat, "blend_method"):
+        bl_mat.blend_method = {"OPAQUE": "OPAQUE", "CLIP": "CLIP", "BLEND": "BLEND"}[mode]
+    if hasattr(bl_mat, "surface_render_method"):
+        bl_mat.surface_render_method = "BLENDED" if mode == "BLEND" else "DITHERED"
+    bl_mat.use_backface_culling = True
+
+
+def setup_dmc4_material(record, bl_mat):
+    """Make an imported v153 material look like the game draws it (only nodes outside the shared group)."""
+    nt = bl_mat.node_tree
+    group = nt.nodes.get("MTFrameworkGroup")
+    if group is None:
+        return
+    attr = record.attr
+    second_uv = _second_uv_name(record)
+
+    # basemap: header range.w == 0 -> alpha scales the colour and opacity is 1; colour x range.rgb
+    base_alpha = None
+    for tex_node, link in _image_nodes_into(nt, group, "Diffuse BM"):
+        rng = _tex_range(tex_node.image) if tex_node.image else None
+        alpha_as_colour = rng is not None and rng[3] == 0
+        scale = rng[:3] if rng is not None and all(c > 0 for c in rng[:3]) else None
+        if alpha_as_colour or scale is not None:
+            nt.links.remove(link)
+            out = _scaled_color(nt, tex_node.outputs["Color"], scale,
+                                tex_node.outputs["Alpha"] if alpha_as_colour else None,
+                                (tex_node.location[0] + 200, tex_node.location[1] + 150))
+            nt.links.new(out, group.inputs["Diffuse BM"])
+        if not alpha_as_colour:
+            base_alpha = tex_node.outputs["Alpha"]
+    for link in list(group.inputs["Alpha BM"].links):
+        nt.links.remove(link)
+    group.inputs["Alpha BM"].default_value = 1.0
+
+    # draw state from attr: opaque / alpha test at alpha_ref / blended
+    if attr == 0x08 or (attr == 0x40 and base_alpha is not None):
+        if base_alpha is not None:
+            test = nt.nodes.new("ShaderNodeMath")
+            test.operation = "GREATER_THAN"
+            test.inputs[1].default_value = (record.alpha_ref & 0xFF) / 255.0
+            test.location = (group.location[0] - 250, group.location[1] + 250)
+            nt.links.new(base_alpha, test.inputs[0])
+            if attr == 0x40:   # alpha-tested, then blended
+                keep = nt.nodes.new("ShaderNodeMath")
+                keep.operation = "MULTIPLY"
+                keep.location = (test.location[0] + 160, test.location[1])
+                nt.links.new(test.outputs[0], keep.inputs[0])
+                nt.links.new(base_alpha, keep.inputs[1])
+                nt.links.new(keep.outputs[0], group.inputs["Alpha BM"])
+            else:
+                nt.links.new(test.outputs[0], group.inputs["Alpha BM"])
+        _set_surface(bl_mat, "BLEND" if attr == 0x40 else "CLIP")
+    elif attr == 0x20:
+        if base_alpha is not None:
+            nt.links.new(base_alpha, group.inputs["Alpha BM"])
+        _set_surface(bl_mat, "BLEND")
+    else:   # 0x10 solid (and anything else): alpha is ignored
+        _set_surface(bl_mat, "OPAQUE")
+
+    # additional map: an alpha mask only for MULTITEXTURE_ALPHA (on TEXCOORD2); otherwise emissive /
+    # transmission mask, albedo blend, height map...: kept connected for export but not applied
+    group.inputs["Use Alpha Mask"].default_value = 1 if record.func_multitexture == 1 else 0
+    for tex_node, _link in _image_nodes_into(nt, group, "Alpha Mask AM"):
+        if record.func_multitexture == 1:
+            _uv_input(nt, tex_node, second_uv)
+        if tex_node.image:
+            tex_node.image.colorspace_settings.name = "Non-Color"
+    for tex_node, _link in _image_nodes_into(nt, group, "Special Map"):   # shadow map: masks specular only
+        _uv_input(nt, tex_node, second_uv)
+        if tex_node.image:
+            tex_node.image.colorspace_settings.name = "Non-Color"
+    for tex_node, _link in _image_nodes_into(nt, group, "Specular MM"):
+        if tex_node.image:
+            tex_node.image.colorspace_settings.name = "Non-Color"
+
+    # lightmap: rgb * a * lightmap_factor * header range, on TEXCOORD2; VCOLOR uses the vertex colour
+    factor = tuple(record.lightmap_factor[:3])
+    for tex_node, link in _image_nodes_into(nt, group, "Lightmap LM"):
+        _uv_input(nt, tex_node, second_uv)
+        rng = _tex_range(tex_node.image) if tex_node.image else None
+        scale = tuple(f * (r if rng is not None and r > 0 else 1.0) for f, r in zip(factor, rng or (1, 1, 1)))
+        nt.links.remove(link)
+        out = _scaled_color(nt, tex_node.outputs["Color"], scale, tex_node.outputs["Alpha"],
+                            (tex_node.location[0] + 200, tex_node.location[1]))
+        nt.links.new(out, group.inputs["Lightmap LM"])
+    # specular: the mask map is the specular colour, the exponent is fresnel_factor[2] (Blinn-Phong)
+    if "Use Specular Color" in group.inputs:
+        group.inputs["Use Specular Color"].default_value = 1
+        power = record.fresnel_factor[2]
+        group.inputs["Roughness"].default_value = math.sqrt(2.0 / (power + 2.0)) if power > 0 else 1.0
+        if record.func_specular == 0:   # SPECULAR_NONE
+            group.inputs["Specular MM"].default_value = (0.0, 0.0, 0.0, 1.0)
+            group.inputs["Roughness"].default_value = 1.0
+        # bitangent sign = sign(parallax_factor.z): -1 means the green channel isn't inverted
+        group.inputs["Flip Normal Green"].default_value = 0 if record.parallax_factor[2] < 0 else 1
+
+    # EMITSH4SPOT: the additional map's red channel lights the albedo by lightmap_factor (self-illumination)
+    if record.func_lighting == 3 and "Emission DMC4" in group.inputs:
+        add_nodes = _image_nodes_into(nt, group, "Alpha Mask AM")
+        albedo_links = group.inputs["Diffuse BM"].links
+        if add_nodes and albedo_links:
+            add_node = add_nodes[0][0]
+            red = nt.nodes.new("ShaderNodeSeparateColor")
+            red.location = (add_node.location[0] + 220, add_node.location[1] - 120)
+            nt.links.new(add_node.outputs["Color"], red.inputs[0])
+            emit = nt.nodes.new("ShaderNodeVectorMath")
+            emit.operation = "SCALE"
+            emit.location = (red.location[0] + 180, red.location[1])
+            nt.links.new(albedo_links[0].from_socket, emit.inputs[0])
+            nt.links.new(red.outputs[0], emit.inputs["Scale"])
+            out = _scaled_color(nt, emit.outputs["Vector"], tuple(record.lightmap_factor[:3]), None,
+                                (emit.location[0] + 180, emit.location[1]))
+            nt.links.new(out, group.inputs["Emission DMC4"])
+
+    if "Emission DMC4" in group.inputs:
+        _env_cube_display(nt, group, record)
+
+    if record.func_lightmap in LIGHTMAP_VCOLOR and not group.inputs["Lightmap LM"].links:
+        vc = nt.nodes.new("ShaderNodeVertexColor")
+        vc.layer_name = "vc"
+        vc.location = (group.location[0] - 600, group.location[1] - 700)
+        out = _scaled_color(nt, vc.outputs["Color"], factor, None, (vc.location[0] + 200, vc.location[1]))
+        nt.links.new(out, group.inputs["Lightmap LM"])
+        group.inputs["Use Lightmap"].default_value = 1
+
+
+CUBE_UV_GROUP = "ALBAM DMC4 Cube UV"
+
+
+def _cube_uv_group():
+    """Node group: a Blender world direction -> UV in Albam's cube-map strip (6 faces stacked vertically, +X -X +Y
+    -Y +Z -Z from the top, D3D face orientation; checked by matching the colours across every face edge of
+    blueorb_CM: 0.009 average difference, 0.29 for a random face order)."""
+    ng = bpy.data.node_groups.get(CUBE_UV_GROUP)
+    if ng is not None:
+        return ng
+    ng = bpy.data.node_groups.new(CUBE_UV_GROUP, "ShaderNodeTree")
+    sg = ShaderGroupCompat(ng, "OLD" if bpy.app.version[0] <= 3 else "NEW")
+    sg.new_socket("Vector", in_out="INPUT", socket_type="NodeSocketVector")
+    sg.new_socket("UV", in_out="OUTPUT", socket_type="NodeSocketVector")
+    nodes, links = ng.nodes, ng.links
+    gin, gout = nodes.new("NodeGroupInput"), nodes.new("NodeGroupOutput")
+    col = [0]
+
+    def math(op, a, b=None, clamp=False):
+        n = nodes.new("ShaderNodeMath")
+        n.operation = op
+        n.use_clamp = clamp
+        n.location = (col[0] * 40, -len(nodes) * 8)
+        for i, v in enumerate((a, b)):
+            if v is None:
+                continue
+            if isinstance(v, (int, float)):
+                n.inputs[i].default_value = v
+            else:
+                links.new(v, n.inputs[i])
+        return n.outputs[0]
+
+    split = nodes.new("ShaderNodeSeparateXYZ")
+    links.new(gin.outputs["Vector"], split.inputs[0])
+    # Blender (x, y, z) -> game (x, z, -y)
+    x, y = split.outputs["X"], split.outputs["Z"]
+    z = math("MULTIPLY", split.outputs["Y"], -1.0)
+    ax, ay, az = math("ABSOLUTE", x), math("ABSOLUTE", y), math("ABSOLUTE", z)
+    is_x = math("MULTIPLY", math("GREATER_THAN", ax, ay), math("GREATER_THAN", ax, az))
+    is_y = math("MULTIPLY", math("SUBTRACT", 1.0, is_x), math("GREATER_THAN", ay, az))
+    is_z = math("SUBTRACT", math("SUBTRACT", 1.0, is_x), is_y)
+    sx, sy, sz = math("SIGN", x), math("SIGN", y), math("SIGN", z)
+    major = math("ADD", math("ADD", math("MULTIPLY", is_x, ax), math("MULTIPLY", is_y, ay)), math("MULTIPLY", is_z, az))
+    minus_y = math("MULTIPLY", y, -1.0)
+    sc = math("ADD", math("ADD",
+                          math("MULTIPLY", is_x, math("MULTIPLY", math("MULTIPLY", sx, -1.0), z)),
+                          math("MULTIPLY", is_y, x)),
+              math("MULTIPLY", is_z, math("MULTIPLY", sz, x)))
+    tc = math("ADD", math("ADD", math("MULTIPLY", is_x, minus_y),
+                          math("MULTIPLY", is_y, math("MULTIPLY", sy, z))),
+              math("MULTIPLY", is_z, minus_y))
+    face = math("ADD", math("ADD",
+                            math("MULTIPLY", is_x, math("LESS_THAN", x, 0.0)),
+                            math("MULTIPLY", is_y, math("ADD", 2.0, math("LESS_THAN", y, 0.0)))),
+                math("MULTIPLY", is_z, math("ADD", 4.0, math("LESS_THAN", z, 0.0))))
+    safe_major = math("MAXIMUM", major, 1e-6)
+    u = math("MULTIPLY", math("ADD", math("DIVIDE", sc, safe_major), 1.0), 0.5)
+    vd = math("MULTIPLY", math("ADD", math("DIVIDE", tc, safe_major), 1.0), 0.5)
+    vd = math("MINIMUM", math("MAXIMUM", vd, 0.002), 0.998)    # no bleeding into the next face
+    v = math("SUBTRACT", 1.0, math("DIVIDE", math("ADD", face, vd), 6.0))
+    combine = nodes.new("ShaderNodeCombineXYZ")
+    links.new(u, combine.inputs[0])
+    links.new(v, combine.inputs[1])
+    links.new(combine.outputs[0], gout.inputs["UV"])
+    return ng
+
+
+def _env_cube_display(nt, group, record):
+    """Environment cube (texCUBE(reflect) in the game): rgb / max(a, 1/255) * EnvMapPower * mask
+    * (1 - sat(FresnelFactor * facing^5 + FresnelBias)), added as emission. Only for specular STANDARD / POWMAP /
+    RIM (NONE has no specular term, MIRROR samples the screen instead)."""
+    if record.func_specular in (0, 2):
+        return
+    env_nodes = _image_nodes_into(nt, group, "Environment CM")
+    if not env_nodes:
+        return
+    env = env_nodes[0][0]
+    if env.image is None or env.image.size[0] == 0 or env.image.size[1] != 6 * env.image.size[0]:
+        return   # not a cube strip (missing texture or a 2D map)
+    links = nt.links
+    x, y = env.location
+    coords = nt.nodes.new("ShaderNodeTexCoord")
+    coords.location = (x - 450, y)
+    cube_uv = nt.nodes.new("ShaderNodeGroup")
+    cube_uv.node_tree = _cube_uv_group()
+    cube_uv.location = (x - 250, y)
+    links.new(coords.outputs["Reflection"], cube_uv.inputs[0])
+    links.new(cube_uv.outputs[0], env.inputs["Vector"])
+    env.interpolation = "Linear"
+    env.extension = "EXTEND"
+
+    def math(op, a, b, loc):
+        n = nt.nodes.new("ShaderNodeMath")
+        n.operation = op
+        n.location = loc
+        for i, v in enumerate((a, b)):
+            if isinstance(v, (int, float)):
+                n.inputs[i].default_value = v
+            else:
+                links.new(v, n.inputs[i])
+        return n.outputs[0]
+
+    inv_alpha = math("DIVIDE", 1.0, math("MAXIMUM", env.outputs["Alpha"], 1 / 255, (x + 200, y - 120)), (x + 360, y - 120))
+    facing = nt.nodes.new("ShaderNodeLayerWeight")
+    facing.location = (x + 200, y - 300)
+    fresnel = math("MULTIPLY", math("POWER", facing.outputs["Facing"], 5.0, (x + 360, y - 300)),
+                   float(record.fresnel_factor[0]), (x + 520, y - 300))
+    fresnel = math("ADD", fresnel, float(record.fresnel_factor[1]), (x + 680, y - 300))
+    keep = nt.nodes.new("ShaderNodeMath")
+    keep.operation = "SUBTRACT"
+    keep.use_clamp = True
+    keep.inputs[0].default_value = 1.0
+    keep.location = (x + 840, y - 300)
+    clamp = nt.nodes.new("ShaderNodeClamp")
+    clamp.location = (x + 760, y - 380)
+    links.new(fresnel, clamp.inputs[0])
+    links.new(clamp.outputs[0], keep.inputs[1])
+    scale = math("MULTIPLY", math("MULTIPLY", inv_alpha, keep.outputs[0], (x + 1000, y - 200)),
+                 float(record.fresnel_factor[3]), (x + 1160, y - 200))
+
+    term = nt.nodes.new("ShaderNodeVectorMath")
+    term.operation = "SCALE"
+    term.location = (x + 1320, y)
+    links.new(env.outputs["Color"], term.inputs[0])
+    links.new(scale, term.inputs["Scale"])
+    out = term.outputs["Vector"]
+    mask_links = group.inputs["Specular MM"].links
+    if mask_links:
+        masked = nt.nodes.new("ShaderNodeVectorMath")
+        masked.operation = "MULTIPLY"
+        masked.location = (x + 1480, y)
+        links.new(out, masked.inputs[0])
+        links.new(mask_links[0].from_socket, masked.inputs[1])
+        out = masked.outputs["Vector"]
+    existing = group.inputs["Emission DMC4"].links
+    if existing:   # EMIT already drives the emission: add both
+        both = nt.nodes.new("ShaderNodeVectorMath")
+        both.operation = "ADD"
+        both.location = (x + 1640, y)
+        links.new(existing[0].from_socket, both.inputs[0])
+        links.new(out, both.inputs[1])
+        out = both.outputs["Vector"]
+    links.new(out, group.inputs["Emission DMC4"])
+
+
+def check_material_153(name, record):
+    """Raise for function values that can't form a valid DX9 shader key."""
+    problems = []
+    for field, radix in FUNC_RADIX_153.items():
+        value = getattr(record, field)
+        if not 0 <= value < radix:
+            problems.append(f"{field} = {value} (must be below {radix})")
+        elif value in NO_DX9_SHADER_153.get(field, ()):
+            problems.append(f"{field} = {value} has no DX9 shader")
+    skin, lightmap, vtype = record.func_skin, record.func_lightmap, record.vtype
+    layouts = {0: (2, 3), 1: (0, 5), 2: (0, 5), 3: (0, 5), 4: (1,)}
+    if skin in layouts and vtype not in layouts[skin]:
+        problems.append(f"func_skin {skin} needs vtype {' or '.join(map(str, layouts[skin]))} (has {vtype})")
+    if lightmap in (1, 2) and vtype != 2:
+        problems.append(f"func_lightmap {lightmap} needs vtype 2 (TEXCOORD2), has {vtype}")
+    if lightmap in LIGHTMAP_VCOLOR and vtype not in (3, 5):
+        problems.append(f"func_lightmap {lightmap} (vertex colour) needs vtype 3 or 5, has {vtype}")
+    if problems:
+        raise AlbamCheckFailure(
+            f"Material {name} can't be drawn by DMC4", details="; ".join(problems),
+            solution="Pick another value in the material's DMC4 properties")
+
+
 def _create_mtfw_shader():
     """Creates shader node group to hide all nodes from users under the hood"""
     existing = bpy.data.node_groups.get(MTFW_SHADER_NODEGROUP_NAME)
     if existing:
+        _extend_mtfw_shader(existing)
         return existing
 
     shader_group = bpy.data.node_groups.new(MTFW_SHADER_NODEGROUP_NAME, "ShaderNodeTree")
@@ -1107,7 +1505,78 @@ def _create_mtfw_shader():
     link(normal_map.outputs[0], bsdf_shader.inputs["Normal"])
     link(group_inputs.outputs["Use Detail Map"], use_detail_map.inputs[0])
 
+    _extend_mtfw_shader(shader_group)
     return shader_group
+
+
+def _extend_mtfw_shader(shader_group):
+    """Inputs added after the group's first version (also applied to groups saved in older .blend files). Their
+    defaults keep the old look, so only materials that set them (DMC4) change:
+    - Use Specular Color / Roughness: the mask map is a specular colour and roughness comes from the material
+      (instead of roughness = 1 - mask);
+    - Flip Normal Green: 1 = the old green inversion, 0 = none;
+    - Emission DMC4: an emission colour (black = none)."""
+    if "Use Specular Color" in [s.name for s in _group_inputs(shader_group)]:
+        return
+    sg = ShaderGroupCompat(shader_group, "OLD" if bpy.app.version[0] <= 3 else "NEW")
+    sg.new_socket("Use Specular Color", in_out="INPUT", socket_type="NodeSocketInt")
+    sg.new_socket("Roughness", in_out="INPUT", socket_type="NodeSocketFloat")
+    sg.new_socket("Flip Normal Green", in_out="INPUT", socket_type="NodeSocketInt")
+    sg.new_socket("Emission DMC4", in_out="INPUT", socket_type="NodeSocketColor")
+    inputs = {s.name: s for s in _group_inputs(shader_group)}
+    inputs["Use Specular Color"].default_value = 0
+    inputs["Roughness"].default_value = 0.5
+    inputs["Flip Normal Green"].default_value = 1
+    inputs["Emission DMC4"].default_value = (0.0, 0.0, 0.0, 1.0)
+
+    nodes, links = shader_group.nodes, shader_group.links
+    group_in = next(n for n in nodes if n.type == "GROUP_INPUT")
+    bsdf = next(n for n in nodes if n.type == "BSDF_PRINCIPLED")
+    invert_spec = next(n for n in nodes if n.type == "INVERT")
+    invert_green = next(n for n in nodes if n.type == "CURVE_RGB")
+    normal_map = next(n for n in nodes if n.type == "NORMAL_MAP")
+
+    rough = nodes.new("ShaderNodeMix")
+    rough.data_type = "FLOAT"
+    rough.label = "Roughness Switcher"
+    rough.location = (-200, -280)
+    links.new(group_in.outputs["Use Specular Color"], rough.inputs["Factor"])
+    links.new(invert_spec.outputs[0], rough.inputs[2])                 # A: 1 - mask
+    links.new(group_in.outputs["Roughness"], rough.inputs[3])           # B: material roughness
+    links.new(rough.outputs[0], bsdf.inputs["Roughness"])
+
+    tint_socket = bsdf.inputs.get("Specular Tint")
+    if tint_socket is not None and tint_socket.type == "RGBA":            # Blender 4.x
+        tint = nodes.new("ShaderNodeMix")
+        tint.data_type = "RGBA"
+        tint.label = "Specular Colour Switcher"
+        tint.location = (-200, -420)
+        tint.inputs[6].default_value = (1.0, 1.0, 1.0, 1.0)              # A: plain white tint
+        links.new(group_in.outputs["Use Specular Color"], tint.inputs["Factor"])
+        links.new(group_in.outputs["Specular MM"], tint.inputs[7])        # B: mask = specular colour
+        links.new(tint.outputs[2], tint_socket)
+
+    flip = nodes.new("ShaderNodeMix")
+    flip.data_type = "RGBA"
+    flip.label = "Normal Green Switcher"
+    flip.location = (-120, -900)
+    links.new(group_in.outputs["Flip Normal Green"], flip.inputs["Factor"])
+    links.new(invert_green.inputs[1].links[0].from_socket, flip.inputs[6])   # A: unflipped
+    links.new(invert_green.outputs[0], flip.inputs[7])                        # B: flipped (old behaviour)
+    links.new(flip.outputs[2], normal_map.inputs[1])
+
+    emission_socket = bsdf.inputs.get("Emission Color") or bsdf.inputs.get("Emission")
+    if emission_socket is not None:
+        links.new(group_in.outputs["Emission DMC4"], emission_socket)
+        strength = bsdf.inputs.get("Emission Strength")
+        if strength is not None:
+            strength.default_value = 1.0
+
+
+def _group_inputs(shader_group):
+    if hasattr(shader_group, "interface"):
+        return [i for i in shader_group.interface.items_tree if getattr(i, "in_out", None) == "INPUT"]
+    return list(shader_group.inputs)
 
 
 def _infer_mrl(context, mod_vfile, app_id):
@@ -1408,7 +1877,7 @@ class Mod153MaterialCustomProperties(bpy.types.PropertyGroup):
         options=set()
     )
     func_lighting_enum = bpy.props.EnumProperty(
-        name="func ligting",
+        name="func lighting",
         description="select lighting type",
         items=[
             ("0x0", "LIGHTING_NONE", "", 1),
@@ -1490,7 +1959,7 @@ class Mod153MaterialCustomProperties(bpy.types.PropertyGroup):
     attr: attr_enum
     num: bpy.props.IntProperty(name="Material Number", default=0, options=set())  # noqa: F821
     envmap_bias: bpy.props.IntProperty(name="Environmental Bias",
-                                       default=4, options=set())  # noqa: F821
+                                       default=0, options=set())  # noqa: F821
     vtype: vtype_enum
     uvscroll_enable: bpy.props.BoolProperty(name="UV scroll enable",
                                             default=False, options=set())  # noqa: F821
@@ -1499,26 +1968,107 @@ class Mod153MaterialCustomProperties(bpy.types.PropertyGroup):
     func_lighting: func_lighting_enum
     func_normalmap: func_normalmap_enum
     func_specular: func_specular_enum
-    func_lightmap: func_lighting_enum
+    func_lightmap: func_lightmap_enum
     func_multitexture: func_multitexture_enum
-    htechnique: bpy.props.StringProperty(name="H-technique",  # noqa: F821
-                                         default="0x8727e606", options=set())  # noqa: F821
-    pipeline: bpy.props.IntProperty(name="Pipline", default=379, options=set())  # noqa: F821
+    htechnique: bpy.props.EnumProperty(
+        name='H-technique',
+        items=[
+        ('0x17796f56', 'tXfScreenClear','', 0),
+        ('0xcab2a170', 'tXfScreenCopy','', 1),
+        ('0x7e4138dc', 'tXfResolve','', 2),
+        ('0xf7769eec', 'tXfBackBufferCopy','', 3),
+        ('0xb6855e0f', 'tXfDFAACopy','', 4),
+        ('0xfe9a5edf', 'tXfYUY2Copy','', 5),
+        ('0x3e5389ee', 'tXfRGBICopy','', 6),
+        ('0x3af9e19f', 'tXfSwizzleCopy','', 7),
+        ('0x7e9c2dee', 'tXfLDR2Copy','', 8),
+        ('0x26461f2a', 'tXfRGBICubeCopy','', 9),
+        ('0x48e2d4bb', 'tXfSubPixelCopy','', 10),
+        ('0x96f834af', 'tXfReductionZCopy','', 11),
+        ('0xacfae3e4', 'tXfOcclusion','', 12),
+        ('0x7d658231', 'tXfDPMap2CubaMap','', 13),
+        ('0x4c2f2887', 'tXfMaterialStreamOut','', 14),
+        ('0x3b810b10', 'tXfMaterialDebug','', 15),
+        ('0xaa626ffb', 'tXfMaterialZPass','', 16),
+        ('0x97471581', 'tXfMaterialVelocity','', 17),
+        ('0x53ae7416', 'tXfMaterialShadowReceiver','', 18),
+        ('0x30b6bdb8', 'tXfMaterialShadowCaster','', 19),
+        ('0x88367c19', 'tXfMaterialStandard','', 20),
+        ('0x8335b668', 'tXfMaterialFur','', 21),
+        ('0x91fc623e', 'tXfShapeBlend','', 22),
+        ('0xe0e727f0', 'tXfMaterialEdge','', 23),
+        ('0x9df75be4', 'tXfFilterLightScattering','', 24),
+        ('0x640e8a05', 'tXfFilterStandard','', 25),
+        ('0x2d5767f8', 'tXfFilterBloom','', 26),
+        ('0x185168f1', 'tXfFilterDOF','', 27),
+        ('0x2e1ad607', 'tXfFilterTVNoise','', 28),
+        ('0xaf9cb5e1', 'tXfFilterVolumeNoise','', 29),
+        ('0x2bb2716a', 'tXfFilterRadialBlur','', 30),
+        ('0xf4db0ad3', 'tXfFilterFeedbackBlur','', 31),
+        ('0xe8b68a03', 'tXfFilterToneMap','', 32),
+        ('0xd9f6f683', 'tXfFilterToneMapSub','', 33),
+        ('0xf7c48941', 'tXfFilterGaussianBlur','', 34),
+        ('0x5ce1a976', 'tXfFilterMotionBlur','', 35),
+        ('0x0e705104', 'tXfFilterMotionBlurI2G','', 36),
+        ('0xa8a5cb2e', 'tXfFilterMotionBlurCopyI2G','', 37),
+        ('0x9d1670d5', 'tXfFilterMerge','', 38),
+        ('0x414e40d3', 'tXfFilterImagePlane','', 39),
+        ('0x2b6ec81b', 'tXfFilterColorCorrect','', 40),
+        ('0x156c78a5', 'tXfFilterColorCorrect2','', 41),
+        ('0xb1c1f7f1', 'tXfFilterBlur','', 42),
+        ('0xb05be88a', 'tXfFilterI2GFur','', 43),
+        ('0xcc59e4b5', 'tXfFilterI2GDOF','', 44),
+        ('0x940f920a', 'tXfTextureConvertHeightMapToNormalMap','', 45),
+        ('0xe41f5dd1', 'nil','', 46),
+        ('0xcc11f30d', 'nil','', 47),
+        ('0x493a954c', 'nil','', 48),
+        ('0x1fe78683', 'nil','', 49),
+        ('0x6db59ed6', 'nil','', 50),
+        ('0xed2827cf', 'tXfPrimStandard','', 51),
+        ('0x312cb4e1', 'nil','', 52),
+        ('0xe5f39d43', 'nil','', 53),
+        ('0xfb4f06ed', 'nil','', 54),
+        ('0x399a88f9', 'nil','', 55),
+        ('0x5eecea3d', 'nil','', 56),
+        ('0x23e98e1c', 'nil','', 57),
+        ('0x49c0b237', 'nil','', 58),
+        ('0x05168f29', 'nil','', 59),
+        ('0x5fa8066f', 'nil','', 60),
+        ('0xfbc055e4', 'nil','', 61),
+        ('0x6cd7aba0', 'nil','', 62),
+        ('0xae243cee', 'nil','', 63),
+        ('0x83614817', 'nil','', 64),
+        ('0xc4dd56de', 'nil','', 65),
+        ('0xef36423a', 'nil','', 66),
+        ('0x0264bf16', 'nil','', 67),
+        ('0xfbb2f636', 'nil','', 68),
+        ('0x5a2a6823', 'nil','', 69),
+        ('0x2752e134', 'tXfPrimGpuParticleBatch','', 70),
+        ('0xb574e757', 'nil','', 71),
+        ('0x81f59164', 'nil','', 72),
+        ('0x85f8e35f', 'nil','', 73),
+        ('0x870fa5f6', 'nil','', 74),
+        ('0x63e103a5', 'nil','', 75),
+        ('0x00000000', 'nil','', 76),
+        ],
+        default='0x88367c19',
+        options=set())
+    pipeline: bpy.props.IntProperty(name="Pipline", default=185, options=set())  # noqa: F821
     pvdeclbase: bpy.props.IntProperty(name="PV declaration base", default=0, options=set())  # noqa: F821
     pvdecl: bpy.props.StringProperty(name="PV declaration", default="0x0", options=set())  # noqa: F821
 
     transparency: bpy.props.FloatProperty(name="Transparency", default=1.0, options=set())  # noqa: F821
     fresnel_factor: bpy.props.FloatVectorProperty(
-        name="FresnelFactor", size=4, default=(0.0, 0.5, 7.0, 0.6), options=set())  # noqa: F821
+        name="FresnelFactor", size=4, default=(0.0, 0.0, 16.0, 1.0), options=set())  # noqa: F821
     lightmap_factor: bpy.props.FloatVectorProperty(
         name="LightmapFactor",  # noqa: F821
         size=4, default=(1.0, 1.0, 1.0, 0), options=set(), subtype="COLOR")  # noqa: F821
     detail_factor: bpy.props.FloatVectorProperty(
         name="DetaillFactor", size=4, default=(0.5, 10, 0.0, 0.5), options=set())  # noqa: F821
     transmit_factor: bpy.props.FloatVectorProperty(
-        name="TransmitlFactor", size=4, default=(0.5, 10, 0.0, 0.5), options=set())  # noqa: F821
+        name="TransmitlFactor", size=4, default=(1.0, 1.0, 1.0, 0.0), options=set())  # noqa: F821
     parallax_factor: bpy.props.FloatVectorProperty(
-        name="ParalaxFactor", size=4, default=(0.0, 0.0, 0.0, 0.0), options=set())  # noqa: F821
+        name="ParalaxFactor", size=4, default=(0.0, 0.0, 1.0, 0.0), options=set())  # noqa: F821
     blend_state: bpy.props.IntProperty(name="Blend State", default=44172837, options=set())
     alpha_ref: bpy.props.IntProperty(name="Alpha Reference", default=8, options=set())
 

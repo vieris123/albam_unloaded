@@ -5,7 +5,7 @@ import bpy
 from albam.apps import APPS
 from albam.registry import blender_registry
 from albam.vfs import ALBAM_OT_VirtualFileSystemCollapseToggle
-from albam.rfs import ALBAM_OT_RealFileSystemCollapseToggle, RealFile
+from albam.rfs import ALBAM_OT_RealFileSystemCollapseToggle, compute_visible_items
 
 # FIXME: store in app data
 APP_DIRS_CACHE = {}
@@ -54,10 +54,8 @@ class AlbamImportSettings(bpy.types.PropertyGroup):
     import_only_main_lods: bpy.props.BoolProperty(default=True)
 
 
-@blender_registry.register_blender_type
-class ALBAM_OT_Import(bpy.types.Operator):
-    bl_idname = "albam.import_vfile"
-    bl_label = "import item"
+class ImportFileBase:
+    """Shared by the VFS and RFS import operators, subclasses define get_selected_item"""
 
     def execute(self, context):  # pragma: no cover
         item = self.get_selected_item(context)
@@ -94,6 +92,13 @@ class ALBAM_OT_Import(bpy.types.Operator):
         if custom_poll_func:
             return custom_poll_func(cls, context)
         return True
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_Import(ImportFileBase, bpy.types.Operator):
+    """Import the selected archive file"""
+    bl_idname = "albam.import_vfile"
+    bl_label = "Import"
 
     @staticmethod
     def get_selected_item(context):
@@ -108,58 +113,28 @@ class ALBAM_OT_Import(bpy.types.Operator):
             return
         return item
 
+
 @blender_registry.register_blender_type
-class ImportReal(bpy.types.Operator):
+class ALBAM_OT_ImportReal(ImportFileBase, bpy.types.Operator):
+    """Import the selected game file"""
     bl_idname = "albam.import_real"
-    bl_label = "import real item"
-
-    def execute(self, context):  # pragma: no cover
-        item = self.get_selected_item(context)
-        try:
-            self._execute(item, context)
-        except Exception:
-            bpy.ops.albam.error_handler_popup("INVOKE_DEFAULT")
-        return {"FINISHED"}
-
-    @staticmethod
-    def _execute(item, context):
-        import_function = blender_registry.import_registry[(item.app_id, item.extension)]
-
-        bl_container = import_function(item, context)
-        if not bl_container:
-            return
-
-        if bl_container.type != "ARMATURE":
-            # armature building needs it linked to for building
-            bpy.context.collection.objects.link(bl_container)
-        for child in bl_container.children_recursive:
-            try:
-                # already linked
-                bpy.context.collection.objects.link(child)
-            except RuntimeError:
-                pass
-
-    @classmethod
-    def poll(cls, context):
-        item = cls.get_selected_item(context)
-        if not item or (item.app_id, item.extension) not in blender_registry.importable_extensions:
-            return False
-        custom_poll_func = blender_registry.import_operator_poll_funcs.get(item.extension)
-        if custom_poll_func:
-            return custom_poll_func(cls, context)
-        return True
+    bl_label = "Import"
 
     @staticmethod
     def get_selected_item(context):
-        if len(context.scene.albam.rfs.file_list) == 0:
+        item = context.scene.albam.rfs.selected_item
+        if item is None or item.is_expandable:
             return None
-        index = context.scene.albam.rfs.file_list_selected_index
-        try:
-            item = context.scene.albam.rfs.file_list[index]
-        except IndexError:
-            # list might have been cleared
-            return
         return item
+
+
+def get_import_item(context):
+    """The item import options apply to. dmc4 only uses the real file system"""
+    item = None
+    if context.scene.albam.apps.app_selected != "dmc4":
+        item = ALBAM_OT_Import.get_selected_item(context)
+    return item or ALBAM_OT_ImportReal.get_selected_item(context)
+
 
 class ALBAM_UL_VirtualFileSystemUIBase:
     EXPAND_ICONS = {
@@ -213,56 +188,70 @@ class ALBAM_UL_VirtualFileSystemUIBase:
 class ALBAM_UL_VirtualFileSystemUI(ALBAM_UL_VirtualFileSystemUIBase, bpy.types.UIList):
     pass
 
-class ALBAM_UL_RealFileSystemUIBase:
-    EXPAND_ICONS = {
-        False: "TRIA_RIGHT",
-        True: "TRIA_DOWN",
-    }
-    collapse_toggle_operator_cls = ALBAM_OT_RealFileSystemCollapseToggle
+# Filter results per UI list, keyed on what they depend on. Recomputing on every
+# redraw is slow with tens of thousands of files
+_RFS_FILTER_CACHE = {}
 
-    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
-        for _ in range(item.tree_node.depth):
-            layout.split(factor=0.01)
-
-        if item.is_expandable:
-            icon = self.EXPAND_ICONS[item.is_expanded]
-        elif item.category == "MESH":
-            icon = "OUTLINER_OB_MESH"
-        elif item.category == "ANIMATION":
-            icon = "ACTION"
-        elif item.category == "MATERIAL":
-            icon = "MATERIAL"
-        elif item.category == "TEXTURE":
-            icon = "TEXTURE"
-        else:
-            icon = "DOT"
-        col = layout.column()
-        col.enabled = item.is_expandable
-        op = col.operator(self.collapse_toggle_operator_cls.bl_idname, text="", icon=icon)
-        op.button_index = index
-        layout.column().label(text=item.display_name)
-
-    def filter_items(self, context, data, propname):
-        filtered_items = []
-        # TODO: self.filter_name
-        cache = self.collapse_toggle_operator_cls.NODES_CACHE
-
-        item_list = getattr(data, propname)
-        for item in item_list:
-            if item.is_archive:
-                filtered_items.append(self.bitflag_filter_item)
-
-            elif all(cache.get(anc.node_id, False) for anc in item.tree_node_ancestors):
-                filtered_items.append(self.bitflag_filter_item)
-
-            else:
-                filtered_items.append(0)
-
-        return filtered_items, []
 
 @blender_registry.register_blender_type
-class ALBAM_UL_RealFileSystemUI(ALBAM_UL_RealFileSystemUIBase, bpy.types.UIList):
-    pass
+class ALBAM_UL_RealFileSystemUI(bpy.types.UIList):
+    EXPAND_ICONS = ALBAM_UL_VirtualFileSystemUIBase.EXPAND_ICONS
+    CATEGORY_ICONS = {
+        "MESH": "OUTLINER_OB_MESH",
+        "ANIMATION": "ACTION",
+        "COLLISION": "MOD_PHYSICS",
+        "EFFECT": "PARTICLES",
+        "MATERIAL": "MATERIAL",
+        "TEXTURE": "TEXTURE",
+    }
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        row = layout.row(align=True)
+        if item.tree_node.depth:
+            row.separator(factor=item.tree_node.depth * 1.5)
+
+        if item.is_expandable:
+            is_open = item.is_expanded or bool(data.search)
+            op = row.operator(
+                ALBAM_OT_RealFileSystemCollapseToggle.bl_idname,
+                text="",
+                icon=self.EXPAND_ICONS[is_open],
+                emboss=False,
+            )
+            op.button_index = index
+            row.label(text=item.display_name, icon="FILEBROWSER" if item.is_root else "FILE_FOLDER")
+        else:
+            # same width as the expand arrow, so file icons line up with folder icons
+            row.label(text="", icon="BLANK1")
+            sub = row.row(align=True)
+            sub.active = item.is_importable
+            sub.label(text=item.display_name, icon=self.CATEGORY_ICONS.get(item.category, "FILE"))
+
+    def draw_filter(self, context, layout):
+        # search and filter are drawn above the list by the panel
+        pass
+
+    def filter_items(self, context, data, propname):
+        items = getattr(data, propname)
+        key = (data.as_pointer(), len(items), data.revision, data.search, data.importable_only)
+        cached = _RFS_FILTER_CACHE.get(self.list_id)
+        if cached and cached[0] == key:
+            return cached[1], []
+
+        depths, names, is_folder, is_importable, is_expanded = [], [], [], [], []
+        for f in items:
+            depths.append(f.tree_node.depth)
+            names.append(f.display_name)
+            is_folder.append(f.is_expandable)
+            is_importable.append(f.is_importable)
+            is_expanded.append(f.is_expanded)
+        visible = compute_visible_items(
+            depths, names, is_folder, is_importable, is_expanded, data.search, data.importable_only
+        )
+        flags = [self.bitflag_filter_item if v else 0 for v in visible]
+        _RFS_FILTER_CACHE[self.list_id] = (key, flags)
+        return flags, []
+
 
 @blender_registry.register_blender_type
 class ALBAM_PT_ImportSection(bpy.types.Panel):
@@ -281,49 +270,41 @@ class ALBAM_PT_ImportSection(bpy.types.Panel):
 
 
 @blender_registry.register_blender_type
-class ALBAM_PT_FileExplorer(bpy.types.Panel):
+class ALBAM_PT_RealFileSystem(bpy.types.Panel):
     bl_category = "Albam [Beta]"
-    bl_idname = "ALBAM_PT_FileExplorer"
-    bl_label = "File Explorer"
-    bl_options = {"HIDE_HEADER"}
+    bl_idname = "ALBAM_PT_RealFileSystem"
+    bl_label = "Game Files"
     bl_parent_id = "ALBAM_PT_ImportSection"
     bl_region_type = "UI"
     bl_space_type = "VIEW_3D"
 
     def draw(self, context):
-        self.layout.separator()
-        self.layout.separator()
-        split = self.layout.split(factor=0.1)
-        col = split.column()
-        col.operator("albam.add_files", icon="FILE_NEW", text="")
-        col.operator("albam.save_file", icon="SORT_ASC", text="")
-        col.operator("albam.remove_imported", icon="X", text="")
-        col.operator("albam.add_real_root_folder", icon="NEWFOLDER", text="")
-        col.operator("albam.remove_imported_real", icon="X", text="")
-        col = split.column()
-        col.template_list(
-            "ALBAM_UL_VirtualFileSystemUI",
-            "vfs",
-            context.scene.albam.vfs,
-            "file_list",
-            context.scene.albam.vfs,
-            "file_list_selected_index",
-            sort_lock=True,
-            rows=8,
-        )
-        col.template_list(
+        layout = self.layout
+        rfs = context.scene.albam.rfs
+
+        row = layout.row(align=True)
+        row.operator("albam.add_real_root_folder", icon="NEWFOLDER")
+        row.operator("albam.remove_imported_real", text="", icon="X")
+        row.operator("albam.collapse_real_folders", text="", icon="FULLSCREEN_EXIT")
+        row.operator("albam.refresh_real_folders", text="", icon="FILE_REFRESH")
+
+        if len(rfs.file_list) == 0:
+            layout.label(text="Add a folder of extracted arc files", icon="INFO")
+            return
+
+        row = layout.row(align=True)
+        row.prop(rfs, "search", text="", icon="VIEWZOOM")
+        row.prop(rfs, "importable_only", text="", icon="FILTER")
+        layout.template_list(
             "ALBAM_UL_RealFileSystemUI",
             "rfs",
-            context.scene.albam.rfs,
+            rfs,
             "file_list",
-            context.scene.albam.rfs,
+            rfs,
             "file_list_selected_index",
             sort_lock=True,
-            rows=8,
+            rows=12,
         )
-
-        self.layout.row()
-        self.layout.row()
 
 
 @blender_registry.register_blender_type
@@ -332,12 +313,12 @@ class ALBAM_PT_ImportOptionsCustom(bpy.types.Panel):
     bl_category = "Albam [Beta]"
     bl_idname = "ALBAM_PT_ImportOptionsCustom"
     bl_label = ""
-    bl_parent_id = "ALBAM_PT_ImportSection"
+    bl_parent_id = "ALBAM_PT_RealFileSystem"
     bl_region_type = "UI"
     bl_space_type = "VIEW_3D"
 
     def draw(self, context):
-        current_item = ALBAM_OT_Import.get_selected_item(context) or ImportReal.get_selected_item(context)
+        current_item = get_import_item(context)
         if not current_item:
             return
         ext = current_item.extension
@@ -348,7 +329,7 @@ class ALBAM_PT_ImportOptionsCustom(bpy.types.Panel):
 
     @classmethod
     def poll(self, context):
-        current_item = ALBAM_OT_Import.get_selected_item(context) or ImportReal.get_selected_item(context)
+        current_item = get_import_item(context)
         if not current_item:
             return False
         ext = current_item.extension
@@ -356,6 +337,63 @@ class ALBAM_PT_ImportOptionsCustom(bpy.types.Panel):
         if not poll_func:
             return False
         return poll_func(self, context)
+
+
+@blender_registry.register_blender_type
+class ALBAM_PT_RealFileSystemImport(bpy.types.Panel):
+    bl_category = "Albam [Beta]"
+    bl_idname = "ALBAM_PT_RealFileSystemImport"
+    bl_label = "Import Game File"
+    bl_options = {"HIDE_HEADER"}
+    bl_parent_id = "ALBAM_PT_RealFileSystem"
+    bl_region_type = "UI"
+    bl_space_type = "VIEW_3D"
+
+    def draw(self, context):
+        item = ALBAM_OT_ImportReal.get_selected_item(context)
+        text = f"Import {item.display_name}" if item and item.is_importable else "Import"
+        row = self.layout.row(align=True)
+        row.scale_y = 1.4
+        row.operator("albam.import_real", text=text, icon="IMPORT")
+        row.operator("wm.import_options", text="", icon="OPTIONS")
+
+
+@blender_registry.register_blender_type
+class ALBAM_PT_VirtualFileSystem(bpy.types.Panel):
+    bl_category = "Albam [Beta]"
+    bl_idname = "ALBAM_PT_VirtualFileSystem"
+    bl_label = "Archives"
+    bl_parent_id = "ALBAM_PT_ImportSection"
+    bl_region_type = "UI"
+    bl_space_type = "VIEW_3D"
+
+    @classmethod
+    def poll(cls, context):
+        # dmc4 archives aren't browsable, its files are extracted and added as Game Files
+        return context.scene.albam.apps.app_selected != "dmc4"
+
+    def draw(self, context):
+        layout = self.layout
+        vfs = context.scene.albam.vfs
+
+        row = layout.row(align=True)
+        row.operator("albam.add_files", icon="FILE_NEW")
+        row.operator("albam.save_file", text="", icon="SORT_ASC")
+        row.operator("albam.remove_imported", text="", icon="X")
+        layout.template_list(
+            "ALBAM_UL_VirtualFileSystemUI",
+            "vfs",
+            vfs,
+            "file_list",
+            vfs,
+            "file_list_selected_index",
+            sort_lock=True,
+            rows=8,
+        )
+        row = layout.row(align=True)
+        row.scale_y = 1.4
+        row.operator("albam.import_vfile", text="Import", icon="IMPORT")
+        row.operator("wm.import_options", text="", icon="OPTIONS")
 
 
 @blender_registry.register_blender_type
@@ -443,26 +481,6 @@ class ALBAM_OT_SetAppConfigPath(bpy.types.Operator):
 
     def cancel(self, context):
         bpy.ops.albam.app_config_popup("INVOKE_DEFAULT")
-
-
-@blender_registry.register_blender_type
-class ALBAM_PT_ImportButton(bpy.types.Panel):
-    bl_category = "Albam [Beta]"
-    bl_idname = "ALBAM_PT_ImportButton"
-    bl_label = "Import (unused)"
-    bl_options = {"HIDE_HEADER"}
-    bl_parent_id = "ALBAM_PT_ImportSection"
-    bl_region_type = "UI"
-    bl_space_type = "VIEW_3D"
-
-    def draw(self, context):
-        self.layout.separator()
-        row = self.layout.row()
-        row.operator("albam.import_vfile", text="Import")
-        row.operator("wm.import_options", icon="OPTIONS", text="")
-        row = self.layout.row()
-        row.operator("albam.import_real", text="Import Folder")
-        self.layout.row()
 
 
 @blender_registry.register_blender_type

@@ -274,18 +274,18 @@ types:
       size_:
         value: 52
       indices:
-        pos: _root.header.offset_index_buffer + face_offset * 2 + face_position * 2
+        pos: _root.header.offset_index_buffer + face_position * 2
         repeat: expr
         repeat-expr: num_indices
         type: u2
       vertices:
-        # XXX vertex_position and vertex_position_2 are equal most of the time
-        # But if using vertex_position_2 when they are not, vertices import wrongly
-        # needs investigation
-        pos: "min_index > vertex_position_2 ?  _root.header.offset_vertex_buffer + (min_index * vertex_stride) + vertex_offset : _root.header.offset_vertex_buffer + (min_index * vertex_stride) + vertex_offset"
+        # face_offset is the base vertex (index_base): models past 65,535 vertices restart min_index /
+        # vertex_position_2 at 0 and carry the running vertex count here. Vertex i of the index buffer is
+        # vertex_offset + (face_offset + i) * vertex_stride. Corpus (667 DX9 files): max_index - min_index + 1
+        # always covers the indices; vertex_position_2 can be below min_index (filler vertices skipped).
+        pos: _root.header.offset_vertex_buffer + (face_offset + min_index) * vertex_stride + vertex_offset
         repeat: expr
-          #repeat-expr: num_vertices # TODO: special case
-        repeat-expr: "min_index > vertex_position_2 ? max_index - min_index + 1 : num_vertices"
+        repeat-expr: max_index - min_index + 1
         type:
           # switch-on: vertex_format
           # cases:
@@ -311,9 +311,10 @@ types:
             8: vf_non_skin_col
             
       vertices2:
-        pos: _root.header.offset_vertex_buffer_2 + (vertex_position_2 * vertex_stride_2) + vertex_offset_2
+        # second stream, indexed like the first (vdecl 2: occlusion + tangent, 9: half2 lightmap UV, 1: zeros)
+        pos: _root.header.offset_vertex_buffer_2 + (face_offset + min_index) * vertex_stride_2 + vertex_offset_2
         repeat: expr
-        repeat-expr: num_vertices
+        repeat-expr: max_index - min_index + 1
         type:
           switch-on: vertex_stride_2
           cases:

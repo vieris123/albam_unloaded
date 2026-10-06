@@ -37,6 +37,11 @@ def register():
     importlib.import_module("albam.engines.mtfw.archive")
     importlib.import_module("albam.engines.mtfw.collision")
     importlib.import_module("albam.engines.mtfw.mesh")
+    importlib.import_module("albam.engines.mtfw.effect")
+    importlib.import_module("albam.engines.mtfw.effect_export")
+    importlib.import_module("albam.engines.mtfw.effect_editor")
+    importlib.import_module("albam.engines.mtfw.effect_retype")
+    importlib.import_module("albam.blender_ui.foot_ik")
     if os.getenv("ALBAM_ENABLE_REEN"):
         importlib.import_module("albam.engines.reng.archive")
         importlib.import_module("albam.engines.reng.mesh")
@@ -75,6 +80,13 @@ def register():
     bpy.types.Image.albam_custom_properties = bpy.props.PointerProperty(type=AlbamCustomPropertiesImage)
     bpy.types.Action.albam_custom_properties = bpy.props.PointerProperty(type=AlbamCustomPropertiesAction)
 
+    from albam.blender_ui.foot_ik import register_handlers
+    register_handlers()
+    from albam.engines.mtfw.effect_sim import register_handlers as register_effect_handlers
+    register_effect_handlers()
+    from albam.engines.mtfw.effect_editor import register_editor
+    register_editor()
+
 def cleanse_modules():
     for module_name in sorted(modules.keys()):
 
@@ -82,7 +94,13 @@ def cleanse_modules():
             del modules[module_name]
 
 def unregister():
-    
+    from albam.blender_ui.foot_ik import unregister_handlers
+    unregister_handlers()
+    from albam.engines.mtfw.effect_sim import unregister_handlers as unregister_effect_handlers
+    unregister_effect_handlers()
+    from albam.engines.mtfw.effect_editor import unregister_editor
+    unregister_editor()
+
     for _, cls in reversed(blender_registry.props):
         bpy.utils.unregister_class(cls)
 

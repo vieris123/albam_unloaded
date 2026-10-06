@@ -24,6 +24,6 @@ __all__ = (
     "ALBAM_PT_ExportSection",
     "ALBAM_PT_ToolsPanel",
     "ALBAM_OT_ErrorHandler",
-    "ALBAM_OT_SplitUVSeams"
+    "ALBAM_OT_SplitUVSeams",
     "ALBAM_PT_LmtSection",
 )

@@ -112,6 +112,10 @@ class ALBAM_PT_ToolsPanel(bpy.types.Panel):
             context.scene.albam.tools_settings,
             "bone_names_preset",
             text="",)
+        row = layout.row(align=True)
+        row.label(text="Bones:")
+        row.operator('albam.bone_display', text="Rig").rig_style = True
+        row.operator('albam.bone_display', text="Joints").rig_style = False
 
 
 @blender_registry.register_blender_type
@@ -418,6 +422,36 @@ class ALBAM_OT_AutoRenameBones(bpy.types.Operator):
         selection = bpy.context.selected_objects
         armature_ob = [obj for obj in selection if obj.type == 'ARMATURE']
         rename_bones(armature_ob[0], app_id, bone_names_preset)
+        return {'FINISHED'}
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_BoneDisplay(bpy.types.Operator):
+    '''Change how the selected armatures' bones are drawn. Display only: animation and export are unaffected'''
+    bl_idname = "albam.bone_display"
+    bl_label = "Bone display"
+    bl_options = {'UNDO'}
+
+    rig_style: bpy.props.BoolProperty(default=True)
+
+    @classmethod
+    def description(cls, context, properties):
+        if properties.rig_style:
+            return ("Draw each bone from its joint to the next joint in the chain, like a normal rig. "
+                    "Display only: the real bones (seen in Edit Mode) are unchanged, so animation and export "
+                    "are unaffected")
+        return ("Draw the raw game joints: short stubs that all point the same way, as stored in the file. "
+                "This is what Edit Mode always shows")
+
+    @classmethod
+    def poll(cls, context):
+        return any(ob.type == 'ARMATURE' for ob in context.selected_objects)
+
+    def execute(self, context):
+        from albam.lib.blender import set_bone_display
+        for ob in context.selected_objects:
+            if ob.type == 'ARMATURE':
+                set_bone_display(ob, self.rig_style)
         return {'FINISHED'}
 
 

@@ -40,3 +40,7 @@ blender_ui/__pycache__/import_panel.cpython-311.pyc
 blender_ui/__pycache__/tools.cpython-311.pyc
 engines/__pycache__/__init__.cpython-311.pyc
 engines/mtfw/defines/__pycache__/__init__.cpython-311.pyc
+
+CLAUDE.md
+*.pyc
+*.pyc

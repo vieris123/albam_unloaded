@@ -133,7 +133,10 @@ TEX_FORMAT_MAPPER = {
     43: b"DXT1",  # FIXME: unchecked
     "DXT1": b"DXT1",
     "DXT5": b"DXT5",
+    "\x15\x00\x00\x00": b"",  # tex 112 D3DFMT_A8R8G8B8 (DMC4 skies / trees)
 }
+TEX112_A8R8G8B8 = "\x15\x00\x00\x00"
+MISSING_TEXTURE_PROP = "albam_missing"   # placeholder for a texture the .mod references but that isn't available
 
 # FIXME: take into account type of texture (BM/NM/MM, etc.)
 DDS_FORMAT_MAP = {
@@ -231,9 +234,12 @@ def build_blender_textures(app_id, context, parsed_mod, mrl=None):
         #         texture_vfile = context.scene.albam.rfs.get_vfile(app_id, PureWindowsPath(*path.parts[i:]))
         #         if texture_vfile:
         #             break
-        texture_vfile = context.scene.albam.rfs.get_vfile(app_id, texture_path+ext)
-        print(texture_vfile.absolute_path)
-        tex_bytes = texture_vfile.get_bytes()
+        try:
+            texture_vfile = context.scene.albam.rfs.get_vfile(app_id, texture_path + ext)
+            tex_bytes = texture_vfile.get_bytes()
+        except KeyError:   # referenced but not under the Game Files roots: keep the reference
+            print(f"Albam: texture {texture_path}{ext} not found under the Game Files roots")
+            texture_vfile, tex_bytes = None, None
 
         if RtexCls == Rtex112 and not tex_bytes:
             try:
@@ -243,9 +249,7 @@ def build_blender_textures(app_id, context, parsed_mod, mrl=None):
             except KeyError:
                 tex_bytes = None
         if not tex_bytes:
-            print(f"texture_path {texture_path} not found in arc")
-            textures.append(None)
-            # TODO: handle missing texture
+            textures.append(_missing_texture_image(app_id, texture_path, ext))
             continue
         if is_rtex:
             tex = RtexCls.from_bytes(tex_bytes)
@@ -264,10 +268,9 @@ def build_blender_textures(app_id, context, parsed_mod, mrl=None):
                 dds_header.set_constants()
                 dds_header.set_variables(compressed=bool(compression_fmt), cubemap=tex.num_images > 1)
                 dds = bytes(dds_header) + tex.dds_data
-            except Exception as err:
-                # TODO: log this instead of printing it
+            except Exception as err:   # can't be shown, but export writes the original file back
                 print(f'Error converting "{texture_path}" to dds: {err}')
-                textures.append(None)
+                textures.append(_missing_texture_image(app_id, texture_path, ext, tex_bytes))
                 continue
 
         tex_name = PureWindowsPath(texture_path).name
@@ -301,6 +304,20 @@ def build_blender_textures(app_id, context, parsed_mod, mrl=None):
         pprint(list(zip(sorted(a), sorted(b))))
         pprint(sorted(b))
     return textures
+
+
+def _missing_texture_image(app_id, texture_path, ext, original_bytes=None):
+    """Placeholder image for a texture that can't be loaded: keeps the material slot and the path (and the
+    original file, if there is one) for export."""
+    name = f"{PureWindowsPath(texture_path).name}{ext} (missing)"
+    bl_image = bpy.data.images.get(name) or bpy.data.images.new(name, 4, 4)
+    bl_image[MISSING_TEXTURE_PROP] = True
+    bl_image.albam_asset.app_id = app_id
+    bl_image.albam_asset.relative_path = texture_path + ext
+    bl_image.albam_asset.extension = ext.lstrip(".")
+    if original_bytes:
+        bl_image.albam_asset.original_bytes = original_bytes
+    return bl_image
 
 
 def assign_textures(mtfw_material, bl_material, textures, mrl):
@@ -375,6 +392,8 @@ def _find_texture_index(mtfw_material, texture_type, from_mrl=False):
         if tex_value == texture_type:
             tex_slot = tex_type
             break
+    if tex_slot == "detailmap" and not hasattr(mtfw_material, "detailmap"):
+        tex_slot = "heightmap"   # mod 153: the detail normal map (_NM) lives in "heightmap"
     tex_index = getattr(mtfw_material, tex_slot, 0)
     return tex_index
 
@@ -455,7 +474,9 @@ def texture_code_to_blender_texture(texture_code, blender_texture_node, blender_
             var1.name = "detail_multiplier"
             var1.targets[0].id_type = "MATERIAL"
             var1.targets[0].id = blender_material
-            var1.targets[0].data_path = 'albam_custom_properties.re5__mod_156_material.detail_factor[1]'
+            app_id = blender_texture_node.image.albam_asset.app_id if blender_texture_node.image else "re5"
+            prop_group = "dmc4__mod_153_material" if app_id == "dmc4" else "re5__mod_156_material"
+            var1.targets[0].data_path = f'albam_custom_properties.{prop_group}.detail_factor[1]'
             d.driver.expression = var1.name
 
     elif texture_code == 9:
@@ -510,6 +531,12 @@ def serialize_textures(app_id, bl_materials):
         )
 
     for dict_tex in exported_textures.values():
+        bl_im = dict_tex["image"]
+        if bl_im.get(MISSING_TEXTURE_PROP):
+            original = bytes(bl_im.albam_asset.original_bytes or b"")
+            dict_tex["serialized_vfile"] = VirtualFileData(
+                app_id, _handle_relative_path(bl_im), data_bytes=original or None)
+            continue
         vfile = serialize_func(app_id, dict_tex)
         dict_tex["serialized_vfile"] = vfile
 
@@ -534,18 +561,35 @@ def _serialize_texture_156(app_id, dict_tex):
         dds_data_len = 0
     else:
         dds_header = DDSHeader.from_bl_image(bl_im)
+        original = None
+        if bl_im.albam_asset.original_bytes:
+            try:
+                original = Tex112.from_bytes(bytes(bl_im.albam_asset.original_bytes))
+                original._read()
+            except Exception:
+                original = None
+        if original is not None and bytes(original.dds_data) == bytes(dds_header.data):
+            # unchanged pixels: the original file as is (keeps revision, cube-map coefficients, colours)
+            return VirtualFileData(app_id, _handle_relative_path(bl_im),
+                                   data_bytes=bytes(bl_im.albam_asset.original_bytes))
         tex = Tex112()
         tex.id_magic = b"TEX\x00"
         tex.version = 112
-        tex.revision = 34  # FIXME: not really, changes with cubemaps
+        # revision packs the texture kind (DMC4: 0x22 2D, 0x32 normal map, 0x02 mask, 0x13/0x23 cube): keep it
+        tex.revision = original.revision if original is not None else (0x23 if dds_header.image_count > 1 else 34)
         tex.num_mipmaps_per_image = dds_header.dwMipMapCount
         tex.num_images = dds_header.image_count
         tex.width = bl_im.size[0]
         tex.height = bl_im.size[1] // dds_header.image_count  # cubemaps are a vertical strip in Blender
         tex.reserved = 0
-        tex.compression_format = dds_header.pixelfmt_dwFourCC.decode()
+        tex.compression_format = dds_header.pixelfmt_dwFourCC.decode() or TEX112_A8R8G8B8
 
-        tex.cube_faces = [] if dds_header.image_count == 1 else _calculate_cube_faces_data(tex)
+        if dds_header.image_count == 1:
+            tex.cube_faces = []
+        elif original is not None and original.num_images == dds_header.image_count:
+            tex.cube_faces = original.cube_faces   # the cube's coefficients from the source texture
+        else:
+            tex.cube_faces = _calculate_cube_faces_data(tex)
         tex.mipmap_offsets = dds_header.calculate_mimpap_offsets(tex.size_before_data_)
         tex.dds_data = dds_header.data
         dds_data_len = len(tex.dds_data)
@@ -790,6 +834,8 @@ def check_dds_textures(func):
         non_dds = []
         for bl_im_name, bl_im_dict in images.items():
             if bl_im_dict["image"].albam_asset.render_target is True:
+                continue
+            if bl_im_dict["image"].get(MISSING_TEXTURE_PROP):
                 continue
             if not is_blimage_dds(bl_im_dict["image"]):
                 non_dds.append((bl_im_name, bl_im_dict))

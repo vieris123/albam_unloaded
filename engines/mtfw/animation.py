@@ -2,16 +2,18 @@ from ctypes import Structure, Union, c_ulonglong, c_double, c_uint64, c_uint8
 from enum import Enum
 
 import ctypes
+import math
 import io
 import struct
 import numpy as np
 import bpy
 from kaitaistruct import KaitaiStream
-from mathutils import Matrix, Vector, Quaternion
+from mathutils import Euler, Matrix, Vector, Quaternion
 from io import BytesIO
 import mathutils
 import numpy as np
 
+from albam.exceptions import AlbamCheckFailure
 from albam.registry import blender_registry
 from .structs.lmt import Lmt
 
@@ -28,9 +30,6 @@ class TrackType(Enum):
     LocalScale = 2
     AbsoluteRotation = 3
     AbsolutePosition = 4
-
-class AlbamAction(bpy.types.Action):
-    pass
 
 # HACKY_BONE_INDEX_IK_FOOT_RIGHT = 19
 # HACKY_BONE_INDEX_IK_FOOT_LEFT = 23
@@ -49,6 +48,7 @@ ROOT_BONE_NAME = '0'
 ROOT_BONE_RENAMED = 'root'
 FRAMERATE = 60
 
+#TODO: Fix reference frame
 @blender_registry.register_import_function(app_id="re5", extension='lmt', file_category="ANIMATION")
 @blender_registry.register_import_function(app_id="dmc4", extension='lmt', file_category="ANIMATION")
 def load_lmt(file_item, context):
@@ -63,6 +63,7 @@ def load_lmt(file_item, context):
     lmt_group = context.scene.albam.lmt_groups.add(file_item.display_name)
     lmt_group.num_slots = lmt.num_block_offsets
     lmt_group.armature = armature
+    lmt_group.export_path = getattr(file_item, "absolute_path", "")
 
     context.scene.render.fps = FRAMERATE
 
@@ -78,45 +79,20 @@ def load_lmt(file_item, context):
         name = f"{armature.name}.{file_item.display_name}.{str(block_index).zfill(4)}"
 
         action = bpy.data.actions.new(name)
-        action_group = lmt_group.add(name)
-        action_group.action = action
-
-        action_group.frames = block.block_header.num_frames
-        action.frame_end = action_group.frames
-        action_group.lmt_id = block_index
-        
-        action_group.loop_frames = int(block.block_header.loop_frames)
-
+        lmt_group.add(action)
+        action.frame_end = block.block_header.num_frames
 
         action.albam_asset.app_id = app_id
         action.albam_asset.lmt_index = block_index
         custom_property = action.albam_custom_properties.get_custom_properties_for_appid(app_id)
-        #custom_property.copy_custom_properties_from(block.block_header)
         custom_property.copy_from_lmt(block.block_header, block_index)
-        #custom_property.copy_custom_properties_to(action)
 
-        #Events
-        cumulative_frames = 0
-        action_group.coll_ev = block.block_header.events_params_01
-        for event in block.block_header.events_01:
-            marker = action.pose_markers.new(f'ev1_{cumulative_frames}_{event.group_id}')
-            marker.frame = cumulative_frames
-            marker.dmc4_event_props.setup('Hitbox', event.group_id)
-            marker.dmc4_event_props.action = action_group
-            cumulative_frames += event.frame
-
-        cumulative_frames = 0
-        action_group.sfx_ev = block.block_header.events_params_01
-        for event in block.block_header.events_02:
-            marker = action.pose_markers.new(f'ev2_{cumulative_frames}_{event.group_id}')
-            marker.frame = cumulative_frames
-            marker.dmc4_event_props.setup('Sound', event.group_id)
-            marker.dmc4_event_props.action = action_group
-            cumulative_frames += event.frame
+        _import_events(action, custom_property, block.block_header.events_01, "Hitbox")
+        _import_events(action, custom_property, block.block_header.events_02, "Sound")
 
         #Loops
         is_cyclic = False
-        if block.block_header.loop_frames > 0:
+        if block.block_header.loop_frames > -1:
             action.use_cyclic = True
             is_cyclic = True
             #action.use_frame_range = True
@@ -147,11 +123,7 @@ def load_lmt(file_item, context):
                 action_type = 'rotation'
                 decoded_frames = decode_type_6(track.data)
                 decoded_frames = _parent_space_to_local_rot(decoded_frames, armature, bone_index)
-                if block.block_header.loop_frames > 0 and len(decoded_frames) > block.block_header.loop_frames:
-                    ref_frame = _parent_space_to_local_rot([Quaternion([track.ref_data.w, track.ref_data.x,
-                                                                track.ref_data.y, track.ref_data.z])],
-                                                                armature, bone_index)[0]
-                    decoded_frames[block.block_header.loop_frames - 1] = ref_frame
+
             elif track.buffer_type == 4:
                 TRACK_MODE = "rotation_quaternion"
                 action_type = 'rotation'
@@ -185,29 +157,18 @@ def load_lmt(file_item, context):
                     action_type = 'location'
                     decoded_frames = decode_type_9(track.data)
                     decoded_frames = _parent_space_to_local(decoded_frames, armature, bone_index)
-                    if block.block_header.loop_frames > 0 and len(decoded_frames) > block.block_header.loop_frames:
-                        ref_frame = _parent_space_to_local([Vector([track.ref_data.x / 100.0, track.ref_data.y / 100.0,
-                                                                     track.ref_data.z / 100.0])],
-                                                            armature, bone_index)[0]
-                        decoded_frames[block.block_header.loop_frames - 1] = ref_frame
+
                 elif track.usage == 2:
                     TRACK_MODE = 'scale'
                     action_type = 'scale'
                     decoded_frames = decode_type_9_scale(track.data)
                     world_pos_fix(decoded_frames)
-                    if block.block_header.loop_frames > 0 and len(decoded_frames) > block.block_header.loop_frames:
-                        ref_frame = [Vector([track.ref_data.x, track.ref_data.y, track.ref_data.z])]
-                        world_pos_fix(ref_frame)
-                        decoded_frames[block.block_header.loop_frames - 1] = ref_frame[0]
+
                 elif track.usage == 4:
                     TRACK_MODE = 'location'
                     action_type = 'location'
                     decoded_frames = decode_type_9(track.data)
                     world_pos_fix(decoded_frames)
-                    if block.block_header.loop_frames > 0 and len(decoded_frames) > block.block_header.loop_frames:
-                        ref_frame = [Vector([track.ref_data.x / 100.0, track.ref_data.y / 100.0, track.ref_data.z / 100.0])]
-                        world_pos_fix(ref_frame)
-                        decoded_frames[block.block_header.loop_frames - 1] = ref_frame[0]
                 else:
                     continue
 
@@ -251,18 +212,18 @@ def load_lmt(file_item, context):
                     print('unknown error:', err)
                     curves.append(action.fcurves.new(data_path=data_path+'[1]', index=i, action_group=group_name))
 
+            # stored keys start at frame 0, the game's frames (see decode_type_6)
             for frame_index, frame_data in enumerate(decoded_frames):
                 if frame_data is None:
                     continue
                 for curve_idx, curve in enumerate(curves):
                     curve.keyframe_points.add(1)
-                    curve.keyframe_points[-1].co = (frame_index + 1, frame_data[curve_idx])
+                    curve.keyframe_points[-1].co = (frame_index, frame_data[curve_idx])
                     curve.keyframe_points[-1].interpolation = 'LINEAR'
-
-    # exportable = context.scene.albam.exportable.file_list.add()
-    # exportable.bl_object = lmt_group
-
-    # context.scene.albam.exportable.file_list.update()
+                        
+    lmt_groups = context.scene.albam.lmt_groups
+    lmt_groups.active_group_id = len(lmt_groups.anim_group) - 1
+    lmt_groups.anim_group[-1].active_id = 0
 
 
 def _create_bone_mapping(armature_obj):
@@ -334,6 +295,11 @@ class FrameQuat4_14(Structure):
             self.z *= -1.0
 
     def from_quat(self, quat, duration):
+        # w is stored without a sign, so flip the whole quaternion first (same rotation),
+        # then store the x, y, z signs
+        if quat[0] < 0.0:
+            quat = [x * -1.0 for x in quat]
+
         if quat[1] < 0.0:
             quat[1] *= -1.0
             self._x_sign = 1
@@ -345,9 +311,6 @@ class FrameQuat4_14(Structure):
         if quat[3] < 0.0:
             quat[3] *= -1.0
             self._z_sign = 1
-            
-        if quat[0] < 0.0:
-            quat = [x * -1.0 for x in quat]
 
         R = np.sqrt(1.0 - quat[0])
         mag_safe = np.sqrt(1.0 - (quat[0] * quat[0]))
@@ -389,7 +352,7 @@ def decode_type_9(data):
         floats = (u[0] / 100, u[1] / 100, u[2] / 100)
         duration = u[3]
         decoded_frames.append(floats)
-        decoded_frames.extend([None] * (duration))
+        decoded_frames.extend([None] * max(duration - 1, 0))
     return decoded_frames
 
 def decode_type_9_scale(data):
@@ -402,7 +365,7 @@ def decode_type_9_scale(data):
         floats = (u[0], u[1], u[2])
         duration = u[3]
         decoded_frames.append(floats)
-        decoded_frames.extend([None] * (duration))
+        decoded_frames.extend([None] * max(duration - 1, 0))
     return decoded_frames
 
 def decode_type_2(data):
@@ -460,6 +423,12 @@ def decode_type_4_euler(data):
     return decoded_frames
 
 def decode_type_6(data):
+    """
+    Keys in game frames, None where there's no key. Stored keys start at frame 0 (the first one
+    equals the track's ref_data) and a key's duration is the number of frames to the next key,
+    0 on the last key, which holds. Confirmed in uModel::calcMotionQuaternion (0xAE0400) and
+    against all DX9 files: durations always add up to num_frames - 1
+    """
     decoded_frames = []
 
     for idx, start in enumerate(range(0, len(data), 8)):
@@ -469,7 +438,7 @@ def decode_type_6(data):
         frame.calc_components()
 
         decoded_frames.append((frame.w, frame.x, frame.y, frame.z))
-        decoded_frames.extend([None] * frame.duration)
+        decoded_frames.extend([None] * max(frame.duration - 1, 0))
 
     return decoded_frames
 
@@ -555,10 +524,16 @@ def _parent_space_to_local(decoded_frames, armature, bone_index):
         if bone.parent:
             parent_space = bone.parent.matrix_local.inverted() @ bone.matrix_local #child - parent matrix
 
-        else:
+        elif bone_index == 255:
             parent_space = Matrix([[1.0, 0.0, 0.0, 0.0],
                                     [0.0, 0.0, 1.0, 0.0],
                                     [0.0, -1.0, 0.0, 0.0],
+                                    [0.0, 0.0, 0.0, 1.0]])
+            
+        else:
+            parent_space = Matrix([[1.0, 0.0, 0.0, 0.0],
+                                    [0.0, 1.0, 0.0, 0.0],
+                                    [0.0, 0.0, 1.0, 0.0],
                                     [0.0, 0.0, 0.0, 1.0]])
         transform_mat = Matrix.Translation(frame)
     
@@ -595,86 +570,152 @@ def world_pos_fix(decoded_frames):
             frame = ([frame[2], frame[1], frame[0]])
 
 
-def slerp(start: Quaternion, end: Quaternion, delta):
-    end_copy = end.copy()
-    dot = start.dot(end_copy)
-
-    if dot < 0.0:
-        end_copy *= -1.0
-        dot *= -1.0
-
-    DOT_THRESHOLD = 0.9995
-
-    if (dot > DOT_THRESHOLD):
-        return (start + (end_copy - start) * delta).normalized()
-
-    theta00 = np.acos(dot)
-    theta01 = theta00 * t
-    theta02 = np.sin(theta01)
-    theta03 = 1.0 / np.sin(theta00)
-    s0 = np.cos(theta01) - dot * theta02 * theta03
-    s1 = theta02 * theta03
-
-    return ((start * s0) + (end_copy * s1)).normalized() 
-
-def slerp_eval(track, block, frame_data, time):
-    frameDelta = time* FRAMERATE
-    frame = int(frameDelta)
-    num_frames = block.block_header.num_frames
-
-    def ref_to_quat(ref_data):
-        return Quaternion.Fill(ref_data.w, ref_data.x, ref_data.y, ref_data.z)
-
-    if not num_frames:
-        return ref_to_quat(track.ref_data)
-    
-    if track.loop_frame < 1:
-        if not frame:
-            if frameDelta < 0.0001:
-                return ref_to_quat(track.ref_data)
-            else:
-                frameDelta -= 1.0
-                ref_quat = ref_to_quat(track.ref_data)
-                quat_data = Quaternion(*frame_data[0])
-                return ref_data + (quat_data - ref_data) * frameDelta
-        else:
-            frame -= 1
-            frameDelta -= 1.0    
-
 @blender_registry.register_export_function(app_id="dmc4", extension="lmt")
-def export_lmt(lmt_group):
-    export_settings = bpy.context.scene.albam.export_settings
-    # asset = bl_obj.albam_asset
-    # app_id = asset.app_id
-    # Mod = APPID_CLASS_MAPPER[app_id]
-    #vfiles = []
-
+def export_lmt(lmt_group, notes=None):
+    """
+    The LMT file as bytes. Adjustments made on the way (timing conversion, ignored F-Curves)
+    are appended to notes, if given
+    """
+    notes = notes if notes is not None else []
+    timings = {item.action.name: ExportTiming(item.action) for item in lmt_group.actions if item.action}
+    _check_lmt_group(lmt_group, timings)
     dst_lmt = Lmt()
     header_size = _serialize_top_level_lmt(dst_lmt, lmt_group)
-    final_size = _serialize_block(dst_lmt, lmt_group, header_size)
-    #final_size = header_size + block_size
+    final_size = _serialize_block(dst_lmt, lmt_group, header_size, timings, notes)
     stream = KaitaiStream(BytesIO(bytearray(final_size)))
     dst_lmt._check()
     dst_lmt._write(stream)
     return stream.to_byte_array()
 
+
+class ExportTiming:
+    """
+    Maps action frames to game frames. The game plays at 60 fps and starts at frame 0 (frame 0
+    is the tracks' reference value), so actions are shifted to start at their first keyframe and
+    scaled from the scene frame rate. Keys are then written on whole game frames. The Blender
+    action is never changed
+    """
+
+    def __init__(self, action):
+        self.fps = get_lmt_props(action).source_fps
+        self.scale = FRAMERATE / self.fps
+        key_frames = [kp.co[0] for fc in action.fcurves if fc.data_path.startswith('pose.bones["')
+                      for kp in fc.keyframe_points]
+        # events count too: an LMT block with only constant tracks has its keys on frame 1
+        # but its first events on frame 0
+        props = get_lmt_props(action)
+        markers = (find_event_marker(action, event, i) for i, event in enumerate(props.event_markers))
+        event_frames = [marker.frame for marker in markers if marker is not None]
+        # without keyframes there's nothing to line up, leave events where they are
+        self.start = min(key_frames + event_frames) if key_frames else 0
+        self.fractional = any(abs(f - round(f)) > 1e-4 for f in key_frames)
+
+    @property
+    def is_identity(self):
+        return self.start == 0 and abs(self.scale - 1.0) < 1e-9 and not self.fractional
+
+    def to_game(self, frame):
+        return (frame - self.start) * self.scale
+
+    def to_action(self, game_frame):
+        return self.start + game_frame / self.scale
+
+    def describe(self):
+        changes = []
+        if self.start != 0:
+            changes.append(f"shifted {-self.start:+g} frames to start at 0")
+        if abs(self.scale - 1.0) >= 1e-9:
+            changes.append(f"converted from {self.fps:g} to {FRAMERATE} fps")
+        if self.fractional:
+            changes.append("keys between whole frames resampled")
+        return ", ".join(changes)
+
+
+def game_length(action):
+    """Length of the action in game frames, for the Frames property"""
+    timing = ExportTiming(action)
+    return max(0, int(round(timing.to_game(action.frame_range[1]))))
+
+
+def _event_game_frame(timing, marker):
+    return int(round(timing.to_game(marker.frame)))
+
+
+def _check_lmt_group(lmt_group, timings):
+    """Raise AlbamCheckFailure for problems that would produce a broken or crashing export"""
+    if not lmt_group.armature:
+        raise AlbamCheckFailure(
+            "The LMT has no armature", "", "Set the armature in the LMT panel")
+    missing_actions = [str(i + 1) for i, item in enumerate(lmt_group.actions) if not item.action]
+    if missing_actions:
+        raise AlbamCheckFailure(
+            "Some animations have no action",
+            f"Animation rows: {', '.join(missing_actions)}",
+            "Remove those rows from the Animations list")
+
+    slots = {}
+    for item in lmt_group.actions:
+        slots.setdefault(get_lmt_props(item.action).lmt_id, []).append(item.action.name)
+    clashes = [f"slot {slot}: {', '.join(names)}" for slot, names in sorted(slots.items()) if len(names) > 1]
+    if clashes:
+        raise AlbamCheckFailure(
+            "Several animations use the same LMT slot", "; ".join(clashes),
+            "Give each animation its own Slot in the Animations panel")
+    out_of_range = [slot for slot in slots if not 0 <= slot < lmt_group.num_slots]
+    if out_of_range:
+        raise AlbamCheckFailure(
+            "Animation slots are outside the LMT's slot count",
+            f"Slots {sorted(out_of_range)}, slot count {lmt_group.num_slots}",
+            "Raise Slots in the LMT panel, or change the animations' Slot")
+
+    problems = []
+    for item in lmt_group.actions:
+        action = item.action
+        props = get_lmt_props(action)
+        timing = timings[action.name]
+        seen = set()
+        for i, event in enumerate(props.event_markers):
+            marker = find_event_marker(action, event, i)
+            label = event.marker_name or f"event {i + 1}"
+            if marker is None:
+                problems.append(f"{action.name}: {label} has no marker")
+                continue
+            frame = _event_game_frame(timing, marker)
+            if not 0 <= frame < props.num_frames:
+                problems.append(
+                    f"{action.name}: {label} is on frame {marker.frame} (game frame {frame}), "
+                    f"outside game frames 0-{props.num_frames - 1}")
+            key = (event.param_ev_type, frame)
+            if key in seen:
+                problems.append(f"{action.name}: two {event.param_ev_type} events on game frame {frame}")
+            seen.add(key)
+    if problems:
+        raise AlbamCheckFailure(
+            "Some events can't be exported", "; ".join(problems),
+            "Fix them in the Events panel (each event needs its marker, inside the animation, "
+            "and at most one event of each type per frame)")
+
+
 def _serialize_top_level_lmt(dst_lmt, lmt_group):
     dst_lmt.id_magic = bytearray('\x4c\x4d\x54\x00', encoding='utf-8')
     dst_lmt.version = 49
     dst_lmt.num_block_offsets = lmt_group.num_slots
-    return lmt_group.num_slots * 4 + 8 
+    return lmt_group.num_slots * 4 + 8
 
-def _serialize_block(dst_lmt, lmt_group, header_size):
+def _serialize_block(dst_lmt, lmt_group, header_size, timings, notes):
     dst_lmt.block_offsets = []
     for i in range(dst_lmt.num_block_offsets):
         block_offset = dst_lmt.BlockOffset(_parent=dst_lmt, _root=dst_lmt._root)
         block_offset.offset = 0
         dst_lmt.block_offsets.append(block_offset)
-    
+
     cml_size = header_size + len(lmt_group.actions) * 0xC0
     for i, group in enumerate(lmt_group.actions):
         action = group.action
-        custom_property = action.albam_custom_properties.get_custom_properties_for_appid('dmc4')
+        custom_property = get_lmt_props(action)
+        timing = timings[action.name]
+        if not timing.is_identity:
+            notes.append(f"{action.name}: {timing.describe()}")
 
         block = dst_lmt.BlockHeader49(_parent=dst_lmt, _root=dst_lmt._root)
         block.num_frames = custom_property.num_frames
@@ -684,7 +725,7 @@ def _serialize_block(dst_lmt, lmt_group, header_size):
         active_offset.offset = header_size + i * 0xC0
         active_offset.block_header = block
         block.ofs_frame = cml_size
-        tracks, track_bf_size = _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size)
+        tracks, track_bf_size = _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size, timing, notes)
         cml_size = track_bf_size
         block.tracks = tracks
         block.num_tracks = len(tracks)
@@ -699,7 +740,7 @@ def _serialize_block(dst_lmt, lmt_group, header_size):
         block.end_quat.z = custom_property.end_quat[2]
         block.end_quat.w = custom_property.end_quat[3]
 
-        events01, events02 = _serialize_events(dst_lmt, block, action)
+        events01, events02 = _serialize_events(dst_lmt, block, action, timing)
         block.events_01 = events01
         block.events_02 = events02
 
@@ -717,53 +758,112 @@ def _serialize_block(dst_lmt, lmt_group, header_size):
 
     return cml_size
 
-def _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size):
+
+EULER_ORDERS = {'XYZ', 'XZY', 'YXZ', 'YZX', 'ZXY', 'ZYX'}
+MAX_KEY_GAP = 255  # FrameQuat4_14 durations are 8 bits
+ROTATION_PROPS = ('rotation_quaternion', 'rotation_euler', 'rotation_axis_angle')
+TRACK_PROP_ORDER = {'rotation': 0, 'location': 1, 'scale': 2}
+
+
+def _get_export_tracks(action, armature, notes):
+    """
+    [(bone name, property, {array_index: fcurve})], one per exported track, ordered like the
+    game's files: root motion first, then bones in skeleton order, rotation > location > scale.
+    Built from the F-Curves themselves, so their grouping doesn't matter. When a bone has
+    curves for several rotation modes, the bone's current rotation mode picks which one
+    """
+    tracks = {}
+    ignored = {}
+    for fc in action.fcurves:
+        data_path = fc.data_path
+        if not data_path.startswith('pose.bones["') or not fc.keyframe_points:
+            continue
+        end = data_path.find('"].')
+        bone_name, prop = data_path[len('pose.bones["'):end], data_path[end + 3:]
+        if prop in ('location', 'scale') or prop in ROTATION_PROPS:
+            tracks.setdefault((bone_name, prop), {})[fc.array_index] = fc
+        else:
+            ignored[prop] = ignored.get(prop, 0) + 1
+    if ignored:
+        notes.append(f"{action.name}: ignored F-Curves the LMT format can't store: "
+                     + ", ".join(f"{prop} ({count})" for prop, count in sorted(ignored.items())))
+
+    rotation_props = {}
+    for bone_name, prop in tracks:
+        if prop in ROTATION_PROPS:
+            rotation_props.setdefault(bone_name, set()).add(prop)
+    for bone_name, props in rotation_props.items():
+        if len(props) < 2:
+            continue
+        pose_bone = armature.pose.bones.get(bone_name)
+        mode = pose_bone.rotation_mode if pose_bone else 'QUATERNION'
+        keep = ('rotation_euler' if mode in EULER_ORDERS else
+                'rotation_axis_angle' if mode == 'AXIS_ANGLE' else 'rotation_quaternion')
+        if keep not in props:
+            keep = 'rotation_quaternion' if 'rotation_quaternion' in props else sorted(props)[0]
+        for prop in props - {keep}:
+            del tracks[(bone_name, prop)]
+
+    bone_order = {bone.name: i for i, bone in enumerate(armature.data.bones)}
+
+    def sort_key(item):
+        bone_name, prop = item[0]
+        kind = 'rotation' if prop in ROTATION_PROPS else prop
+        return (bone_name != ROOT_MOTION_BONE_NAME, bone_order.get(bone_name, len(bone_order)), TRACK_PROP_ORDER[kind])
+
+    return [(bone_name, prop, channels) for (bone_name, prop), channels in sorted(tracks.items(), key=sort_key)]
+
+
+def _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size, timing, notes):
     tracks = []
     armature = lmt_group.armature
-    cml_size += len(action.groups) * 32
-    for curve_group in action.groups:
+    export_tracks = _get_export_tracks(action, armature, notes)
+    cml_size += len(export_tracks) * 32
+    for bone_name, action_type, channels in export_tracks:
         track = dst_lmt.Track49(_parent=block, _root=dst_lmt._root)
-        name = curve_group.name
-        #retarget_index, index, action_type = name.split('.')
         track.joint_type = 0
 
-        data_path = curve_group.channels[0].data_path
-        bone_name = data_path[data_path.find('[\"')+2:data_path.find('\"]')]
-        bone = armature.data.bones[bone_name]
-        retarget_index = bone.get('mtfw.anim_retarget')
-        action_type = data_path.split('.')[-1]
+        bone = armature.data.bones.get(bone_name)
+        if bone is None:
+            raise AlbamCheckFailure(
+                f"Animation {action.name} animates a bone that isn't in the armature",
+                f"Bone: {bone_name}, armature: {armature.name}",
+                "Retarget the animation onto the LMT's armature, or set the LMT's armature to the right one")
         #Bone index
-        if bone_name == 'root_motion':
-            track.bone_index = 255
+        if bone_name == ROOT_MOTION_BONE_NAME:
+            track.bone_index = ROOT_MOTION_BONE_ID
         else:
+            retarget_index = bone.get('mtfw.anim_retarget')
+            if retarget_index is None:
+                raise AlbamCheckFailure(
+                    f"Bone {bone_name} has no game bone index",
+                    f"Animation {action.name} animates it, but the bone has no 'mtfw.anim_retarget' property",
+                    "Animate only bones that came from an imported model, or add the property to the bone")
             track.bone_index = int(retarget_index)
 
-        try:
-            #Track type
-            if action_type in ['rotation', 'rotation_quaternion']:
-                track.usage = 0
-                track_range = curve_group.channels[0].range()
-                # if track_range[0] == track_range[1]:
-                #     track.buffer_type = 4
-                # else:
-                track.buffer_type = 6
-                buffer, bf_size = _serialize_bone_rotation(dst_lmt, bone, track, curve_group)
-            elif action_type == 'location':
-                if track.bone_index == 255:
-                    track.usage = 4
-                else:
-                    track.usage = 1
-                track.buffer_type = 9
-                buffer, bf_size = _serialize_bone_location(dst_lmt, bone, track, curve_group)
-            elif action_type == 'scale':
-                track.usage = 2
-                track.buffer_type = 9
-                buffer, bf_size = _serialize_bone_scale(dst_lmt, track, curve_group)
+        #Track type
+        if action_type in ROTATION_PROPS:
+            # the root motion bone's rotation is absolute, like in the game's files
+            track.usage = 3 if track.bone_index == ROOT_MOTION_BONE_ID else 0
+            track.buffer_type = 6
+            pose_bone = armature.pose.bones.get(bone_name)
+            order = pose_bone.rotation_mode if pose_bone and pose_bone.rotation_mode in EULER_ORDERS else 'XYZ'
+            keys = _rotation_keys(channels, action_type, order, timing)
+            buffer, bf_size = _serialize_bone_rotation(dst_lmt, bone, track, keys)
+        elif action_type == 'location':
+            if track.bone_index == ROOT_MOTION_BONE_ID:
+                track.usage = 4
             else:
-                raise Exception(f'No anim data at {data_path}')
-        except IndexError:
-            print('BAKE YOUR ANIM!!!!')
-        
+                track.usage = 1
+            track.buffer_type = 9
+            keys = _track_keys(channels, (0.0, 0.0, 0.0), timing)
+            buffer, bf_size = _serialize_bone_location(dst_lmt, bone, track, keys)
+        else:
+            track.usage = 2
+            track.buffer_type = 9
+            keys = _track_keys(channels, (1.0, 1.0, 1.0), timing)
+            buffer, bf_size = _serialize_bone_scale(dst_lmt, track, keys)
+
         track.weight = 1.0
         track.data = buffer.to_byte_array()
         track.len_data = bf_size
@@ -772,325 +872,222 @@ def _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size):
         tracks.append(track)
     return tracks, cml_size
 
-def _serialize_events(dst_lmt, dst_action, action):
-    pose_markers = action.pose_markers
-    ev1_markers = []
-    ev2_markers = []
-    for p in pose_markers:
-        event = dst_lmt.Event49(_parent=dst_action, _root=dst_lmt._root)
-        ev_custom_prop = p.dmc4_event_props
-        event.frame = p.frame
-        val = 0
-        for k, v in GroupHash.items():
-            bit = getattr(ev_custom_prop, k)
-            val |= (bit << v)
-        for i in range(8):
-            bit = ev_custom_prop.slots[i]
-            val |= bit << i
-        event.group_id = val
 
-        if ev_custom_prop.param_ev_type == 'Hitbox':
-            ev1_markers.append(event)
-        else:
-            ev2_markers.append(event)
+def _serialize_events(dst_lmt, dst_action, action, timing):
+    """
+    Events are stored per table (Hitbox, Sound) as (value, duration) pairs that cover
+    the whole animation, so a value holds until the next event. The game's files always
+    start at frame 0 and have at least one event per table, so an empty table becomes
+    a single zero event, and a gap before the first event is filled with a zero event
+    """
+    custom_prop = get_lmt_props(action)
+    tables = {'Hitbox': [], 'Sound': []}
+    for ind, ev in enumerate(custom_prop.event_markers):
+        marker = find_event_marker(action, ev, ind)
+        tables[ev.param_ev_type if ev.param_ev_type in tables else 'Hitbox'].append(
+            (_event_game_frame(timing, marker), ev.encode()))
 
-    ev1_markers.sort(key=lambda x: x.frame)
-    ev2_markers.sort(key=lambda x: x.frame)
+    serialized = []
+    for frames_values in tables.values():
+        frames_values.sort()
+        if not frames_values or frames_values[0][0] > 0:
+            frames_values.insert(0, (0, 0))
+        events = []
+        for i, (frame, value) in enumerate(frames_values):
+            frame_next = frames_values[i + 1][0] if i + 1 < len(frames_values) else dst_action.num_frames
+            event = dst_lmt.Event49(_parent=dst_action, _root=dst_lmt._root)
+            event.group_id = value
+            event.frame = max(frame_next - frame, 0)
+            events.append(event)
+        serialized.append(events)
+    return serialized[0], serialized[1]
 
-    for i in range(len(ev1_markers) - 1):
-        ev1_markers[i].frame = ev1_markers[i+1].frame - ev1_markers[i].frame
-    ev1_markers[-1].frame = dst_action.num_frames - ev1_markers[-1].frame
-    for i in range(len(ev2_markers) - 1):
-        ev2_markers[i].frame = ev2_markers[i+1].frame - ev2_markers[i].frame
-    ev2_markers[-1].frame = dst_action.num_frames - ev2_markers[-1].frame
-    
-    return ev1_markers, ev2_markers
 
-def _serialize_bone_rotation(dst_lmt, bone, track, fcurve_group):
-    kf_num = len(fcurve_group.channels[0].keyframe_points)
-    frame_counter = 1
+def _track_keys(channels, defaults, timing):
+    """
+    (game frame, [values]) for every game frame where any channel of the track has a keyframe,
+    with every channel evaluated there. The file stores all components of a track per key, so
+    channels keyed on different frames are filled in from their curves. Keyframes are mapped to
+    whole game frames (see ExportTiming). Animated tracks always get a key on frame 0, where the
+    game starts reading them, and gaps longer than 255 frames are split, the most a rotation
+    key's 8-bit duration can hold. Channels missing from the track take their value from defaults
+    """
+    frames = {round(timing.to_game(kp.co[0])) for c in channels.values() for kp in c.keyframe_points}
+    if len(frames) > 1:
+        frames.add(0)
+        ordered = sorted(frames)
+        for before, after in zip(ordered, ordered[1:]):
+            frames.update(range(before + MAX_KEY_GAP, after, MAX_KEY_GAP))
+    return [
+        (float(frame), [channels[i].evaluate(timing.to_action(frame)) if i in channels else default
+                        for i, default in enumerate(defaults)])
+        for frame in sorted(frames)
+    ]
+
+
+def _rotation_keys(channels, prop, euler_order, timing):
+    """(game frame, Quaternion) for a rotation track in any of Blender's rotation modes"""
+    if prop == 'rotation_euler':
+        return [(frame, Euler(xyz, euler_order).to_quaternion())
+                for frame, xyz in _track_keys(channels, (0.0, 0.0, 0.0), timing)]
+    if prop == 'rotation_axis_angle':
+        keys = []
+        for frame, (angle, x, y, z) in _track_keys(channels, (0.0, 0.0, 1.0, 0.0), timing):
+            axis = Vector((x, y, z))
+            keys.append((frame, Quaternion(axis.normalized(), angle) if axis.length > 1e-9 else Quaternion()))
+        return keys
+    return _quaternion_keys(channels, timing)
+
+
+def _quaternion_keys(channels, timing):
+    """
+    (game frame, Quaternion) for a rotation_quaternion track. Between keyframes, Blender
+    interpolates each component on its own, which goes wrong when neighbouring keys are in
+    opposite hemispheres (q and -q, same rotation; imported animations have these). So keys
+    are evaluated where they are and slerped in between
+    """
+    defaults = (1.0, 0.0, 0.0, 0.0)
+
+    def at(frame):
+        return Quaternion([channels[i].evaluate(frame) if i in channels else defaults[i] for i in range(4)])
+
+    key_times = sorted({kp.co[0] for c in channels.values() for kp in c.keyframe_points})
+    keys = []
+    for game_frame, _ in _track_keys(channels, defaults, timing):
+        t = timing.to_action(game_frame)
+        after = next((i for i, kt in enumerate(key_times) if kt >= t - 1e-6), len(key_times))
+        if after == len(key_times) or after == 0 or abs(key_times[after] - t) < 1e-6:
+            keys.append((game_frame, at(t)))
+            continue
+        before_time, after_time = key_times[after - 1], key_times[after]
+        q0, q1 = at(before_time).normalized(), at(after_time).normalized()
+        if q0.dot(q1) < 0.0:
+            q1.negate()
+        keys.append((game_frame, q0.slerp(q1, (t - before_time) / (after_time - before_time))))
+    return keys
+
+
+def _normalized_rotation(quat):
+    """
+    Unit quaternion with w >= 0. Rotation tracks store only x, y, z and the game rebuilds
+    w = sqrt(1 - x^2 - y^2 - z^2), so a non unit or negative w quaternion comes out wrong.
+    Keyed quaternions in Blender aren't kept normalized
+    """
+    quat = quat.normalized()
+    if quat.w < 0.0:
+        quat.negate()
+    return quat
+
+
+def _key_durations(keys):
+    """
+    Duration per key, as the game reads them: frames to the next key, 0 on the last key
+    (which holds). See decode_type_6
+    """
+    return [int(keys[k + 1][0] - keys[k][0]) for k in range(len(keys) - 1)] + [0]
+
+
+def _serialize_bone_rotation(dst_lmt, bone, track, keys):
+    parent_quat = None
+    if bone.parent:
+        parent_mat = bone.parent.matrix_local.inverted() @ bone.matrix_local
+        parent_quat = parent_mat.to_quaternion() #convert back to bone space
+
+    # to the game's space, which is what the file stores (keys and ref_data alike)
+    keys = [(frame, _normalized_rotation(parent_quat @ quat if parent_quat is not None else quat))
+            for frame, quat in keys]
+    kf_num = len(keys)
+    track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+    first = keys[0][1]
+    track.ref_data.x = first.x
+    track.ref_data.y = first.y
+    track.ref_data.z = first.z
+    track.ref_data.w = first.w
     if kf_num == 1:
+        # constant rotation: quaternion x, y, z, w is implied
         buffer = KaitaiStream(BytesIO(bytearray(12)))
-        if bone.parent:
-            parent = bone.parent
-            parent_mat = parent.matrix_local.inverted() @ bone.matrix_local
-            parent_quat = parent_mat.to_quaternion() #convert back to bone space
-            track.buffer_type = 4
-            frame, w = fcurve_group.channels[0].keyframe_points[0].co
-            x = fcurve_group.channels[1].keyframe_points[0].co[1]
-            y = fcurve_group.channels[2].keyframe_points[0].co[1]
-            z = fcurve_group.channels[3].keyframe_points[0].co[1]
-            rot = parent_quat @ Quaternion([w, x, y, z])
-            track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
-            track.ref_data.x = rot.x
-            track.ref_data.y = rot.y
-            track.ref_data.z = rot.z
-            track.ref_data.w = rot.w
-            buffer.write_bytes(struct.pack('fff', rot.x, rot.y, rot.z))
-            return buffer, 12
-        else:
-            frame, w = fcurve_group.channels[0].keyframe_points[0].co
-            x = fcurve_group.channels[1].keyframe_points[0].co[1]
-            y = fcurve_group.channels[2].keyframe_points[0].co[1]
-            z = fcurve_group.channels[3].keyframe_points[0].co[1]
-            track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
-            track.ref_data.x = x
-            track.ref_data.y = y
-            track.ref_data.z = z
-            track.ref_data.w = w
-            buffer.write_bytes(struct.pack('fff', x, y, z))
-            return buffer, 12
-    else:
-        buffer = KaitaiStream(BytesIO(bytearray(kf_num * 8)))
-        track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
-        track.ref_data.x = 0.0
-        track.ref_data.y = 0.0
-        track.ref_data.z = 0.0
-        track.ref_data.w = 1.0
-        for k in range(kf_num):
-            if bone.parent:
-                parent = bone.parent
-                parent_mat = parent.matrix_local.inverted() @ bone.matrix_local
-                parent_quat = parent_mat.to_quaternion() #convert back to bone space
-                if k < kf_num - 1:
-                    frame_next = fcurve_group.channels[0].keyframe_points[k + 1].co[0]
-                    if frame_next == track._parent.loop_frames and track._parent.loop_frames > 0:
-                        if k < kf_num - 2:
-                            frame_next = fcurve_group.channels[0].keyframe_points[k + 2].co[0]
-                        else:
-                            frame_next = track._parent.num_frames
-                else:
-                    frame_next = track._parent.num_frames
-                frame, w = fcurve_group.channels[0].keyframe_points[k].co
-                x = fcurve_group.channels[1].keyframe_points[k].co[1]
-                y = fcurve_group.channels[2].keyframe_points[k].co[1]
-                z = fcurve_group.channels[3].keyframe_points[k].co[1]
-                rot = parent_quat @ Quaternion([w, x, y, z])
-                if frame == track._parent.loop_frames and track._parent.loop_frames > 0:
-                    track.ref_data.x = x
-                    track.ref_data.y = y
-                    track.ref_data.z = z
-                    track.ref_data.w = w
-                    continue
-                quat = FrameQuat4_14()
-                quat.from_quat([rot.w, rot.x, rot.y, rot.z], int(frame_next - frame - 1 if frame_next > frame else 0))
-            else:
-                if k < kf_num - 1:
-                    frame_next = fcurve_group.channels[0].keyframe_points[k + 1].co[0]
-                    if frame_next == track._parent.loop_frames and track._parent.loop_frames > 0:
-                        if k < kf_num - 2:
-                            frame_next = fcurve_group.channels[0].keyframe_points[k + 2].co[0]
-                        else:
-                            frame_next = track._parent.num_frames
-                else:
-                    frame_next = track._parent.num_frames
-                frame, w = fcurve_group.channels[0].keyframe_points[k].co
-                x = fcurve_group.channels[1].keyframe_points[k].co[1]
-                y = fcurve_group.channels[2].keyframe_points[k].co[1]
-                z = fcurve_group.channels[3].keyframe_points[k].co[1]
-                if frame == track._parent.loop_frames and track._parent.loop_frames > 0:
-                    track.ref_data.x = x
-                    track.ref_data.y = y
-                    track.ref_data.z = z
-                    track.ref_data.w = w
-                    continue
-                quat = FrameQuat4_14()
-                quat.from_quat([w, x, y, z], int(frame_next - frame - 1 if frame_next > frame else 0))
-            buffer.write_bytes(bytes(quat))
-            frame_counter += frame if frame > 0 else 1
-        return buffer, (kf_num * 8)
+        track.buffer_type = 4
+        buffer.write_bytes(struct.pack('fff', first.x, first.y, first.z))
+        return buffer, 12
 
-def _serialize_bone_location(dst_lmt, bone, track, fcurve_group):
-    kf_num = len(fcurve_group.channels[0].keyframe_points)
-    frame_counter = 1
+    buffer = KaitaiStream(BytesIO(bytearray(kf_num * 8)))
+    for (frame, rot), duration in zip(keys, _key_durations(keys)):
+        frame_quat = FrameQuat4_14()
+        frame_quat.from_quat([rot.w, rot.x, rot.y, rot.z], duration)
+        buffer.write_bytes(bytes(frame_quat))
+    return buffer, (kf_num * 8)
+
+
+def _serialize_bone_location(dst_lmt, bone, track, keys):
+    kf_num = len(keys)
+    track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+    parent_space = None
+    if bone.parent:
+        parent_space = bone.parent.matrix_local.inverted() @ bone.matrix_local
+
     if kf_num == 1:
         buffer = KaitaiStream(BytesIO(bytearray(12)))
         track.buffer_type = 2
-        frame, x = fcurve_group.channels[0].keyframe_points[0].co
-        y = fcurve_group.channels[1].keyframe_points[0].co[1]
-        z = fcurve_group.channels[2].keyframe_points[0].co[1]
-        track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+        x, y, z = keys[0][1]
 
-        if bone.parent:
-            parent_space = bone.parent.matrix_local.inverted() @ bone.matrix_local
-            transform_mat = Matrix.Translation([x, y, z])
-            parent_space_frame = (parent_space @ transform_mat).to_translation()
-            x = parent_space_frame.x
-            y = parent_space_frame.y
-            z = parent_space_frame.z
+        if parent_space is not None:
+            parent_space_frame = (parent_space @ Matrix.Translation([x, y, z])).to_translation()
+            x, y, z = parent_space_frame.x, parent_space_frame.y, parent_space_frame.z
+            written = (x, y, z)
+        elif track.bone_index == ROOT_MOTION_BONE_ID:
+            written = (x, y, z)
+        else:
+            written = (x, z, -y)
+        track.ref_data.x = x * 100.0
+        track.ref_data.y = y * 100.0
+        track.ref_data.z = z * 100.0
+        track.ref_data.w = 1.0
+        buffer.write_bytes(struct.pack('fff', *(v * 100.0 for v in written)))
+        return buffer, 12
+
+    buffer = KaitaiStream(BytesIO(bytearray(kf_num * 16)))
+    for k, ((frame, (x, y, z)), duration) in enumerate(zip(keys, _key_durations(keys))):
+        if parent_space is not None:
+            parent_space_frame = (parent_space @ Matrix.Translation([x, y, z])).to_translation()
+            x, y, z = parent_space_frame.x, parent_space_frame.y, parent_space_frame.z
+        if k == 0:
             track.ref_data.x = x * 100.0
             track.ref_data.y = y * 100.0
             track.ref_data.z = z * 100.0
             track.ref_data.w = 1.0
-            buffer.write_bytes(struct.pack('fff', x * 100.0, y * 100.0, z * 100.0))
-        else:
-            if track.bone_index == 255:
-                track.ref_data.x = x * 100.0
-                track.ref_data.y = y * 100.0
-                track.ref_data.z = z * 100.0
-                track.ref_data.w = 1.0
-                buffer.write_bytes(struct.pack('fff', x * 100.0, y * 100.0, z * 100.0))
-            else:
-                track.ref_data.x = x * 100.0
-                track.ref_data.y = z * 100.0
-                track.ref_data.z = -y * 100.0
-                track.ref_data.w = 1.0
-                buffer.write_bytes(struct.pack('fff', x * 100.0, z * 100.0, -y * 100.0))
-        return buffer, 12
-    else:
-        buffer = KaitaiStream(BytesIO(bytearray(kf_num * 16)))
-        track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
-        track.ref_data.x = 0.0
-        track.ref_data.y = 0.0
-        track.ref_data.z = 0.0
-        track.ref_data.w = 1.0
-        for k in range(kf_num):
-            frame, x = fcurve_group.channels[0].keyframe_points[k].co
-            y = fcurve_group.channels[1].keyframe_points[k].co[1]
-            z = fcurve_group.channels[2].keyframe_points[k].co[1]
+        buffer.write_bytes(struct.pack('fffI', x * 100.0, y * 100.0, z * 100.0, duration))
+    return buffer, (kf_num * 16)
 
-            if k < kf_num - 1:
-                frame_next = fcurve_group.channels[0].keyframe_points[k + 1].co[0]
-                if frame_next == track._parent.loop_frames and track._parent.loop_frames > 0:
-                    if k < kf_num - 2:
-                        frame_next = fcurve_group.channels[0].keyframe_points[k + 2].co[0]
-                    else:
-                        frame_next = track._parent.num_frames
-            else:
-                frame_next = track._parent.num_frames
 
-            if bone.parent:
-                parent_space = bone.parent.matrix_local.inverted() @ bone.matrix_local
-                transform_mat = Matrix.Translation([x, y, z])
-                parent_space_frame = (parent_space @ transform_mat).to_translation()
-                x = parent_space_frame.x
-                y = parent_space_frame.y
-                z = parent_space_frame.z
-                if frame == track._parent.loop_frames and track._parent.loop_frames > 0:
-                    track.ref_data.x = x * 100.0
-                    track.ref_data.y = y * 100.0
-                    track.ref_data.z = z * 100.0
-                    track.ref_data.w = 1.0
-                    continue
-                buffer.write_bytes(struct.pack('fffI', x * 100.0, y * 100.0,
-                                    z * 100.0, int(frame_next - frame if frame_next > frame else 0)))
-            else:
-                if track.bone_index == 255:
-                    if frame == track._parent.loop_frames and track._parent.loop_frames > 0:
-                        track.ref_data.x = x * 100.0
-                        track.ref_data.y = y * 100.0
-                        track.ref_data.z = z * 100.0
-                        track.ref_data.w = 1.0
-                        continue
-                    buffer.write_bytes(struct.pack('fffI', x * 100.0, y * 100.0,
-                                                    z * 100.0, int(frame_next - frame - 1 if frame_next > frame else 0)))
-                else:
-                    if frame == track._parent.loop_frames and track._parent.loop_frames > 0:
-                        track.ref_data.x = x * 100.0
-                        track.ref_data.y = z * 100.0
-                        track.ref_data.z = -y * 100.0
-                        track.ref_data.w = 1.0
-                        continue
-                    buffer.write_bytes(struct.pack('fffI', x * 100.0, z * 100.0,
-                                                    -y * 100.0, int(frame_next - frame - 1 if frame_next > frame else 0)))
-            frame_counter += frame if frame > 0 else 1
-        return buffer, (kf_num * 16)
-
-def _serialize_bone_scale(dst_lmt, track, fcurve_group):
-    kf_num = len(fcurve_group.channels[0].keyframe_points)
-
-    frame_counter = 1
+def _serialize_bone_scale(dst_lmt, track, keys):
+    kf_num = len(keys)
+    track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+    x, y, z = keys[0][1]
+    track.ref_data.x = x
+    track.ref_data.y = y
+    track.ref_data.z = z
+    track.ref_data.w = 1.0
     if kf_num == 1:
         buffer = KaitaiStream(BytesIO(bytearray(12)))
         track.buffer_type = 2
-        frame, x = fcurve_group.channels[0].keyframe_points[0].co
-        y = fcurve_group.channels[1].keyframe_points[0].co[1]
-        z = fcurve_group.channels[2].keyframe_points[0].co[1]
-        track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
-        track.ref_data.x = x
-        track.ref_data.y = y
-        track.ref_data.z = z
-        track.ref_data.w = 1.0
         buffer.write_bytes(struct.pack('fff', x, y, z))
         return buffer, 12
-    else:
-        buffer = KaitaiStream(BytesIO(bytearray(kf_num * 16)))
-        for k in range(kf_num):
-            frame, x = fcurve_group.channels[0].keyframe_points[k].co
-            y = fcurve_group.channels[1].keyframe_points[k].co[1]
-            z = fcurve_group.channels[2].keyframe_points[k].co[1]
-            if k < kf_num - 1:
-                frame_next = fcurve_group.channels[0].keyframe_points[k + 1].co[0]
-            else:
-                frame_next = track._parent.num_frames
-            if k == kf_num - 1:
-                track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
-                track.ref_data.x = x
-                track.ref_data.y = y
-                track.ref_data.z = z
-                track.ref_data.w = 1.0
-            buffer.write_bytes(struct.pack('fffI', x, y, z, int(frame_next - frame - 1 if frame_next > frame else 0)))
-            frame_counter += frame if frame > 0 else 1
-        return buffer, (kf_num * 16)
+
+    buffer = KaitaiStream(BytesIO(bytearray(kf_num * 16)))
+    for (frame, (x, y, z)), duration in zip(keys, _key_durations(keys)):
+        buffer.write_bytes(struct.pack('fffI', x, y, z, duration))
+    return buffer, (kf_num * 16)
+
 
 def filter_armatures(self, obj):
     # TODO: filter by custom properties that indicate is
     # a RE5 compatible armature
     return obj.type == 'ARMATURE'
 
-@blender_registry.register_custom_properties_action("lmt_49", ("re5", "dmc4"))
-@blender_registry.register_blender_prop
-class Lmt49ActionCustomProperties(bpy.types.PropertyGroup):
-    lmt_id: bpy.props.IntProperty(name='LMT index',default=0)
-    num_frames: bpy.props.IntProperty(name='Frames')
-    loop_frames: bpy.props.IntProperty(name='Loop frames')
-    end_pos: bpy.props.FloatVectorProperty(name='Pos',size=3)
-    end_quat: bpy.props.FloatVectorProperty(name='Quat',size=4)
-    events_params_01: bpy.props.IntVectorProperty(size=8)
-    events_params_02: bpy.props.IntVectorProperty(size=8)
 
-    def copy_custom_properties_to(self, dst_obj):
-        for attr_name in self.__annotations__:
-            if type(getattr(self, attr_name)) is str:
-                setattr(dst_obj, attr_name, int(getattr(self, attr_name), 16))
-            else:
-                setattr(dst_obj, attr_name, getattr(self, attr_name))
-
-    # FIXME: dedupe
-    def copy_custom_properties_from(self, src_obj):
-        for attr_name in self.__annotations__:
-            try:
-                setattr(self, attr_name, getattr(src_obj, attr_name))
-            except TypeError:
-                setattr(self, attr_name, hex(getattr(src_obj, attr_name)))
-
-    def copy_from_lmt(self, lmt_act, index):
-        self.lmt_id = index
-        self.num_frames = lmt_act.num_frames
-        self.loop_frames = lmt_act.loop_frames
-        self.end_pos[0] = lmt_act.end_pos.x
-        self.end_pos[1] = lmt_act.end_pos.y
-        self.end_pos[2] = lmt_act.end_pos.z
-        self.end_quat[0] = lmt_act.end_quat.x
-        self.end_quat[1] = lmt_act.end_quat.y
-        self.end_quat[2] = lmt_act.end_quat.z
-        self.end_quat[3] = lmt_act.end_quat.w
-        self.events_params_01 = lmt_act.events_params_01
-        self.events_params_02 = lmt_act.events_params_02 
-
-@blender_registry.register_blender_prop
-class Lmt49Action(bpy.types.PropertyGroup):
-    action: bpy.props.PointerProperty(type=bpy.types.Action)
-    name: bpy.props.StringProperty(name='Action', default='')
-    lmt_id: bpy.props.IntProperty(name='LMT index',default=0)
-    frames: bpy.props.IntProperty()
-    loop_frames: bpy.props.IntProperty()
-    coll_ev: bpy.props.IntVectorProperty(size=8)
-    sfx_ev: bpy.props.IntVectorProperty(size=8)
-
-# class AlbamAction(Lmt49Action, bpy.types.PropertyGroup):
-#     pass
-
+# Named flags of an event value: first bit and bit count. Some flags share bits
+# (e.g. dante_yamato_display and stand_fade_efx), they're kept as found in the game's files.
+# Bits 0-7 are the slot toggles
 GroupHash = {
     'dante_yamato_display': 0xA,
     'stand_fade_efx': 0xA,
@@ -1123,76 +1120,285 @@ GroupBitNum = {
     'sword_trail': 1
 }
 
-@blender_registry.register_blender_props_to_type('TimelineMarker', 'dmc4_event_props')
+EVENT_SLOT_COUNT = 8
+EVENT_KNOWN_BITS = (1 << EVENT_SLOT_COUNT) - 1
+for _name, _bit in GroupHash.items():
+    EVENT_KNOWN_BITS |= ((1 << GroupBitNum[_name]) - 1) << _bit
+
+EVENT_TYPES = [
+    ('Hitbox', 'Hitbox', 'Event of the first event table (hitboxes)', 'MESH_CUBE', 0),
+    ('Sound', 'Sound', 'Event of the second event table (sounds)', 'SPEAKER', 1),
+]
+
+
+def _flag_property(name):
+    bit, count = GroupHash[name], GroupBitNum[name]
+    bits = f"bit {bit}" if count == 1 else f"bits {bit}-{bit + count - 1}"
+    return bpy.props.IntProperty(description=f"Event flag, {bits} of the event value", min=0, max=(1 << count) - 1)
+
+
+def _get_event_type(self):
+    return 1 if self.param_ev_type == 'Sound' else 0
+
+
+def _set_event_type(self, value):
+    self.param_ev_type = EVENT_TYPES[value][0]
+
+
+@blender_registry.register_blender_prop
 class DMC4EventGroup(bpy.types.PropertyGroup):
-    main_sword_display: bpy.props.IntProperty()
-    dante_yamato_display: bpy.props.IntProperty()
-    stand_fade_efx: bpy.props.IntProperty()
-    ex_speedup: bpy.props.IntProperty()
-    stand_fade: bpy.props.IntProperty()
-    stand_flicker: bpy.props.IntProperty()
-    stand_transp: bpy.props.IntProperty()
-    right_foot_ik: bpy.props.IntProperty()
-    left_foot_ik: bpy.props.IntProperty()
-    gun_display: bpy.props.IntProperty()
-    face_swap: bpy.props.IntProperty()
-    stand_sword_disp: bpy.props.IntProperty()
-    sword_trail: bpy.props.IntProperty()
-    slots: bpy.props.BoolVectorProperty(name='Toggles',size=8)
-    param_ev_type: bpy.props.StringProperty()
+    """
+    An LMT event. Its frame is the frame of the action's pose marker named marker_name.
+    Events from .blend files saved before marker_name existed are paired with markers by position
+    """
+    marker_name: bpy.props.StringProperty(name="Marker")
+    main_sword_display: _flag_property('main_sword_display')
+    dante_yamato_display: _flag_property('dante_yamato_display')
+    stand_fade_efx: _flag_property('stand_fade_efx')
+    ex_speedup: _flag_property('ex_speedup')
+    stand_fade: _flag_property('stand_fade')
+    stand_flicker: _flag_property('stand_flicker')
+    stand_transp: _flag_property('stand_transp')
+    right_foot_ik: _flag_property('right_foot_ik')
+    left_foot_ik: _flag_property('left_foot_ik')
+    gun_display: _flag_property('gun_display')
+    face_swap: _flag_property('face_swap')
+    stand_sword_disp: _flag_property('stand_sword_disp')
+    sword_trail: _flag_property('sword_trail')
+    extra_bits: bpy.props.IntProperty(
+        name="Other Bits",
+        description="Bits of the event value that aren't slots or named flags, kept as imported",
+        min=0,
+    )
+    slots: bpy.props.BoolVectorProperty(name='Toggles', size=EVENT_SLOT_COUNT)
+    param_ev_type: bpy.props.StringProperty()  # 'Hitbox' or 'Sound'
+    ev_type: bpy.props.EnumProperty(name="Type", items=EVENT_TYPES, get=_get_event_type, set=_set_event_type)
 
     def setup(self, ev_type, value):
         for k, v in GroupHash.items():
-            val = (value >> v) & ((1 << GroupBitNum[k]) - 1)
-            setattr(self, k, val)
-            #self.__dict__.update({k:val})
-        for i in range(8):
-            self.slots[i] = ((value >> i) & 1)
+            setattr(self, k, (value >> v) & ((1 << GroupBitNum[k]) - 1))
+        for i in range(EVENT_SLOT_COUNT):
+            self.slots[i] = bool((value >> i) & 1)
+        self.extra_bits = value & ~EVENT_KNOWN_BITS
         self.param_ev_type = ev_type
 
-    def copy_custom_properties_to(self, dst_obj):
-        for attr_name in self.__annotations__:
-            if type(getattr(self, attr_name)) is str:
-                setattr(dst_obj, attr_name, int(getattr(self, attr_name), 16))
-            else:
-                setattr(dst_obj, attr_name, getattr(self, attr_name))
+    def encode(self):
+        """The event value written to the LMT file"""
+        value = self.extra_bits & ~EVENT_KNOWN_BITS
+        for k, v in GroupHash.items():
+            value |= (getattr(self, k) & ((1 << GroupBitNum[k]) - 1)) << v
+        for i in range(EVENT_SLOT_COUNT):
+            value |= int(self.slots[i]) << i
+        return value
 
-    # FIXME: dedupe
-    def copy_custom_properties_from(self, src_obj):
-        for attr_name in self.__annotations__:
-            try:
-                setattr(self, attr_name, getattr(src_obj, attr_name))
-            except TypeError:
-                setattr(self, attr_name, hex(getattr(src_obj, attr_name)))
+
+def _on_active_event_changed(self, context):
+    """Select the event's marker and move the playhead to it"""
+    action = self.id_data
+    if not isinstance(action, bpy.types.Action):
+        return
+    try:
+        event = self.event_markers[self.active_event_index]
+    except IndexError:
+        return
+    marker = find_event_marker(action, event, self.active_event_index)
+    if marker is None:
+        return
+    for m in action.pose_markers:
+        m.select = m == marker
+    context.scene.frame_current = marker.frame
+
+
+@blender_registry.register_custom_properties_action("lmt_49", ("re5", "dmc4"))
+@blender_registry.register_blender_prop
+class Lmt49ActionCustomProperties(bpy.types.PropertyGroup):
+    lmt_id: bpy.props.IntProperty(name='Slot', description="Index of this animation in the LMT file", default=0, min=0)
+    num_frames: bpy.props.IntProperty(name='Frames', description="Length of the animation", min=0)
+    loop_frames: bpy.props.IntProperty(
+        name='Loop Start',
+        description="Frame the animation loops back to. -1 means it doesn't loop",
+        default=-1,
+        min=-1,
+    )
+    source_fps: bpy.props.FloatProperty(
+        name="Frame Rate",
+        description="Frame rate the action was made at. The game plays at 60 fps, export converts. "
+                    "Frames and Loop Start are in game frames",
+        default=FRAMERATE,
+        min=1.0,
+    )
+    end_pos: bpy.props.FloatVectorProperty(name='End Position', size=3)
+    end_quat: bpy.props.FloatVectorProperty(name='End Rotation', size=4)
+    events_params_01: bpy.props.IntVectorProperty(name="Hitbox Slot Values", size=EVENT_SLOT_COUNT, min=0, max=0xFFFF)
+    events_params_02: bpy.props.IntVectorProperty(name="Sound Slot Values", size=EVENT_SLOT_COUNT, min=0, max=0xFFFF)
+    event_markers: bpy.props.CollectionProperty(type=DMC4EventGroup)
+    active_event_index: bpy.props.IntProperty(update=_on_active_event_changed)
+
+    def copy_from_lmt(self, lmt_act, index):
+        self.lmt_id = index
+        self.num_frames = lmt_act.num_frames
+        self.loop_frames = lmt_act.loop_frames
+        self.end_pos[0] = lmt_act.end_pos.x
+        self.end_pos[1] = lmt_act.end_pos.y
+        self.end_pos[2] = lmt_act.end_pos.z
+        self.end_quat[0] = lmt_act.end_quat.x
+        self.end_quat[1] = lmt_act.end_quat.y
+        self.end_quat[2] = lmt_act.end_quat.z
+        self.end_quat[3] = lmt_act.end_quat.w
+        self.events_params_01 = lmt_act.events_params_01
+        self.events_params_02 = lmt_act.events_params_02
+
+
+@blender_registry.register_blender_prop
+class Lmt49Action(bpy.types.PropertyGroup):
+    """An animation of an LMT file. Its LMT data lives in the action's custom properties"""
+    action: bpy.props.PointerProperty(type=bpy.types.Action)
+    name: bpy.props.StringProperty(name='Action', default='')
+
+
+def _on_active_anim_changed(self, context):
+    """Play the selected animation on the LMT's armature"""
+    try:
+        action = self.actions[self.active_id].action
+    except IndexError:
+        return
+    if action is None:
+        return
+    link_legacy_events(action)
+    if self.armature:
+        self.armature.animation_data_create()
+        self.armature.animation_data.action = action
 
 
 @blender_registry.register_blender_prop
 class AlbamActionGroup(bpy.types.PropertyGroup):
-    #Group of actions by LMT file
+    """An LMT file: its animations, slot count and armature"""
     actions: bpy.props.CollectionProperty(type=Lmt49Action)
-    active_id: bpy.props.IntProperty(name="Active action")
-    num_slots: bpy.props.IntProperty(name="Track count")
-    #name: bpy.props.StringProperty()
-    armature: bpy.props.PointerProperty(type=bpy.types.Object, poll=filter_armatures)
-    export_path: bpy.props.StringProperty()
+    active_id: bpy.props.IntProperty(name="Active Animation", update=_on_active_anim_changed)
+    num_slots: bpy.props.IntProperty(name="Slots", description="Number of animation slots in the LMT file", min=0)
+    armature: bpy.props.PointerProperty(
+        type=bpy.types.Object,
+        poll=filter_armatures,
+        name="Armature",
+        description="Armature the animations play on",
+    )
+    export_path: bpy.props.StringProperty(subtype="FILE_PATH")
 
-    def add(self, name=''):
-        action = self.actions.add()
-        action.name = name
-        return action
-        
+    def add(self, action):
+        item = self.actions.add()
+        item.name = action.name
+        item.action = action
+        return item
+
+    def slot_counts(self):
+        counts = {}
+        for item in self.actions:
+            if item.action:
+                slot = get_lmt_props(item.action).lmt_id
+                counts[slot] = counts.get(slot, 0) + 1
+        return counts
+
+    def free_slot(self):
+        used = self.slot_counts()
+        return next(i for i in range(len(used) + 1) if i not in used)
+
 
 @blender_registry.register_blender_prop_albam(name="lmt_groups")
 class AlbamLmtGroups(bpy.types.PropertyGroup):
-    #Meta collection of LMT files
+    """The LMT files in the scene"""
     anim_group: bpy.props.CollectionProperty(type=AlbamActionGroup)
     active_group_id: bpy.props.IntProperty()
-    active_group: bpy.props.PointerProperty(type=AlbamActionGroup)
 
     def add(self, name=''):
         group = self.anim_group.add()
         group.name = name
         return group
+
+
+def get_lmt_props(action):
+    return action.albam_custom_properties.get_custom_properties_for_appid("dmc4")
+
+
+def get_active_lmt(context):
+    groups = context.scene.albam.lmt_groups
+    try:
+        return groups.anim_group[groups.active_group_id]
+    except IndexError:
+        return None
+
+
+def get_active_anim(context):
+    """The active LMT's selected animation list item, or None"""
+    lmt = get_active_lmt(context)
+    if lmt is None:
+        return None
+    try:
+        return lmt.actions[lmt.active_id]
+    except IndexError:
+        return None
+
+
+def get_active_event(context):
+    """(action, event, marker) of the selected event of the selected animation, or None"""
+    anim = get_active_anim(context)
+    if anim is None or anim.action is None:
+        return None
+    props = get_lmt_props(anim.action)
+    try:
+        event = props.event_markers[props.active_event_index]
+    except IndexError:
+        return None
+    return anim.action, event, find_event_marker(anim.action, event, props.active_event_index)
+
+
+def find_event_marker(action, event, index):
+    if event.marker_name:
+        return action.pose_markers.get(event.marker_name)
+    # events from .blend files saved before marker_name existed are paired by position
+    if index < len(action.pose_markers):
+        return action.pose_markers[index]
+    return None
+
+
+def link_legacy_events(action):
+    """Store the marker name in events that are still paired with markers by position"""
+    props = get_lmt_props(action)
+    if all(event.marker_name for event in props.event_markers):
+        return
+    taken = {event.marker_name for event in props.event_markers if event.marker_name}
+    for i, event in enumerate(props.event_markers):
+        if event.marker_name:
+            continue
+        marker = find_event_marker(action, event, i)
+        if marker is None:
+            continue
+        if marker.name in taken:
+            marker.name = unique_marker_name(action, marker.name)
+        event.marker_name = marker.name
+        taken.add(marker.name)
+
+
+def unique_marker_name(action, base):
+    names = {m.name for m in action.pose_markers}
+    name = base
+    n = 2
+    while name in names:
+        name = f"{base}.{n:03d}"
+        n += 1
+    return name
+
+
+def _import_events(action, custom_property, events, ev_type):
+    """Events are stored as (value, duration) pairs, the first starting at frame 0"""
+    prefix = "ev1" if ev_type == "Hitbox" else "ev2"
+    frame = 0
+    for event in events:
+        marker = action.pose_markers.new(unique_marker_name(action, f"{prefix}_{frame}_{event.group_id}"))
+        marker.frame = frame
+        event_prop = custom_property.event_markers.add()
+        event_prop.setup(ev_type, event.group_id)
+        event_prop.marker_name = marker.name
+        frame += event.frame
 
 
 @blender_registry.register_blender_prop_albam(name='import_options_lmt')
