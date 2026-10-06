@@ -71,6 +71,22 @@ def read(sub):
     return Keyframe(header, vtype, frames, params)
 
 
+PARAM_COUNT = {"f32": 2, "u32": 2, "color": 8, "vec3": 6, "fixangle": 6}   # values per key
+INTEGER_TYPES = ("u32", "color", "fixangle")
+
+
+def encode(kf):
+    """EFL_KEYFRAME_INDEX header (KeyframeNum = key count) + keys, padded to 16 bytes."""
+    if len(kf.frames) > 0xFF:
+        raise ValueError("at most 255 keys")
+    fmt, _size = _KEY_FORMATS[kf.vtype]
+    out = bytearray(struct.pack("<I", (kf.header & ~0xFF) | len(kf.frames)))
+    for frame, param in zip(kf.frames, kf.params):
+        out += struct.pack("<I", frame) + struct.pack(fmt, *param)
+    out += bytes(-len(out) % 16)
+    return bytes(out)
+
+
 def draw_rates(kf, rng):
     """The per-particle random(s) a keyframe uses, drawn once at spawn."""
     if kf.vtype == "vec3":

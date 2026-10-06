@@ -4,7 +4,7 @@ Each record becomes an Empty at its generator's offset, attached to joint Parent
 picked in the import options. All block fields are stored as custom properties. PrimModel
 particles get real meshes (ported builders), Polygon and Billboard particles get textured quads, and
 particles get an emissive material using their base texture. Nothing is simulated or animated.
-Not exported: the parser in .efl can write files, but nothing maps Blender edits back yet.
+Export (effect_export.py) writes the record objects' efl_* properties and generator transforms back.
 
 Approximations (not verified in game, see the plan):
 Verified against DX9 (efl_import_plan.md):
@@ -12,7 +12,7 @@ Verified against DX9 (efl_import_plan.md):
   Emission(src * Fs) + Transparent(Fd); reverse-subtract (darkening) becomes a Transparent factor.
 - TransMode is a scene-pass mask; particles without the main-view bit (1) get no geometry.
 - Billboards are Scale x pattern pixels (x AspectRatio) centimetres, facing the camera; colour = Color0 x Intensity.
-Approximations: static mode shows the first flipbook frame; Polygon quads lie in the XY plane.
+Approximations: static mode shows the first flipbook frame.
 - With "Simulate particles", Billboard/Polygon/PrimModel records become animated particle systems
   (effect_sim.py + efl/sim.py); otherwise one static shape per record.
 """
@@ -27,6 +27,7 @@ from albam.exceptions import AlbamCheckFailure
 from albam.registry import blender_registry
 from .efl import EffectList, EflError, VERSION_DX9
 from .efl import ean, efs
+from .efl.edit import block_props, keyframe_props, sub_props
 from .efl.schema import bgra_to_rgba
 from .efl.primmodel import build_from_block
 from .efl.sim import CLOTH_TYPES, ROT_ORDERS, emission_space, keyframes_of as sim_keyframes_of
@@ -103,8 +104,59 @@ def load_efl(file_item, context):
     return None   # objects are linked into their own collection already
 
 
+OPTION_NAMES = ("build_geometry", "load_textures", "simulate", "sim_frames")
+
+
+def rebuild_effect(context, root, efl_bytes):
+    """Replace an imported effect with one built from efl_bytes (same file path, armature, start frame and import
+    options); the new root's source bytes are efl_bytes. Returns the new root."""
+    efl = EffectList.from_bytes(efl_bytes)
+    asset = root.albam_asset
+    app_id, relative_path = asset.app_id, asset.relative_path
+    stem = root.get("efl_stem") or (root.name[4:] if root.name.startswith("EFL_") else root.name)
+    stored = root.get("efl_options")
+    scene_options = context.scene.albam.import_options_efl
+    options = SimpleNamespace(**{name: (stored[name] if stored is not None and name in stored
+                                        else getattr(scene_options, name)) for name in OPTION_NAMES})
+    armature = root.parent if root.parent is not None and root.parent.type == "ARMATURE" else None
+    start = root.get("efl_start_frame", context.scene.frame_current)
+    root_basis = root.matrix_basis.copy()
+    old_collection = root.users_collection[0] if root.users_collection else None
+    parent_collection = context.scene.collection
+    if old_collection is not None:
+        for candidate in [context.scene.collection] + list(bpy.data.collections):
+            if old_collection.name in candidate.children:
+                parent_collection = candidate
+                break
+
+    exportable = context.scene.albam.exportable.file_list
+    for i in reversed(range(len(exportable))):
+        if exportable[i].bl_object == root:
+            exportable.remove(i)
+    doomed = {o for o in bpy.data.objects if o.get("efl_root") == root}
+    if old_collection is not None:
+        doomed |= set(old_collection.all_objects)
+    doomed.add(root)
+    from . import effect_sim
+    for ob in doomed:
+        effect_sim.forget(ob.name)
+        bpy.data.objects.remove(ob)
+    if old_collection is not None:
+        bpy.data.collections.remove(old_collection)
+
+    frame = context.scene.frame_current
+    context.scene.frame_current = int(start)   # the builder starts playback and generator keys here
+    try:
+        builder = _EffectBuilder(app_id, context, stem, armature, options, parent_collection)
+        new_root = builder.build(efl, relative_path, efl_bytes)
+    finally:
+        context.scene.frame_current = frame
+    new_root.matrix_basis = root_basis
+    return new_root
+
+
 class _EffectBuilder:
-    def __init__(self, app_id, context, stem, armature, options):
+    def __init__(self, app_id, context, stem, armature, options, parent_collection=None):
         self.app_id = app_id
         self.context = context
         self.stem = stem
@@ -116,7 +168,7 @@ class _EffectBuilder:
         self.efs = {}
         self.current_generator = None
         self.materials = {}
-        parent = context.collection or context.scene.collection
+        parent = parent_collection or context.collection or context.scene.collection
         self.collection = bpy.data.collections.new(f"EFL_{stem}")
         parent.children.link(self.collection)
 
@@ -132,6 +184,8 @@ class _EffectBuilder:
         if self.armature:
             root.parent = self.armature
         root["efl_path"] = relative_path
+        root["efl_stem"] = self.stem
+        root["efl_options"] = {name: getattr(self.options, name) for name in OPTION_NAMES}
         root["efl_header"] = {"base_fps": efl.base_fps, "record_count": len(efl.records),
                               "has_unit_generator": efl.unit_gen is not None}
         root["efl_note"] = ("Approximate preview (static shapes, or simulated particles). Ranges are stored "
@@ -140,6 +194,14 @@ class _EffectBuilder:
             effect_sim.store_source(root, efl_bytes, self.context.scene.frame_current)
         for index, record in enumerate(efl.records):
             self.build_record(index, record, root)
+        # export (effect_export.py) rebuilds the file from these bytes and the record objects' properties
+        root.albam_asset.original_bytes = efl_bytes
+        root.albam_asset.app_id = self.app_id
+        root.albam_asset.relative_path = relative_path
+        root.albam_asset.extension = "efl"
+        exportable = self.context.scene.albam.exportable.file_list.add()
+        exportable.bl_object = root
+        return root
 
     def build_record(self, index, record, root):
         gen, ptcl = record.gen, record.ptcl
@@ -149,11 +211,16 @@ class _EffectBuilder:
         ob.empty_display_type = "ARROWS"
         ob.empty_display_size = 0.05
         ob["efl_record"] = index
+        ob["efl_root"] = root
         ob["efl_particle_type"] = ptcl_name
         ob["efl_move_type"] = move_name
+        keyframes, subs = {}, {}
         for key, block in record.blocks():
             if block is not None:
-                ob[f"efl_{key}"] = _block_props(block)
+                ob[f"efl_{key}"] = block_props(block)
+                keyframes[key], subs[key] = keyframe_props(block), sub_props(block)
+        ob["efl_kf"] = keyframes      # {slot: {offset field: keyframe}}, written back by export
+        ob["efl_sub"] = subs          # {slot: {offset field: collision/culling fields}}
 
         if gen is not None:
             ob.location = [c * SCALE for c in gen.get("Pos")]
@@ -231,7 +298,7 @@ class _EffectBuilder:
     def animate_generator(self, ob, gen, index):
         """Generator keyframes (updateWorldMatrix 0x96BE10): 0x1D8 position, 0x1DC Euler rotation (AxisFlags
         order), 0x1CC scale, on the generator timer; baked as F-curves on the generator Empty."""
-        keys = sim_keyframes_of(gen, {"KeyframeParamOffset_1d8": "pos", "KeyframeParamOffset_1dc": "rot",
+        keys = sim_keyframes_of(gen, {"KeyframePosParamOffset": "pos", "KeyframeRotParamOffset": "rot",
                                       "KeyframeScaleParamOffset": "scale"})
         if not keys:
             return
@@ -296,8 +363,7 @@ class _EffectBuilder:
         if ptcl.type == 6:
             mesh = self._prim_model_mesh(ptcl, name)
         elif ptcl.type == 2 and ptcl.has("Width"):
-            w, h = ptcl.get("Width")[0], ptcl.get("Height")[0]
-            mesh = _quad_mesh(f"{name}_polygon", w, h)
+            mesh = self._polygon_mesh(ptcl, name)
         elif ptcl.type == 0 and ptcl.has("AspectRatio"):
             pivot = (0.0, 0.0)
             if ptcl.get("ParticleOptionFlag") & 0x10000:   # PAT_CENTER: the particle sits at pixel (cx, cy) of the cell
@@ -440,6 +506,39 @@ class _EffectBuilder:
         for loop_index, (u, v) in enumerate(prim.uvs):
             uv_layer.data[loop_index].uv = (u, 1.0 - v)
         _set_edge_alpha(mesh, prim.alpha)
+        _set_shape_basis(mesh, prim.basis)
+        mesh.update()
+        return mesh
+
+    def _polygon_mesh(self, ptcl, name):
+        """Polygon quad (sub_9B54C0): Width / Height are half-extents; PolygonFixType picks the pivot, PolygonAxis
+        the plane, DistortRate scales each corner. Carries the shape basis so keyframed sizes can be rebuilt."""
+        w, h = ptcl.get("Width")[0], ptcl.get("Height")[0]
+        pivot = ptcl.get("PolygonFixType")
+        if pivot == 9:   # PatCenter of the first flipbook cell
+            fw, fh = self.frame_size(ptcl)
+            cx, cy = ptcl.get("PatCenter") if ptcl.has("PatCenter") else (fw / 2, fh / 2)
+            u, v = (cx / fw * 2 if fw else 1.0), (cy / fh * 2 if fh else 1.0)
+            (a0, a1), (b0, b1) = (-u, 2 - u), (v - 2, v)
+        else:
+            (a0, a1), (b0, b1) = POLYGON_PIVOTS.get(pivot, POLYGON_PIVOTS[0])
+        axis_a, axis_b = POLYGON_PLANES.get(ptcl.get("PolygonAxis"), POLYGON_PLANES[4])
+        distort = list(ptcl.get("DistortRate")) if ptcl.has("DistortRate") else [1.0] * 4
+        corners = ((a0, b1), (a1, b1), (a0, b0), (a1, b0))   # c0..c3, DistortRate order
+        basis = []
+        for (ka, kb), d in zip(corners, distort):
+            basis.append((tuple(c * ka * d for c in axis_a), (0.0, 0.0, 0.0),
+                          tuple(c * kb * d for c in axis_b), (0.0, 0.0, 0.0)))
+        verts = [tuple((A[i] * w + C[i] * h) * SCALE for i in range(3)) for A, _B, C, _D in basis]
+        if not any(any(v) for v in verts):
+            return None
+        mesh = bpy.data.meshes.new(f"{name}_polygon")
+        mesh.from_pydata(verts, [], [(2, 3, 1, 0)])
+        uv_layer = mesh.uv_layers.new(name="UVMap")
+        for loop_index, uv in enumerate(((0, 0), (1, 0), (1, 1), (0, 1))):
+            uv_layer.data[loop_index].uv = uv
+        _set_edge_alpha(mesh, [1.0] * 4)
+        _set_shape_basis(mesh, basis)
         mesh.update()
         return mesh
 
@@ -501,11 +600,16 @@ class _EffectBuilder:
     def image_for(self, texture_path):
         if texture_path in self.images:
             return self.images[texture_path]
-        image = None
+        image = next((im for im in bpy.data.images if im.get("efl_texture") == texture_path), None)
+        if image is not None:   # loaded by an earlier import or rebuild
+            self.images[texture_path] = image
+            return image
         source = SimpleNamespace(materials_data=SimpleNamespace(textures=[texture_path]))
         try:
             images = build_blender_textures(self.app_id, self.context, source)
             image = images[0] if images else None
+            if image is not None:
+                image["efl_texture"] = texture_path
         except KeyError:
             print(f"EFL: texture {texture_path}.tex not found under the Game Files roots")
         except Exception as err:   # a bad texture shouldn't stop the effect import
@@ -515,6 +619,29 @@ class _EffectBuilder:
 
 
 # ---------------------------------------------------------------------------------------------
+
+# Polygon pivots (PolygonFixType): ((a0, a1), (b0, b1)) in units of the half-extents W, H
+POLYGON_PIVOTS = {0: ((-1, 1), (-1, 1)), 1: ((0, 2), (-2, 0)), 2: ((-2, 0), (-2, 0)), 3: ((0, 2), (0, 2)),
+                  4: ((-2, 0), (0, 2)), 5: ((-1, 1), (-2, 0)), 6: ((-1, 1), (0, 2)), 7: ((0, 2), (-1, 1)),
+                  8: ((-2, 0), (-1, 1))}
+# Polygon planes (PolygonAxis): directions of the width (a) and height (b) coordinates, game axes
+POLYGON_PLANES = {0: ((0, 1, 0), (0, 0, 1)), 1: ((0, -1, 0), (0, 0, 1)), 2: ((-1, 0, 0), (0, 0, 1)),
+                  3: ((1, 0, 0), (0, 0, 1)), 4: ((1, 0, 0), (0, 1, 0)), 5: ((-1, 0, 0), (0, 1, 0)),
+                  6: ((1, 0, 0), (0, 1, 0))}
+SHAPE_BASIS_ATTRS = ("shape_a", "shape_b", "shape_c", "shape_d")
+
+
+def _set_shape_basis(mesh, basis):
+    """Per-vertex shape basis (game cm -> Blender units) and the rest position, for the particle node group's
+    per-particle shape rebuild."""
+    if len(basis) != len(mesh.vertices):
+        return
+    for i, name in enumerate(SHAPE_BASIS_ATTRS):
+        attr = mesh.attributes.new(name, "FLOAT_VECTOR", "POINT")
+        attr.data.foreach_set("vector", [c * SCALE for vectors in basis for c in vectors[i]])
+    rest = mesh.attributes.new("src_co", "FLOAT_VECTOR", "POINT")
+    rest.data.foreach_set("vector", [c for v in mesh.vertices for c in v.co])
+
 
 def _quaternion(xyzw):
     x, y, z, w = xyzw
@@ -661,31 +788,3 @@ def _build_material(name, image, src, dst, op):
     links.new(transparent.outputs[0], add.inputs[1])
     links.new(add.outputs[0], out.inputs["Surface"])
     return mat
-
-
-def _idprop(value):
-    """Blender ID properties: 32-bit ints, flat numeric arrays."""
-    if isinstance(value, list):
-        flat = []
-        stack = list(value)
-        while stack:
-            item = stack.pop(0)
-            if isinstance(item, list):
-                stack[0:0] = item
-            else:
-                flat.append(item)
-        if any(isinstance(v, int) and not -2 ** 31 <= v < 2 ** 31 for v in flat):
-            return [float(v) for v in flat]
-        return flat
-    if isinstance(value, int) and not -2 ** 31 <= value < 2 ** 31:
-        return f"{value:#010x}"
-    return value
-
-
-def _block_props(block):
-    props = {"type": block.type, "type_name": block.type_name, "struct": block.struct.name}
-    for name, value in block.fields().items():
-        props[name] = _idprop(value)
-    for name, value in block.bits().items():
-        props[name] = _idprop(value)
-    return props

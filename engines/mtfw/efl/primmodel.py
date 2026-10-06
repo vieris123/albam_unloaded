@@ -26,6 +26,7 @@ class PrimMesh:
     faces: list = field(default_factory=list)      # vertex index quads
     uvs: list = field(default_factory=list)        # per face corner, same order as faces
     alpha: list = field(default_factory=list)      # per vertex: 0.0 on borders when edge alpha applies
+    basis: list = field(default_factory=list)      # per vertex: 4 vectors, vertex = sum(basis[i] * shape[i])
 
 
 def _place(axis, s, c, h):
@@ -64,31 +65,39 @@ def build(prim_type, axis, shape, rot_div, rot_tex_div, rot_start, rot_end,
     r0, r1, h0, h1 = (float(v) for v in shape)
     family = prim_type // 2            # 0 ring, 1 sphere, 2 grid
 
-    def point(j, k):
-        """Corner between cells: column j (absolute), row k (absolute)."""
-        if family == 1:
+    zero = (0.0, 0.0, 0.0)
+
+    def basis(j, k):
+        """Corner between cells (column j, row k) as 4 vectors: the corner is linear in (r0, r1, h0, h1), so
+        keyframed shapes can be rebuilt as sum(basis[i] * shape[i]) (the game rebuilds the mesh per frame)."""
+        if family == 1:   # sphere: ring radius sin(theta) * r0, height cos(theta) * h0 + h1
             theta = k * math.pi / m
-            ring_r = math.sin(theta) * r0
-            height = math.cos(theta) * h0 + h1
             phi = (j - (n >> 1)) * 2.0 * math.pi / n
-            return _place(axis, math.sin(phi) * ring_r, math.cos(phi) * ring_r, height)
+            st = math.sin(theta)
+            return (_place(axis, math.sin(phi) * st, math.cos(phi) * st, 0.0), zero,
+                    _place(axis, 0.0, 0.0, math.cos(theta)), _place(axis, 0.0, 0.0, 1.0))
         t = k / m
-        if family == 2:
+        if family == 2:   # grid: width lerp(r0, r1), depth lerp(h0, h1)
             u = j / n - 0.5
-            width = r0 + (r1 - r0) * t
-            depth = h0 + (h1 - h0) * t
-            return _place(axis, u * width, depth, 0.0)
-        phi = (j - (n >> 1)) * 2.0 * math.pi / n
-        radius = r0 + (r1 - r0) * t
-        height = h0 + (h1 - h0) * t
-        return _place(axis, math.sin(phi) * radius, math.cos(phi) * radius, height)
+            return (_place(axis, u * (1 - t), 0.0, 0.0), _place(axis, u * t, 0.0, 0.0),
+                    _place(axis, 0.0, 1 - t, 0.0), _place(axis, 0.0, t, 0.0))
+        phi = (j - (n >> 1)) * 2.0 * math.pi / n   # ring: radius lerp(r0, r1), height lerp(h0, h1)
+        sp, cp = math.sin(phi), math.cos(phi)
+        return (_place(axis, sp * (1 - t), cp * (1 - t), 0.0), _place(axis, sp * t, cp * t, 0.0),
+                _place(axis, 0.0, 0.0, 1 - t), _place(axis, 0.0, 0.0, t))
+
+    def point(j, k):
+        vectors = basis(j, k)
+        return tuple(sum(v[c] * w for v, w in zip(vectors, (r0, r1, h0, h1))) for c in range(3)), vectors
 
     mesh = PrimMesh()
     index = {}
     for k in range(hori_start, hori_end + 2):
         for j in range(rot_start, rot_end + 2):
             index[(j, k)] = len(mesh.vertices)
-            mesh.vertices.append(point(j, k))
+            vertex, vectors = point(j, k)
+            mesh.vertices.append(vertex)
+            mesh.basis.append(vectors)
             border = j in (rot_start, rot_end + 1) or k in (hori_start, hori_end + 1)
             mesh.alpha.append(0.0 if edge_alpha and border else 1.0)
 

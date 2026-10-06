@@ -69,11 +69,12 @@ class Block:
         self.type = btype           # record type byte
         self.data = bytearray(data)
         self.offset = offset        # content offset in the source file (None for new blocks)
-        self.struct = schema.struct_for(kind, btype) if kind != "raw" else None
+        self.struct = schema.struct_for_data(kind, btype, self.data) if kind != "raw" else None
 
     def __repr__(self):
         name = schema.type_name(self.kind, self.type) if self.struct else "raw"
-        return f"<Block {self.kind}:{name} @{self.offset:#x} len={len(self.data):#x}>"
+        where = "new" if self.offset is None else f"{self.offset:#x}"
+        return f"<Block {self.kind}:{name} @{where} len={len(self.data):#x}>"
 
     @property
     def type_name(self):

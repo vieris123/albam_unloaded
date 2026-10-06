@@ -45,12 +45,19 @@ Sources (DX9):
     light      Light (10): AttenuateStart/End (+Add per frame) x scale; colour x intensity; linear falloff
     strip      PolygonStrip (15, sword trail): the last LineOfsNum edge pairs P +/- axis*Width (pivot WidthPlaceRate),
                axis rotated by Rot(+RotAdd) and scaled by the particle scale (buildPolygonStripEdgeVert 0x98D240)
-    keyframes  efl/keyframe.py; per-particle random rates drawn at spawn; InitOnly keys are evaluated at spawn only
+    keyframes  efl/keyframe.py; per-particle random rates drawn at spawn; a keyed value is absolute (its *Add is
+               ignored); InitOnly keys are evaluated once at spawn and the *Add field applies after that
+    shape      Polygon (2): Width / Height half-extents (+Add, or keyframes clamped >= 0; <= 0 kills when not keyed);
+               PrimModel (6): Radius0/1, Height0/1 (+Add, or keyframes), rebuilt per frame in the game (sub_990310)
+    uv scroll  Model (5) with ModelAnimFlag 0x10: offset += ScrollU/V (or their keyframes) per frame, wrapped to [-1, 1]
+    range key  generator 0x1D4 keyframe: replaces Range (s and r) at spawn with the generator timer (sub_999640)
+    rope keys  EFL_PARAM_CHAIN Length (total), Rot / BlendRot (direction recomputed per frame), BlendRate keyframes;
+               PathChain ropes use the generator timer, CHAIN trails the particle timer (moveChain 0x994C20)
     colour     rgb * Intensity (clamped 0..127) as in the XfPrim vertex shader
-Not modelled: collision, the game's RNG table, LoopFrameDist/SetFrameDist fractional spreading, keyframed PrimModel
-radius/height, external wind on ropes, rope response to emitter motion for PathChain (the rope lives in generator
-space), hermite/spline .efs interpolation (linear here), cloth wind (force mode) and its response to emitter motion
-(cloth lives in generator space), the ZIGZAG ease-in weight (0x100).
+Not modelled: collision with real stage geometry, the game's RNG table, LoopFrameDist/SetFrameDist fractional
+spreading, external wind on ropes and cloth, rope and cloth response to emitter motion (they live in generator space),
+world-fixed rope pulls (ChainOptionFlag 1/2), hermite/spline .efs interpolation (linear here), the keyed spawn path's
+skipped burst smear, Polygon DivideNum strips (same look), the ZIGZAG ease-in weight (0x100).
 """
 from __future__ import annotations
 
@@ -83,11 +90,17 @@ _PTCL_KEYS = {
     "KeyframeColorParamOffset": "color", "KeyframePatNoParamOffset": "pattern",
     "KeyframeAngleParamOffset": "angle", "KeyframeRotParamOffset": "rot",
     "KeyframeModelScaleParamOffset": "model_scale",
+    "KeyframeRadius0ParamOffset": "shape0", "KeyframeRadius1ParamOffset": "shape1",
+    "KeyframeHeight0ParamOffset": "shape2", "KeyframeHeight1ParamOffset": "shape3",
+    "KeyframeWidthParamOffset": "shape0", "KeyframeHeightParamOffset": "shape2",
+    "KeyframeScrollUParamOffset": "scroll_u", "KeyframeScrollVParamOffset": "scroll_v",
 }
+_ROPE_KEYS = {"KeyframeLengthParamOffset": "length", "KeyframeChainRotParamOffset": "rot",
+              "KeyframeBlendRotParamOffset": "blend_rot", "KeyframeBlendRateParamOffset": "blend_rate"}
 _MOVE_KEYS = {"KeyframeRotParamOffset": "move_rot", "KeyframeSpeedParamOffset": "speed",
               "KeyframeFallSpeedParamOffset": "fall"}
-_GEN_KEY_FIELDS = ("KeyframeScaleParamOffset", "KeyframeSetNumParamOffset", "KeyframeParamOffset_1d4",
-                   "KeyframeParamOffset_1d8", "KeyframeParamOffset_1dc")
+_GEN_KEY_FIELDS = ("KeyframeScaleParamOffset", "KeyframeSetNumParamOffset", "KeyframeRangeParamOffset",
+                   "KeyframePosParamOffset", "KeyframeRotParamOffset")
 
 
 def _rf(rng, pair):
@@ -185,6 +198,8 @@ class Particle:
     strip: dict = None                           # PolygonStrip particles
     light: dict = None                           # Light particles
     coll: dict = None                            # ground-plane collision state
+    shape: dict = None                           # Polygon / PrimModel size parameters
+    scroll: dict = None                          # Model UV scroll
     _rope: list = None
     _path: list = None
     _track: list = None
@@ -203,6 +218,23 @@ class Particle:
             age = 0
         timer = age if kf.uses_particle_age else self.birth + age
         return kfm.evaluate(kf, timer, rates)
+
+    def keyed_or(self, name, age, base, add):
+        """A property with an *Add field: the keyframe (absolute) if keyed, else base + add * age. InitOnly keys
+        are evaluated at spawn and then the Add applies."""
+        entry = self.keys.get(name)
+        if entry is None:
+            return _linear(base, add, age)
+        kf, rates = entry
+        if kf.init_only:
+            value = kfm.evaluate(kf, 0 if kf.uses_particle_age else self.birth, rates)
+            return _linear(tuple(value) if isinstance(value, (list, tuple)) else value, add, age)
+        value = kfm.evaluate(kf, age if kf.uses_particle_age else self.birth + age, rates)
+        return tuple(value) if isinstance(value, (list, tuple)) else value
+
+    def is_keyed(self, name):
+        entry = self.keys.get(name)
+        return entry is not None and not entry[0].init_only
 
     def placement(self, n):
         if self.coll is not None and self.path is None:
@@ -255,6 +287,12 @@ class Particle:
         return self._path[min(n, len(self._path) - 1)]
 
 
+def _linear(base, add, age):
+    if isinstance(base, tuple):
+        return tuple(b + a * age for b, a in zip(base, add))
+    return base + add * age
+
+
 @dataclass
 class ParticleState:
     pos: tuple
@@ -271,6 +309,8 @@ class ParticleState:
     line: list = None     # Polyline / Line: [(pos, anchor, half width cm, rgba)] head first
     strip: tuple = None   # PolygonStrip: ([(A, B, anchor)] newest first, head rgba, tail rgba, spline subdivisions)
     light: tuple = None   # Light: (start cm, end cm)
+    shape: tuple = None   # Polygon (W, 0, H, 0) half-extents / PrimModel (Radius0, Radius1, Height0, Height1), cm
+    uv_scroll: tuple = None   # Model: (u, v) offset in UV units
 
 
 def _unit(v):
@@ -431,9 +471,9 @@ def strip_point(gen, strip_parts, rng, serial):
     return tuple(x + (y - x) * t for x, y in zip(a, b))
 
 
-def spawn_offset(gen, rng, t):
-    """sub_999040: point on the RangeType shape; t is the burst position in [0, 1)."""
-    x, y, z = _shape_point(gen.get("Range"), gen.get("RangeType"), rng, t)
+def spawn_offset(gen, rng, t, ranges=None):
+    """sub_999040: point on the RangeType shape; t is the burst position in [0, 1). ranges overrides Range."""
+    x, y, z = _shape_point(ranges or gen.get("Range"), gen.get("RangeType"), rng, t)
     scale = [_rf(rng, r) for r in gen.get("UknRangeThing")[1:]]
     return x * scale[0], y * scale[1], z * scale[2]
 
@@ -497,6 +537,7 @@ class _Template:
         self.ptcl_keys = keyframes_of(record.ptcl, _PTCL_KEYS)
         self.move_keys = keyframes_of(record.move, {**_MOVE_KEYS, "KeyframeReleaseFrameParamOffset": "release"})
         self.path_ofs = keyframes_of(record.move, {"KeyframeOfsParamOffset": "ofs"}).get("ofs")
+        self.range_key = keyframes_of(record.gen, {"KeyframeRangeParamOffset": "range"}).get("range")
         self.line_ext = _line_extension(record.ptcl)
         self.cloth_ext = _cloth_extension(record.ptcl)
         self.line_keys = keyframes_of(record.ptcl, {"KeyframeHeadSizeParamOffset": "head_size",
@@ -513,7 +554,7 @@ class _Template:
         if rng is not None and move is not None and move.type == 4 and move.has("ChainPosNum"):
             nodes = max(move.get("ChainPosNum"), 2)
             self.path_rope = GeneratorRope(Rope(_chain_params(move.data, 0x80, rng, nodes), nodes,
-                                                self.path_length_scale))
+                                                self.path_length_scale, _rope_keys(move, rng), birth=None))
 
 
 def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
@@ -522,7 +563,15 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
     gen, ptcl, life, move = record.gen, record.ptcl, record.life, record.move
     keys = {name: (kf, kfm.draw_rates(kf, rng)) for name, kf in {**template.ptcl_keys, **template.move_keys}.items()
             if name != "release"}
-    offset = spawn_offset(gen, rng, t)
+    ranges = None
+    if template.range_key is not None:   # keyed spawn extents: key base = Range.s, key range = Range.r
+        kf = template.range_key
+        timer = max(birth - 1, 0) if kf.ref_type == 1 else birth
+        s = kfm.evaluate(kf, timer, (0.0, 0.0, 0.0))
+        sr = kfm.evaluate(kf, timer, (1.0, 1.0, 1.0))
+        if s is not None:
+            ranges = [(a, b - a) for a, b in zip(s, sr)]
+    offset = spawn_offset(gen, rng, t, ranges)
     on_strip = strip_point(gen, template.range_strip, rng, serial)
     if on_strip is not None:
         scale = [_rf(rng, r) for r in gen.get("UknRangeThing")[1:]]
@@ -583,6 +632,19 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
         elif not anim_flag & ANIM_MOVE:
             pat_speed = 0.0
     line = _line_init(template, rng, ptcl, keys, serial) if ptcl is not None and ptcl.has("LineFlags") else None
+    shape = scroll = None
+    if ptcl is not None and ptcl.type == 6 and ptcl.has("Radius"):
+        radius, radius_add = ptcl.get("Radius"), ptcl.get("RadiusAdd")
+        height, height_add = ptcl.get("Height"), ptcl.get("HeightAdd")
+        shape = {"kind": "prim",
+                 "base": tuple(_rf(rng, r) for r in (radius[0], radius[1], height[0], height[1])),
+                 "add": tuple(_rf(rng, r) for r in (radius_add[0], radius_add[1], height_add[0], height_add[1]))}
+    elif ptcl is not None and ptcl.type == 2 and ptcl.has("Width"):
+        shape = {"kind": "polygon",
+                 "base": (_rf(rng, ptcl.get("Width")), 0.0, _rf(rng, ptcl.get("Height")), 0.0),
+                 "add": (_rf(rng, ptcl.get("WidthAdd")), 0.0, _rf(rng, ptcl.get("HeightAdd")), 0.0)}
+    if ptcl is not None and ptcl.type == 5 and ptcl.has("ScrollU") and ptcl.get("ModelAnimFlag") & 0x10:
+        scroll = {"speed": (_rf(rng, ptcl.get("ScrollU")), _rf(rng, ptcl.get("ScrollV"))), "offsets": None}
     light = None
     if ptcl is not None and ptcl.type == 10 and ptcl.has("AttenuateStart"):
         light = {name: _rf(rng, ptcl.get(field)) for name, field in (
@@ -597,7 +659,10 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
                 keys[name] = (kf, kfm.draw_rates(kf, rng))
     particle = Particle(birth, offset, d, speed, accel, coef, gravity, life_frames, scale, scale_add, angle, angle_add,
                     rot, rot_add, model_scale, model_scale_add, color, intensity, aspect, sequence, pattern,
-                    pat_speed, pat_count, anim_flag, key_is_speed, axis, order, keys, path, line, strip, light)
+                    pat_speed, pat_count, anim_flag, key_is_speed, axis, order, keys, path, line, strip, light,
+                    shape=shape, scroll=scroll)
+    if line is not None and line.get("rope") is not None:
+        line["rope"].birth = birth   # generator-timer rope keys run from the particle's birth frame
     c = template.collision
     if c is not None and template.ground_y is not None and path is None and \
             not any(name in keys for name in ("move_rot", "speed", "fall")):
@@ -680,17 +745,26 @@ def _chain_params(data, base, rng, nodes):
     else:
         c["force_rate"] = c["force_atten"] = 0.0
     c["blend_rate"] = rangef(0x18)
+    c["rot_byte"], c["blend_byte"], c["segs"] = rot_byte, blend_byte, segs
     rot = [rangef(0x38 + 8 * i) for i in range(3)]
     axis = _AXES.get(rot_byte & 0xF, (0, 1, 0))
     c["dir"] = rotate(axis, rot, rot_byte >> 4)
-    c["blend_dir"] = None
-    if c["blend_rate"]:
-        blend_rot = [rangef(0x50 + 8 * i) for i in range(3)]
-        bdir = rotate(_AXES.get(blend_byte & 0xF, (0, 1, 0)), blend_rot, blend_byte >> 4)
-        if option & 0x20:
-            bdir = _shortest_arc_rotate(axis, c["dir"], bdir)
-        c["blend_dir"] = bdir
+    blend_rot = [rangef(0x50 + 8 * i) for i in range(3)]
+    c["blend_dir"] = _blend_dir(c, blend_rot)
     return c
+
+
+def _blend_dir(c, angles):
+    byte = c["blend_byte"]
+    bdir = rotate(_AXES.get(byte & 0xF, (0, 1, 0)), angles, byte >> 4)
+    if c["option"] & 0x20:
+        bdir = _shortest_arc_rotate(_AXES.get(c["rot_byte"] & 0xF, (0, 1, 0)), c["dir"], bdir)
+    return bdir
+
+
+def _rope_keys(block, rng):
+    """{length / rot / blend_rot / blend_rate: (Keyframe, rates)} of an EFL_PARAM_CHAIN's keyframes."""
+    return {name: (kf, kfm.draw_rates(kf, rng)) for name, kf in keyframes_of(block, _ROPE_KEYS).items()}
 
 
 def _shortest_arc_rotate(a, d, v):
@@ -713,17 +787,21 @@ def _shortest_arc_rotate(a, d, v):
 class Rope:
     """moveChain 0x994C20: nodes relative to the root, in the frame the root moves in."""
 
-    def __init__(self, params, nodes, scale):
-        self.p, self.n, self.scale = params, nodes, scale
+    def __init__(self, params, nodes, scale, keys=None, birth=0):
+        """keys: rope keyframes; birth: the owner's birth frame (particle ropes, particle timer) or None for a
+        generator-owned rope (generator timer = the rope's own frame count)."""
+        self.p, self.n, self.scale = dict(params), nodes, scale
+        self.keys, self.birth, self.age = keys or {}, birth, 0
         self.length = params["length"]
+        self._apply_keys(initial=True)
         segs = nodes - 1
-        unit_dir, _ = _unit(params["dir"])
+        unit_dir, _ = _unit(self.p["dir"])
         seg = self.length * scale
         self.vel = [(0.0, 0.0, 0.0)] * nodes
-        if params["blend_dir"] is None:
+        if not self.p["blend_rate"]:
             self.pos = [tuple(c * seg * i for c in unit_dir) for i in range(nodes)]
         else:
-            unit_blend, _ = _unit(params["blend_dir"])
+            unit_blend, _ = _unit(self.p["blend_dir"])
             pos, acc = [(0.0, 0.0, 0.0)], (0.0, 0.0, 0.0)
             for k in range(segs):
                 wa = self._weight(k / segs)
@@ -741,9 +819,33 @@ class Rope:
             return 1 - ((br - 0.5) * 2 * (1 - t) + t)
         return 1 - t
 
+    def _timer(self, kf):
+        if self.birth is None or not kf.uses_particle_age:
+            return (self.birth or 0) + self.age
+        return self.age
+
+    def _apply_keys(self, initial=False):
+        """Rope keyframes (moveChain 0x994C20): Length = total length, Rot / BlendRot = angles (the pull direction
+        is recomputed), BlendRate; InitOnly keys only at the start."""
+        for name, (kf, rates) in self.keys.items():
+            if kf.init_only and not initial:
+                continue
+            value = kfm.evaluate(kf, self._timer(kf), rates)
+            if value is None:
+                continue
+            if name == "length":
+                self.length = max(value, 0.0) / self.p["segs"]
+            elif name == "rot":
+                byte = self.p["rot_byte"]
+                self.p["dir"] = rotate(_AXES.get(byte & 0xF, (0, 1, 0)), value, byte >> 4)
+            elif name == "blend_rot":
+                self.p["blend_dir"] = _blend_dir(self.p, value)
+            elif name == "blend_rate":
+                self.p["blend_rate"] = value
+
     def _accel(self, i):
         a = tuple(c * self.p["acc"] for c in self.p["dir"])
-        if self.p["blend_dir"] is None:
+        if not self.p["blend_rate"]:
             return a
         b = tuple(c * self.p["acc"] for c in self.p["blend_dir"])
         wa = self._weight(i / (self.n - 1))
@@ -772,7 +874,11 @@ class Rope:
 
     def advance(self, root_delta):
         """One frame: the root moved by root_delta; returns node offsets from the new root."""
-        if self.p["length_add"]:
+        self.age += 1
+        if self.keys:
+            self._apply_keys()
+        keyed_length = "length" in self.keys and not self.keys["length"][0].init_only
+        if self.p["length_add"] and not keyed_length:
             self.length = max(0.0, self.length + self.p["length_add"])
         self.pos[0] = root_delta
         self._step()
@@ -859,7 +965,7 @@ def _line_extension(ptcl):
     """Per-LineType extension after the Polyline/Line struct (raw bytes; offsets from the block start)."""
     if ptcl is None or not ptcl.has("LineFlags"):
         return None
-    data, base = ptcl.data, ptcl.struct.size
+    data, base = ptcl.data, ptcl.struct.base_size
     line_type, count = ptcl.get("LineType"), ptcl.get("LineOfsNum")
 
     def rangef(off):
@@ -928,7 +1034,8 @@ def _line_init(template, rng, ptcl, keys, serial=0):
                     order=ext["order"], points=ext["points"])
     elif line_type == 3 and ext:
         gen_scale = template.record.gen.get("ParticleScale")[0] or 1.0 if template.record.gen else 1.0
-        line["rope"] = Rope(_chain_params(ptcl.data, ext["chain_base"], rng, line["count"]), line["count"], gen_scale)
+        line["rope"] = Rope(_chain_params(ptcl.data, ext["chain_base"], rng, line["count"]), line["count"], gen_scale,
+                            _rope_keys(ptcl, rng), birth=0)
     elif line_type in (1, 3, 4):
         line["type"] = 0   # extension missing: draw as a trail
     if template.cloth_ext is not None:
@@ -1070,7 +1177,7 @@ def _cloth_extension(ptcl):
     if ptcl is None or ptcl.type not in CLOTH_TYPES:
         return None
     kind = ptcl.get("ClothType") if ptcl.has("ClothType") else 0
-    data, base = ptcl.data, ptcl.struct.size
+    data, base = ptcl.data, ptcl.struct.base_size
     if kind not in _CLOTH_EXT_SIZE or base + _CLOTH_EXT_SIZE[kind] > len(data):
         return None
 
@@ -1431,6 +1538,44 @@ def simulate(record, seed=0, max_frames=300, pat_counts=(1,), strip_points=None,
     return particles
 
 
+def _shape_at(p, n):
+    """Polygon (W, 0, H, 0) / PrimModel (r0, r1, h0, h1) at age n; None when a Polygon shrank to nothing."""
+    S = p.shape
+    values = []
+    for i in range(4):
+        name = f"shape{i}"
+        value = p.keyed_or(name, n, S["base"][i], S["add"][i])
+        if S["kind"] == "polygon" and i in (0, 2):
+            if p.is_keyed(name):
+                value = max(value, 0.0)
+            elif S["add"][i] and value <= 0:   # sub_98EAA0: a shrinking polygon dies
+                return None
+        values.append(value)
+    return tuple(values)
+
+
+def _wrap_uv(x):
+    return (x + 1.0) % 2.0 - 1.0
+
+
+def _scroll_at(p, n):
+    """Model UV offset at age n: += speed each frame (keyframes give the speed), wrapped to [-1, 1]."""
+    S = p.scroll
+    keyed = [p.is_keyed("scroll_u"), p.is_keyed("scroll_v")]
+    if not any(keyed) and "scroll_u" not in p.keys and "scroll_v" not in p.keys:
+        return tuple(_wrap_uv(v * n) for v in S["speed"])
+    if S["offsets"] is None:
+        S["offsets"] = [(0.0, 0.0)]
+    offsets = S["offsets"]
+    while len(offsets) <= n:
+        age = len(offsets)
+        u, v = offsets[-1]
+        du = p.keyed_or("scroll_u", age, S["speed"][0], 0.0)
+        dv = p.keyed_or("scroll_v", age, S["speed"][1], 0.0)
+        offsets.append((_wrap_uv(u + du), _wrap_uv(v + dv)))
+    return offsets[n]
+
+
 def _pattern_at(p, n):
     keyed = p.keyed("pattern", n)
     if keyed is not None and not p.pat_key_is_speed:
@@ -1463,8 +1608,7 @@ def state_at(p, frame):
             alpha = (n + 1) / (appear + 1)
         elif n >= appear + keep:
             alpha = max(0.0, 1.0 - (n - appear - keep + 1) / (vanish + 1))
-    keyed_scale = p.keyed("scale", n)
-    scale = keyed_scale if keyed_scale is not None else p.scale + p.scale_add * n
+    scale = p.keyed_or("scale", n, p.scale, p.scale_add)
     if scale <= 0:
         return None
     pattern, alive = _pattern_at(p, n)
@@ -1474,19 +1618,22 @@ def state_at(p, frame):
     color = bgra_to_rgba(color) if color is not None else p.color
     intensity = p.keyed("intensity", n)
     intensity = min(max(intensity if intensity is not None else p.intensity, 0.0), INTENSITY_MAX)
-    angle = p.keyed("angle", n)
-    angle = angle if angle is not None else p.angle + p.angle_add * n
-    rot = p.keyed("rot", n)
-    rot = tuple(rot) if rot is not None else tuple(r + a * n for r, a in zip(p.rot, p.rot_add))
-    model_scale = p.keyed("model_scale", n)
-    model_scale = (tuple(max(c, 0.0) for c in model_scale) if model_scale is not None else
-                   tuple(max(s + a * n, 0.0) for s, a in zip(p.model_scale, p.model_scale_add)))
+    angle = p.keyed_or("angle", n, p.angle, p.angle_add)
+    rot = tuple(p.keyed_or("rot", n, tuple(p.rot), tuple(p.rot_add)))
+    model_scale = tuple(max(c, 0.0) for c in p.keyed_or("model_scale", n, tuple(p.model_scale),
+                                                            tuple(p.model_scale_add)))
     rgba = (color[0] / 255 * intensity, color[1] / 255 * intensity, color[2] / 255 * intensity, color[3] / 255)
     pos, anchor_age = p.placement(n)
     if pos is None:
         return None
     anchor = None if anchor_age is None else p.birth + anchor_age
-    line = strip = light = None
+    line = strip = light = shape = uv_scroll = None
+    if p.shape is not None:
+        shape = _shape_at(p, n)
+        if shape is None:
+            return None
+    if p.scroll is not None:
+        uv_scroll = _scroll_at(p, n)
     if p.light is not None:
         L = p.light
         start = max(L["start"] + L["start_add"] * n, 0.0)
@@ -1506,4 +1653,4 @@ def state_at(p, frame):
         if strip is None:
             return None
     return ParticleState(pos, alpha, scale, min(max(p.aspect, 0.0), 15.9375), angle, rot, model_scale,
-                         rgba, p.sequence, int(pattern), anchor, line, strip, light)
+                         rgba, p.sequence, int(pattern), anchor, line, strip, light, shape, uv_scroll)

@@ -26,7 +26,8 @@ from albam.registry import blender_registry
 from .efl import EffectList
 from .efl.sim import ROT_ORDERS, SPACE_FOLLOW, SPACE_FOLLOW_TRANSLATION, simulate, state_at
 
-NODE_GROUP = "ALBAM_EFL_Particles_v3"   # v1: uv_off/uv_scale; v2: affine uv_u/uv_v; v3: + tint
+NODE_GROUP = "ALBAM_EFL_Particles_v4"   # v1: uv_off/uv_scale; v2: affine uv_u/uv_v; v3: + tint; v4: + shape
+TINT_GROUPS = ("ALBAM_EFL_Particles_v3", "ALBAM_EFL_Particles_v4")   # alpha carries the colour alpha
 UV_STRIDE = 8                           # per pattern: a, b, off_u, c, d, off_v, width px, height px
 GAME_FPS = 60.0
 SCALE = 0.01
@@ -35,12 +36,24 @@ LINE_KINDS = (1, 3, 4, 12, 13, 14)   # Polyline, Texline, Line + cloth variants:
 STRIP_KINDS = (15,)                  # PolygonStrip sword trails
 HAIRLINE_KINDS = (3, 4, 13, 14)      # 1-pixel strips in the game
 MODEL_KIND, LIGHT_KIND = 5, 10
-MODEL_NODE_GROUP = "ALBAM_EFL_Models_v1"
+MODEL_NODE_GROUP = "ALBAM_EFL_Models_v2"   # v2: + UV scroll on "uv1"
+MODEL_UV = "uv1"                           # Albam's first .mod UV layer
 MAX_LIGHTS = 8                       # light pool per record
 LINE_HALF_WIDTH = 0.25       # cm; Line particles are 1-pixel strips in the game
 EDGE_ALPHA_ATTR = "EdgeAlpha"
 _cache = {}     # object name -> list of efl.sim.Particle
 _history = {}   # object name -> {scene frame: generator world Matrix}
+
+
+def invalidate():
+    """Forget simulated particles (after the stored .efl bytes changed); they're rebuilt on the next frame."""
+    _cache.clear()
+
+
+def forget(name):
+    """Drop cached state of an object that is about to be removed."""
+    _cache.pop(name, None)
+    _history.pop(name, None)
 
 
 def store_source(root, efl_bytes, start_frame):
@@ -253,7 +266,7 @@ def update_object(ob, scene):
         return
     rows, seq_offsets, seq_counts, sized = _tables(info, ob)
     v3 = ob.modifiers and ob.modifiers[0].type == "NODES" and ob.modifiers[0].node_group is not None and \
-        ob.modifiers[0].node_group.name.startswith(NODE_GROUP)
+        ob.modifiers[0].node_group.name.startswith(TINT_GROUPS)
     frame = _game_frame(ob, scene)
     alive = _alive_states(ob, frame)
 
@@ -268,6 +281,7 @@ def update_object(ob, scene):
     cam_world = scene.camera.matrix_world.translation if scene.camera is not None else None
 
     co, rot, scale, alpha, tint, uv_u, uv_v, off, sc, part = [], [], [], [], [], [], [], [], [], []
+    shape, shape_w, shape_on, scroll = [], [], [], []
     groups = list(info.get("model_groups", []))
     zofs = info.get("model_zofs", 0.0) * SCALE
     for p, s in alive:
@@ -310,6 +324,15 @@ def update_object(ob, scene):
             else:
                 scale.extend((s.scale * unit,) * 3)
         alpha.append(s.alpha * s.color[3] if v3 else s.alpha)
+        if s.shape is not None:   # node group rebuilds the source as sum(basis * shape)
+            shape.extend(s.shape[:3])
+            shape_w.append(s.shape[3])
+            shape_on.append(1.0)
+        else:
+            shape.extend((0.0, 0.0, 0.0))
+            shape_w.append(0.0)
+            shape_on.append(0.0)
+        scroll.extend((s.uv_scroll[0], -s.uv_scroll[1], 0.0) if s.uv_scroll is not None else (0.0, 0.0, 0.0))
         tint.extend(s.color[:3])
         a, b, ou, c, d, ov = row[:6]
         uv_u.extend((a, b, ou))
@@ -325,7 +348,9 @@ def update_object(ob, scene):
                                 ("tint", "FLOAT_VECTOR", tint),
                                 ("uv_u", "FLOAT_VECTOR", uv_u), ("uv_v", "FLOAT_VECTOR", uv_v),
                                 ("uv_off", "FLOAT_VECTOR", off), ("uv_scale", "FLOAT_VECTOR", sc),
-                                ("alpha", "FLOAT", alpha)):
+                                ("alpha", "FLOAT", alpha), ("shape", "FLOAT_VECTOR", shape),
+                                ("shape_w", "FLOAT", shape_w), ("shape_on", "FLOAT", shape_on),
+                                ("uv_scroll", "FLOAT_VECTOR", scroll)):
         attr = mesh.attributes.get(name) or mesh.attributes.new(name, kind_, "POINT")
         attr.data.foreach_set("vector" if kind_ == "FLOAT_VECTOR" else "value", values)
     if groups:
@@ -603,7 +628,21 @@ def _model_node_group():
     links.new(attr("scale3", "FLOAT_VECTOR"), instance.inputs["Scale"])
     realize = nodes.new("GeometryNodeRealizeInstances")
     links.new(instance.outputs["Instances"], realize.inputs["Geometry"])
-    links.new(realize.outputs["Geometry"], group_out.inputs["Geometry"])
+    # UV scroll (renderModel 0x9A20C0 -> gXfUVScroll): uv1 += (u, -v) per particle (V flipped for Blender)
+    add = nodes.new("ShaderNodeVectorMath")
+    add.operation = "ADD"
+    links.new(attr(MODEL_UV, "FLOAT_VECTOR"), add.inputs[0])
+    links.new(attr("uv_scroll", "FLOAT_VECTOR"), add.inputs[1])
+    exists = nodes.new("GeometryNodeInputNamedAttribute")   # only meshes that have the UV layer
+    exists.data_type = "FLOAT_VECTOR"
+    exists.inputs["Name"].default_value = MODEL_UV
+    store = nodes.new("GeometryNodeStoreNamedAttribute")
+    store.data_type, store.domain = "FLOAT2", "CORNER"
+    store.inputs["Name"].default_value = MODEL_UV
+    links.new(realize.outputs["Geometry"], store.inputs["Geometry"])
+    links.new(exists.outputs["Exists"], store.inputs["Selection"])
+    links.new(add.outputs["Vector"], store.inputs["Value"])
+    links.new(store.outputs["Geometry"], group_out.inputs["Geometry"])
     return ng
 
 
@@ -642,6 +681,42 @@ def _node_group():
     realize = node("GeometryNodeRealizeInstances", -200, 0)
     links.new(instance.outputs["Instances"], realize.inputs["Geometry"])
 
+    # per-particle shape (Polygon / PrimModel sizes, keyframed or growing): the source vertex is
+    # sum(basis_i * shape_i); move each realized vertex by rot(scale3 * (that - rest position)) * shape_on
+    def weighted(basis, value_socket, x, y):
+        n = node("ShaderNodeVectorMath", x, y, operation="SCALE")
+        links.new(attr(basis, "FLOAT_VECTOR", x - 200, y).outputs["Attribute"], n.inputs[0])
+        links.new(value_socket, n.inputs["Scale"])
+        return n.outputs["Vector"]
+
+    shape_xyz = node("ShaderNodeSeparateXYZ", -400, 600)
+    links.new(attr("shape", "FLOAT_VECTOR", -600, 600).outputs["Attribute"], shape_xyz.inputs["Vector"])
+    terms = [weighted("shape_a", shape_xyz.outputs["X"], -100, 900),
+             weighted("shape_b", shape_xyz.outputs["Y"], -100, 750),
+             weighted("shape_c", shape_xyz.outputs["Z"], -100, 600),
+             weighted("shape_d", attr("shape_w", "FLOAT", -400, 450).outputs["Attribute"], -100, 450)]
+    total = terms[0]
+    for i, term in enumerate(terms[1:]):
+        add = node("ShaderNodeVectorMath", 100 + 100 * i, 800, operation="ADD")
+        links.new(total, add.inputs[0])
+        links.new(term, add.inputs[1])
+        total = add.outputs["Vector"]
+    delta = node("ShaderNodeVectorMath", 450, 800, operation="SUBTRACT")
+    links.new(total, delta.inputs[0])
+    links.new(attr("src_co", "FLOAT_VECTOR", 250, 650).outputs["Attribute"], delta.inputs[1])
+    scaled = node("ShaderNodeVectorMath", 600, 800, operation="MULTIPLY")
+    links.new(delta.outputs["Vector"], scaled.inputs[0])
+    links.new(attr("scale3", "FLOAT_VECTOR", 450, 650).outputs["Attribute"], scaled.inputs[1])
+    rotated = node("ShaderNodeVectorRotate", 750, 800, rotation_type="EULER_XYZ")
+    links.new(scaled.outputs["Vector"], rotated.inputs["Vector"])
+    links.new(attr("rot", "FLOAT_VECTOR", 600, 650).outputs["Attribute"], rotated.inputs["Rotation"])
+    gated = node("ShaderNodeVectorMath", 900, 800, operation="SCALE")
+    links.new(rotated.outputs["Vector"], gated.inputs[0])
+    links.new(attr("shape_on", "FLOAT", 750, 650).outputs["Attribute"], gated.inputs["Scale"])
+    reshape = node("GeometryNodeSetPosition", 0, 0)
+    links.new(realize.outputs["Geometry"], reshape.inputs["Geometry"])
+    links.new(gated.outputs["Vector"], reshape.inputs["Offset"])
+
     # UV of the current flipbook frame: u' = uv_u . (u, v, 1), v' = uv_v . (u, v, 1)
     homogeneous = node("ShaderNodeVectorMath", -50, -250, operation="ADD")
     links.new(attr("UVMap", "FLOAT_VECTOR", -250, -250).outputs["Attribute"], homogeneous.inputs[0])
@@ -657,7 +732,7 @@ def _node_group():
     links.new(dot_v.outputs["Value"], combine_uv.inputs["Y"])
     store_uv = node("GeometryNodeStoreNamedAttribute", 450, 0, data_type="FLOAT2", domain="CORNER")
     store_uv.inputs["Name"].default_value = "UVMap"
-    links.new(realize.outputs["Geometry"], store_uv.inputs["Geometry"])
+    links.new(reshape.outputs["Geometry"], store_uv.inputs["Geometry"])
     links.new(combine_uv.outputs["Vector"], store_uv.inputs["Value"])
 
     # material colour: EdgeAlpha = (tint rgb, source edge alpha * particle alpha)

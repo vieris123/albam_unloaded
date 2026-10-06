@@ -17,7 +17,7 @@ The DX9 IDB's EFL_GENERATOR and EFL_PARTICLE_* types were retyped to these offse
 from __future__ import annotations
 
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 # ---------------------------------------------------------------------------------------------
 # value types
@@ -158,8 +158,11 @@ class Struct:
     size_tier: str
     fields: list = field(default_factory=list)
     bits: list = field(default_factory=list)
+    base_size: int = None   # extended structs: where the extension starts (= the plain struct's size)
 
     def __post_init__(self):
+        if self.base_size is None:
+            self.base_size = self.size
         self.by_name = {f.name: f for f in self.fields}
         self.bits_by_name = {b.name: b for b in self.bits}
         assert len(self.by_name) == len(self.fields), f"duplicate field name in {self.name}"
@@ -235,9 +238,9 @@ GENERATOR = Struct("EFL_GENERATOR", 0x1E0, "dx9", [
     F(0x1CA, "SeOptionFlag", "u16", "dx9", "bit0 = stop SE on finish"),
     F(0x1CC, "KeyframeScaleParamOffset", "rel32", "dx9", "mStatus 0x10; replaces Scale eval", sub="kf:vec3"),
     F(0x1D0, "KeyframeSetNumParamOffset", "rel32", "dx9", "mStatus 0x20; replaces SetNum (uknGenBehaviorFunc1 0x9DDD7C)", sub="kf:u32"),
-    F(0x1D4, "KeyframeParamOffset_1d4", "rel32", "dx9", "mStatus 0x40; vec3 keys (corpus 15/15)", sub="kf:vec3"),
-    F(0x1D8, "KeyframeParamOffset_1d8", "rel32", "dx9", "mStatus 0x80; vec3 keys (corpus 150/150): Range?", sub="kf:vec3"),
-    F(0x1DC, "KeyframeParamOffset_1dc", "rel32", "dx9", "mStatus 0x100; vec3 keys (corpus 39/39): Ofs?", sub="kf:vec3"),
+    F(0x1D4, "KeyframeRangeParamOffset", "rel32", "dx9", "mStatus 0x40: replaces Range s and r at spawn (sub_999640), generator timer", sub="kf:vec3"),
+    F(0x1D8, "KeyframePosParamOffset", "rel32", "dx9", "mStatus 0x80; position, generator timer (updateWorldMatrix 0x96BE10)", sub="kf:vec3"),
+    F(0x1DC, "KeyframeRotParamOffset", "rel32", "dx9", "mStatus 0x100; Euler rotation in AxisFlags order (updateWorldMatrix 0x96BE10)", sub="kf:vec3"),
 ], [
     B("Order", "AxisFlags", 0, 4, "prior"),
     B("AxisType", "AxisFlags", 4, 4, "prior"),
@@ -345,24 +348,24 @@ PTCL_TAILS = {
         B("ClothParam", "SizePlaceFlags", 24, 8, "dx9"),
     ]),
     2: ("Polygon", 0x1E0, "dx9", [
-        F(0x170, "Rot", "rangef[3]", "prior"),
-        F(0x188, "RotAdd", "rangef[3]", "prior"),
-        F(0x1A0, "PolygonFlags", "u32", "prior", "bitfield word"),
-        F(0x1A4, "KeyframeRotParamOffset", "rel32", "prior", sub="kf:vec3"),
-        F(0x1A8, "uknKeyframeOffset", "rel32", "prior", sub="kf"),
-        F(0x1B0, "Width", "rangef", "prior"),
-        F(0x1B8, "Height", "rangef", "prior"),
-        F(0x1C0, "WidthAdd", "rangef", "prior"),
-        F(0x1C8, "HeightAdd", "rangef", "prior"),
-        F(0x1D0, "DistortRate", "f32[4]", "prior"),
+        F(0x170, "Rot", "rangef[3]", "dx9", "radians; initParticlePolygon 0x9792F0, move sub_98EAA0, quad sub_9B54C0"),
+        F(0x188, "RotAdd", "rangef[3]", "dx9", "per frame, without a Rot keyframe"),
+        F(0x1A0, "PolygonFlags", "u32", "dx9", "bitfield word"),
+        F(0x1A4, "KeyframeRotParamOffset", "rel32", "dx9", "absolute angles", sub="kf:vec3"),
+        F(0x1A8, "KeyframeWidthParamOffset", "rel32", "dx9", "replaces Width, clamped >= 0", sub="kf:f32"),
+        F(0x1AC, "KeyframeHeightParamOffset", "rel32", "dx9", "replaces Height, clamped >= 0", sub="kf:f32"),
+        F(0x1B0, "Width", "rangef", "dx9", "half-extent: a centred quad is 2W wide"),
+        F(0x1B8, "Height", "rangef", "dx9", "half-extent"),
+        F(0x1C0, "WidthAdd", "rangef", "dx9", "per frame; <= 0 kills (non-keyed, Add != 0)"),
+        F(0x1C8, "HeightAdd", "rangef", "dx9", "per frame; <= 0 kills (non-keyed, Add != 0)"),
+        F(0x1D0, "DistortRate", "f32[4]", "dx9", "per-corner scale of the corner offset (c0 a0b1, c1 a1b1, c2 a0b0, c3 a1b0)"),
     ], [
-        B("RotAxisType", "PolygonFlags", 0, 4, "prior"),
-        B("RotOrder", "PolygonFlags", 4, 4, "prior"),
-        B("DirAxisType", "PolygonFlags", 8, 4, "prior"),
-        B("PolygonFixType", "PolygonFlags", 16, 4, "prior"),
-        B("PolygonBillBoardType", "PolygonFlags", 20, 4, "prior"),
-        B("CullingRotAxisType", "PolygonFlags", 24, 4, "prior"),
-        B("CullingRotOrder", "PolygonFlags", 28, 4, "prior"),
+        B("PolygonAxis", "PolygonFlags", 0, 4, "dx9", "plane: 0 YZ (+X), 1 YZ (-X), 2 XZ (+Y), 3 XZ (-Y), 4/6 XY (+Z), 5 XY (-Z)"),
+        B("RotOrder", "PolygonFlags", 4, 4, "dx9"),
+        B("DirAxisType", "PolygonFlags", 8, 4, "dx9", "6 = no velocity alignment"),
+        B("PolygonFixType", "PolygonFlags", 16, 4, "dx9", "pivot: 0 centre, 1-8 corners/edges, 9 PatCenter"),
+        B("PolygonBillBoardType", "PolygonFlags", 20, 4, "dx9"),
+        B("PolygonDivideNum", "PolygonFlags", 24, 8, "dx9", "split into n + 1 strips (sub_9CCDB0)"),
     ]),
     3: ("Texline", 0x180, "dx9", [
         F(0x170, "LineFlags", "u32", "dx9", "init 0x97A0B0, move sub_98F0C0; a textured 1-pixel line strip"),
@@ -632,6 +635,164 @@ def _move_struct(mtype):
     if chain == "path":
         fields += MOVE_PATH
     return Struct(f"EFL_MOVE_{name}", size, "dx9", fields + tail, list(MOVE_COMMON_BITS))
+
+
+
+# --- particle extensions after the struct, chosen by LineType / ClothType ----------------------------
+# Polyline/Texline/Line (1, 3, 4) carry a per-LineType extension right after the struct (base_size): FIX = stored
+# points, CHAIN = an EFL_PARAM_CHAIN, LENGTH = a rigid stick. The cloth variants (12-14) always run as cloth and
+# carry a per-ClothType extension (initParticlePolyline 0x9786D0 switch; CHAIN 0x981530, CURVE 0x9820D0,
+# ZIGZAG 0x983330). Keyframe offsets in them are relative to the particle block, like the struct's own.
+
+CHAIN_PARAM_BITS = [
+    B("ChainRotAxisType", "ChainRotAxis", 0, 4, "dx9", "calcDir axis"),
+    B("ChainRotOrder", "ChainRotAxis", 4, 4, "dx9"),
+    B("ChainBlendRotAxisType", "ChainBlendRotAxis", 0, 4, "dx9"),
+    B("ChainBlendRotOrder", "ChainBlendRotAxis", 4, 4, "dx9"),
+]
+_CHAIN_EXT = [replace(f, offset=f.offset - _CHAIN) for f in MOVE_CHAIN_PARAM]
+_LENGTH_EXT = [
+    F(0x00, "LineRot", "rangef[3]", "dx9", "stick direction: axis rotated by this (moveParticlePolyline LENGTH)"),
+    F(0x18, "LineRotAdd", "rangef[3]", "dx9", "per frame"),
+    F(0x30, "LineRotFlags", "u32", "dx9"),
+    F(0x34, "member_line_0x34", "u32", "unknown"),
+    F(0x38, "LineLength", "rangef", "dx9", "cm"),
+    F(0x40, "LineLengthAdd", "rangef", "dx9", "per frame"),
+    F(0x48, "LineKeyframeRotParamOffset", "rel32", "dx9", sub="kf:vec3"),
+    F(0x4C, "LineKeyframeLengthParamOffset", "rel32", "dx9", sub="kf:f32"),
+]
+_LENGTH_BITS = [B("LineRotAxisType", "LineRotFlags", 0, 4, "dx9"), B("LineRotOrder", "LineRotFlags", 4, 4, "dx9")]
+_FIX_EXT = [
+    F(0x00, "FixModelScale", "rangef[3]", "dx9", "scales the stored points"),
+    F(0x18, "FixModelScaleAdd", "rangef[3]", "dx9", "per frame"),
+    F(0x30, "FixRot", "rangef[3]", "dx9"),
+    F(0x48, "FixRotAdd", "rangef[3]", "dx9", "per frame"),
+    F(0x60, "FixFlags", "u32", "dx9"),
+    F(0x64, "member_fix_0x64", "u32[3]", "unknown"),
+]
+_FIX_BITS = [B("FixRotOrder", "FixFlags", 4, 4, "dx9")]
+_CLOTH_SUB = [
+    F(0x00, "ClothSubRange", "rangef[3]", "dx9", "tail point P1 = generator x SubOfs, drawn with sub_999040"),
+    F(0x18, "ClothSubRangeType", "u32", "dx9", "RangeType shapes"),
+    F(0x1C, "ClothSubRangeDivideNum", "u16", "dx9"),
+]
+_CLOTH_CHAIN_EXT = _CHAIN_EXT + [
+    F(0x90, "ClothConstOffFrame", "rangeu16", "dx9", "ClothParam 1/2: release the head/tail after this many frames"),
+    F(0x94, "ClothDistConvFrame", "rangeu16", "dx9", "ClothParam 4: length converges to |P0-P1| over this"),
+    F(0x98, "ClothDistExpansion", "rangef", "dx9", "added to |P0-P1|"),
+] + [replace(f, offset=f.offset + 0xA0) for f in _CLOTH_SUB]
+_CURVE_EXT = [
+    F(0x00, "CurveRot", "rangef[3]", "dx9", "bend direction (calcDir)"),
+    F(0x18, "CurveRotAdd", "rangef[3]", "dx9", "per frame"),
+    F(0x30, "CurveRotAxis", "u8", "dx9"),
+    F(0x31, "CurveDirFlags", "u8", "dx9"),
+    F(0x32, "CurveOptionFlag", "u16", "dx9", "1 = amplitude x |P1-P0|; ZIGZAG 0x100 ease, 0x200 limit, 0x400 once"),
+    F(0x34, "CurveKeyframeRotParamOffset", "rel32", "dx9", sub="kf:vec3"),
+    F(0x38, "CurveCoef", "rangef", "dx9", "bend amplitude"),
+] + [replace(f, offset=f.offset + 0x40) for f in _CLOTH_SUB]
+_CURVE_BITS = [
+    B("CurveRotAxisType", "CurveRotAxis", 0, 4, "dx9"), B("CurveRotOrder", "CurveRotAxis", 4, 4, "dx9"),
+    B("CurveDirAxisType", "CurveDirFlags", 0, 4, "dx9", "6 = fixed, else aligned to the velocity"),
+    B("CurveType", "CurveDirFlags", 4, 4, "dx9", "0 two Hermite halves, else sine"),
+]
+_ZIGZAG_EXT = _CURVE_EXT + [
+    F(0x60, "ZigzagVertexAmplitude", "rangef[3]", "dx9", "per-vertex jitter"),
+    F(0x78, "ZigzagVertexUpdateFrame", "rangeu16", "dx9", "frames between jitter updates"),
+    F(0x7C, "member_zigzag_0x7c", "u32", "unknown", "0 in the corpus"),
+    F(0x80, "ZigzagEase", "rangef", "unknown", "(1, 1) in the corpus; probably the ease curve"),
+]
+EXTENSIONS = {   # key -> (label, size, fields, bits)
+    ("line", 1): ("FIX", 0x70, _FIX_EXT, _FIX_BITS),
+    ("line", 3): ("CHAIN", 0x90, _CHAIN_EXT, CHAIN_PARAM_BITS),
+    ("line", 4): ("LENGTH", 0x50, _LENGTH_EXT, _LENGTH_BITS),
+    ("cloth", 0): ("ClothCHAIN", 0xC0, _CLOTH_CHAIN_EXT, CHAIN_PARAM_BITS),
+    ("cloth", 1): ("ClothCURVE", 0x60, _CURVE_EXT, _CURVE_BITS),
+    ("cloth", 2): ("ClothZIGZAG", 0x90, _ZIGZAG_EXT, _CURVE_BITS),
+}
+CLOTH_PTCL_TYPES = (12, 13)   # ClothLine (14) has no ClothType field and no corpus records
+LINE_PTCL_TYPES = (1, 3, 4)
+_EXT_CACHE = {}
+
+
+def extension_key(btype, get):
+    """(kind, type[, point count]) of the extension a particle block carries, from get(field name) (None if the
+    value is missing), or None."""
+    try:
+        if btype in CLOTH_PTCL_TYPES:
+            cloth = get("ClothType")
+            return ("cloth", int(cloth)) if cloth is not None and ("cloth", int(cloth)) in EXTENSIONS else None
+        if btype in LINE_PTCL_TYPES:
+            line = get("LineType")
+            if line is None or ("line", int(line)) not in EXTENSIONS:
+                return None
+            if int(line) == 1:
+                return ("line", 1, int(get("LineOfsNum") or 0))
+            return ("line", int(line))
+    except (TypeError, ValueError, KeyError):
+        return None
+    return None
+
+
+def extended_struct(base, key):
+    """The particle struct followed by the extension `key` (cached)."""
+    cache_key = (base.name, key)
+    if cache_key not in _EXT_CACHE:
+        label, size, fields, bits = EXTENSIONS[key[:2]]
+        fields = list(fields)
+        if key[:2] == ("line", 1):   # FIX: LineOfsNum stored points (vec3 + pad)
+            fields += [F(0x70 + 16 * i, f"FixPoint{i}", "vec3", "dx9", "stored point, x FixModelScale")
+                       for i in range(key[2])]
+            size += 16 * key[2]
+        at = base.size
+        _EXT_CACHE[cache_key] = Struct(
+            f"{base.name}+{label}", at + size, base.size_tier,
+            base.fields + [replace(f, offset=f.offset + at) for f in fields], base.bits + list(bits),
+            base_size=base.size)
+    return _EXT_CACHE[cache_key]
+
+
+def struct_for_data(kind, btype, data):
+    """Struct for a block's bytes: particle blocks get their LineType / ClothType extension when it fits."""
+    base = struct_for(kind, btype)
+    if kind != "ptcl" or btype not in LINE_PTCL_TYPES + CLOTH_PTCL_TYPES:
+        return base
+
+    def get(name):
+        bits = base.bits_by_name.get(name)
+        f = base.by_name.get(bits.field if bits else name)
+        if f is None or f.offset + f.size > len(data):
+            return None
+        value = decode(f.type, data, f.offset)
+        return (value >> bits.shift) & ((1 << bits.width) - 1) if bits else value
+
+    key = extension_key(btype, get)
+    if key is None:
+        return base
+    struct = extended_struct(base, key)
+    return struct if struct.size <= len(data) else base
+
+
+def struct_for_props(kind, btype, props):
+    """Struct for stored block properties (block_props), the same one struct_for_data picked."""
+    base = struct_for(kind, btype)
+    if kind != "ptcl":
+        return base
+    key = extension_key(btype, lambda name: props.get(name) if name in props else None)
+    if key is None:
+        return base
+    struct = extended_struct(base, key)
+    # the extension was only used if the block was long enough: its first field is in the props then
+    first = min(struct.fields[len(base.fields):], key=lambda f: f.offset, default=None)
+    return struct if first is not None and first.name in props else base
+
+
+# old field names -> current ones (props stored by older imports)
+FIELD_ALIASES = {
+    "uknKeyframeOffset": "KeyframeWidthParamOffset",
+    "KeyframeParamOffset_1d4": "KeyframeRangeParamOffset",
+    "KeyframeParamOffset_1d8": "KeyframePosParamOffset",
+    "KeyframeParamOffset_1dc": "KeyframeRotParamOffset",
+}
 
 
 # --- sub-blocks ----------------------------------------------------------------------------------
