@@ -316,6 +316,83 @@ def is_blimage_dds(bl_im):
     return is_dds
 
 
+BONE_SHAPE_NAME = "ALBAM_bone_shape"
+
+
+def _bone_shape_object():
+    """Octahedral bone like Blender's own: head at the origin, tail at +Y 1, waist at 0.1."""
+    ob = bpy.data.objects.get(BONE_SHAPE_NAME)
+    if ob is not None and ob.type == 'MESH':
+        return ob
+    verts = [(0, 0, 0), (0.1, 0.1, 0), (0, 0.1, 0.1), (-0.1, 0.1, 0), (0, 0.1, -0.1), (0, 1, 0)]
+    faces = [(0, 2, 1), (0, 3, 2), (0, 4, 3), (0, 1, 4),
+             (5, 1, 2), (5, 2, 3), (5, 3, 4), (5, 4, 1)]
+    me = bpy.data.meshes.new(BONE_SHAPE_NAME)
+    me.from_pydata(verts, [], faces)
+    return bpy.data.objects.new(BONE_SHAPE_NAME, me)
+
+
+def _display_vectors(ordered):
+    """
+    Armature-space (direction, length) per game joint, pointing at the child that continues the chain.
+
+    MT joints have no orientation of their own (every rest frame is world-aligned), so the shape follows the
+    hierarchy instead: the child most in line with the incoming direction (spine -> neck rather than the
+    clavicles, forearm -> middle finger). Co-located children are skipped; leaves continue their parent.
+    """
+    from mathutils import Vector
+    bones = {b.name for b in ordered}
+    up = Vector((0.0, 0.0, 1.0))
+    vectors = {}
+    for bone in ordered:  # parents come before children
+        parent = bone.parent if bone.parent is not None and bone.parent.name in bones else None
+        incoming = bone.head_local - parent.head_local if parent else Vector()
+        if incoming.length > 1e-4:
+            ref, ref_len = incoming.normalized(), incoming.length
+        elif parent:
+            ref, ref_len = vectors[parent.name]
+        else:
+            ref, ref_len = up, 0.1
+        kids = [c.head_local - bone.head_local for c in bone.children if c.name in bones]
+        kids = [k for k in kids if k.length > 1e-3]
+        if kids:
+            best = max(kids, key=lambda k: k.normalized().dot(ref))
+            vectors[bone.name] = (best.normalized(), best.length)
+        else:
+            vectors[bone.name] = (ref, max(ref_len * 0.5, 0.02))
+    return vectors
+
+
+def set_bone_display(armature_ob, rig_style=True):
+    """
+    Draw the game joints of an armature like a normal rig (each bone reaching its child) or as the raw joints.
+
+    Display only: a custom shape on the pose bone. The bones' rest matrices (which LMT keys, .mod export, EFL
+    attachment and foot IK rely on) are not touched. Edit Mode always shows the raw joints.
+    """
+    ordered = [b for b in armature_ob.data.bones if 'mtfw.anim_retarget' in b]
+    vectors = _display_vectors(ordered) if rig_style else {}
+    shape = _bone_shape_object() if rig_style else None
+    for bone in ordered:
+        pb = armature_ob.pose.bones[bone.name]
+        if not rig_style:
+            if pb.custom_shape is not None and pb.custom_shape.name.startswith(BONE_SHAPE_NAME):
+                pb.custom_shape = None
+                pb.use_custom_shape_bone_size = True
+                pb.custom_shape_scale_xyz = (1.0, 1.0, 1.0)
+                pb.custom_shape_rotation_euler = (0.0, 0.0, 0.0)
+            continue
+        direction, length = vectors[bone.name]
+        local = bone.matrix_local.to_3x3().transposed() @ direction
+        pb.custom_shape = shape
+        pb.use_custom_shape_bone_size = False
+        pb.custom_shape_translation = (0.0, 0.0, 0.0)
+        pb.custom_shape_rotation_euler = local.to_track_quat('Y', 'Z').to_euler('XYZ')
+        pb.custom_shape_scale_xyz = (length, length, length)
+    if hasattr(armature_ob.data, "relation_line_position"):  # Blender 4.1+
+        armature_ob.data.relation_line_position = 'HEAD' if rig_style else 'TAIL'
+
+
 def get_dist(point_a, point_b):
     x1, y1, z1 = point_a
     x2, y2, z2 = point_b

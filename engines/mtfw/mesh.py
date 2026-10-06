@@ -23,6 +23,7 @@ from albam.lib.blender import (
     get_normals_per_vertex,
     get_tangents_per_vertex,
     get_uvs_per_vertex,
+    set_bone_display,
     strip_triangles_to_triangles_list,
     triangles_list_to_triangles_strip,
 )
@@ -740,6 +741,7 @@ def build_blender_armature(mod, armature_name, bbox_data):
         blender_bones.append(blender_bone)
 
     bpy.ops.object.mode_set(mode="OBJECT")
+    set_bone_display(armature_ob)
     return armature_ob
 
 
