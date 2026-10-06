@@ -1,6 +1,7 @@
 from binascii import crc32
 from collections import namedtuple, OrderedDict
 import ctypes
+import math
 from itertools import chain
 from io import BytesIO
 from struct import pack, unpack
@@ -325,7 +326,8 @@ def build_blender_model(file_list_item, context):
     imported_lods = MAIN_LODS.get(app_id)
 
     for i, mesh in enumerate(mod.meshes_data.meshes):
-        if import_settings.import_only_main_lods and mesh.level_of_detail not in imported_lods:
+        main_lod = (mesh.level_of_detail & 1) if app_id == "dmc4" else mesh.level_of_detail in imported_lods
+        if import_settings.import_only_main_lods and not main_lod:   # DMC4: LOD bit 1 = near
             continue
         try:
             name = f"{bl_object_name}_{str(i).zfill(4)}"
@@ -335,6 +337,12 @@ def build_blender_model(file_list_item, context):
                 app_id, mod, mesh, name, bbox_data, mod_version in VERSIONS_USE_TRISTRIPS
             )
             bl_mesh_ob.parent = bl_object
+            if _is_edge_mesh(mod, mesh):
+                # attr 1 materials: silhouette "fin" geometry (every triangle zero-area, vertices duplicated from
+                # the visible meshes), extruded by the shader. Kept for export, hidden in the viewport.
+                bl_mesh_ob["mtfw_edge_mesh"] = True
+                bl_mesh_ob.hide_viewport = True
+                bl_mesh_ob.hide_render = True
             if skeleton:
                 modifier = bl_mesh_ob.modifiers.new(
                     type="ARMATURE", name="armature")
@@ -364,6 +372,26 @@ def build_blender_model(file_list_item, context):
     return bl_object
 
 
+def _material_153(mod, mesh):
+    if mod.header.version != 153:
+        return None
+    try:
+        return mod.materials_data.materials[mesh.idx_material]
+    except (AttributeError, IndexError):
+        return None
+
+
+def _is_edge_mesh(mod, mesh):
+    material = _material_153(mod, mesh)
+    return material is not None and getattr(material, "attr", 0) == 1
+
+
+VTYPE_SKIN_COLOR = 5   # DX9 vtype 5 (vdecl 12): skinned, with a D3DCOLOR where vtype 0 has uv2
+VDECL_LIGHTMAP = 9     # vtype 3 + 4-byte stream 2 holding a half2 texcoord
+VDECL_STREAM2_ZERO = 1  # vtype 2 + 4-byte stream 2, all zeros in the game's files
+LIGHTMAP_UV = "uv_stream2"   # second texcoord stream (tiled values: not a 0-1 lightmap)
+
+
 def build_blender_mesh(app_id, mod, mesh, name, bbox_data, use_tri_strips=False):
     me_ob = bpy.data.meshes.new(name)
     ob = bpy.data.objects.new(name, me_ob)
@@ -377,12 +405,31 @@ def build_blender_mesh(app_id, mod, mesh, name, bbox_data, use_tri_strips=False)
     vertex_colors = []
     weights_per_bone = {}
 
+    material = _material_153(mod, mesh)
+    skin_color = material is not None and material.vtype == VTYPE_SKIN_COLOR
     for vertex_index, vertex in enumerate(mesh.vertices):
         _process_locations(mod.header.version, mesh, vertex, locations, bbox_data)
         _process_normals(vertex, normals)
         _process_uvs(vertex, uvs_1, uvs_2, uvs_3, uvs_4)
         _process_vertex_colors(mod.header.version, vertex, vertex_colors)
+        if skin_color:   # the "uv2" slot holds a colour (bytes b, g, r, a)
+            b, g, r, a = bytes(vertex.uv2.u) + bytes(vertex.uv2.v)
+            vertex_colors.append((r / 255, g / 255, b / 255, a / 255))
         _process_weights(mod, mesh, vertex, vertex_index, weights_per_bone)
+    if skin_color:
+        uvs_2 = []
+    lightmap = []
+    if mod.header.version == 153 and mesh.vertex_stride_2 == 4 and mesh.vdecl == VDECL_LIGHTMAP:
+        for v2 in mesh.vertices2:
+            o = v2.occlusion
+            u, v = unpack("<2e", bytes((o.x, o.y, o.z, o.w)))
+            lightmap.extend((u, 1 - v))
+    # unused slots are filled with 0xFFFF (NaN halves): drop trailing UV layers that are all filler (export
+    # picks layers by position, so only trailing ones)
+    uv_sets = [uvs_1, uvs_2, uvs_3, uvs_4]
+    while uv_sets and (not uv_sets[-1] or all(math.isnan(c) for c in uv_sets[-1])):
+        uv_sets[-1].clear()
+        uv_sets.pop()
 
     indices = strip_triangles_to_triangles_list(
         mesh.indices) if use_tri_strips else mesh.indices
@@ -400,6 +447,8 @@ def build_blender_mesh(app_id, mod, mesh, name, bbox_data, use_tri_strips=False)
     _build_uvs(me_ob, uvs_2, "uv2")
     _build_uvs(me_ob, uvs_3, "uv3")
     _build_uvs(me_ob, uvs_4, "uv4")
+    if len(lightmap) == 2 * len(locations):
+        _build_uvs(me_ob, lightmap, LIGHTMAP_UV)
     _build_vertex_colors(me_ob, vertex_colors, "vc")
     _build_weights(ob, weights_per_bone)
 
@@ -409,6 +458,8 @@ def build_blender_mesh(app_id, mod, mesh, name, bbox_data, use_tri_strips=False)
     # XXX TMP hack, TODO convert vertex formats to enums
     if app_id != "re5":
         custom_properties.vertex_format = str(mesh.vertex_format)
+    if mod.header.version == 153:   # weights per vertex declared by the file (export keeps it as a floor)
+        me_ob["mtfw_weight_count"] = int(mesh.vertex_format)
     return ob
 
 
@@ -813,13 +864,16 @@ def export_mod(bl_obj):
     dst_mod.index_buffer = index_buffer
 
     offset = dst_mod.size_top_level_
-    dst_mod.header.offset_bones_data = offset
+    # no bone table: the game's files store offset 0 (as for an empty vertex buffer 2)
+    dst_mod.header.offset_bones_data = offset if dst_mod.header.num_bones else 0
     dst_mod.header.offset_groups = offset + dst_mod.bones_data_size_
     dst_mod.header.offset_materials_data = dst_mod.header.offset_groups + dst_mod.groups_size_
     dst_mod.header.offset_meshes_data = dst_mod.header.offset_materials_data + dst_mod.materials_data.size_
     dst_mod.header.offset_vertex_buffer = dst_mod.header.offset_meshes_data + dst_mod.meshes_data.size_
     dst_mod.header.offset_vertex_buffer_2 = dst_mod.header.offset_vertex_buffer + len(vertex_buffer)
     dst_mod.header.offset_index_buffer = dst_mod.header.offset_vertex_buffer_2 + len(vertex_buffer_2)
+    if not vertex_buffer_2 and dst_mod.header.version == 153:
+        dst_mod.header.offset_vertex_buffer_2 = 0
 
     dst_mod.header.size_vertex_buffer = len(vertex_buffer)
     dst_mod.header.size_vertex_buffer_2 = len(vertex_buffer_2)
@@ -1125,8 +1179,62 @@ def _serialize_bones_data(bl_obj, bl_meshes, src_mod, dst_mod, bone_palettes=Non
         bones_data.parent_space_matrices.append(m)
         bones_data.inverse_bind_matrices.append(m2)
 
+    if dst_mod.header.version in (153, 156):
+        _inverse_binds_from_chain(src_mod, bones_data)
     bones_data._check()
     return bones_data
+
+
+def _matrix_rows(m):
+    return Matrix([(r.x, r.y, r.z, r.w) for r in (m.row_1, m.row_2, m.row_3, m.row_4)])
+
+
+def _joint_world_matrices(bones_data):
+    """World (bind) matrix per joint: Lmat chain in the game's row-vector convention (world = L . world_parent)."""
+    world = {}
+
+    def get(j):
+        if j not in world:
+            local = _matrix_rows(bones_data.parent_space_matrices[j])
+            parent = bones_data.bones_hierarchy[j].idx_parent
+            world[j] = local if parent in (255, j) or parent >= len(bones_data.bones_hierarchy) else local @ get(parent)
+        return world[j]
+
+    for j in range(len(bones_data.bones_hierarchy)):
+        get(j)
+    return world
+
+
+def _inverse_binds_from_chain(src_mod, bones_data):
+    """Inverse bind = inverse of the joint's world matrix (rModel mImat; skinning is p . Imat . Wmat). Joints whose
+    chain is unchanged keep the source file's matrix exactly; edited ones get the computed inverse."""
+    world = _joint_world_matrices(bones_data)
+    src_world = _joint_world_matrices(src_mod.bones_data) if src_mod.header.num_bones else {}
+    for j, w in world.items():
+        target = bones_data.inverse_bind_matrices[j]
+        src_w = src_world.get(j)
+        if src_w is not None and j < len(src_mod.bones_data.inverse_bind_matrices) and                 max(abs(a - b) for ra, rb in zip(w, src_w) for a, b in zip(ra, rb)) < 1e-3:
+            source = _matrix_rows(src_mod.bones_data.inverse_bind_matrices[j])
+        else:
+            source = w.inverted_safe()
+        for row, values in zip((target.row_1, target.row_2, target.row_3, target.row_4), source):
+            row.x, row.y, row.z, row.w = values
+
+
+def _uv_layer_index(bl_mesh, slot):
+    """Layer index for UV slot 0-3: Albam's 'uv1'..'uv4' by name; otherwise the slot-th layer that isn't the
+    lightmap layer; None if there's none."""
+    names = [layer.name for layer in bl_mesh.data.uv_layers]
+    if any(name in ("uv1", "uv2", "uv3", "uv4") for name in names):
+        name = f"uv{slot + 1}"
+        return names.index(name) if name in names else None
+    usable = [i for i, name in enumerate(names) if name != LIGHTMAP_UV]
+    return usable[slot] if slot < len(usable) else None
+
+
+def _uvs_for_slot(bl_mesh, slot):
+    index = _uv_layer_index(bl_mesh, slot)
+    return get_uvs_per_vertex(bl_mesh, index) if index is not None else {}
 
 
 def _normalize_uv(uv_x, uv_y):
@@ -1239,6 +1347,7 @@ def _serialize_meshes_data(bl_obj, bl_meshes, src_mod, dst_mod, materials_map, b
 
     face_position = 0
     face_offset = 0  # unused for now
+    num_polygons = 0
 
     for mesh_index, bl_mesh in enumerate(bl_meshes):
         face_padding = 2
@@ -1266,11 +1375,17 @@ def _serialize_meshes_data(bl_obj, bl_meshes, src_mod, dst_mod, materials_map, b
         vertex_buffer.extend(vertices.to_byte_array())
         if vertices2:
             vertex_buffer_2.extend(vertices2.to_byte_array())
-        if vertex_format != current_vertex_format or export_settings.no_vf_grouping:
+        # a run shares one vertex layout and 16-bit indices from 0: start a new one when the layout changes or
+        # the run would pass 65,535 vertices (the game's files use face_offset for that; a new run is simpler)
+        # both streams of a run are indexed alike (vertex_offset_2 + (base + i) * stride_2), so meshes with and
+        # without a second stream never share a run
+        run_full = current_vertex_position + len(bl_mesh.data.vertices) > 0xFFFF
+        run_key = (vertex_format, vertex_stride_2)
+        if run_key != current_vertex_format or export_settings.no_vf_grouping or run_full:
             current_vertex_offset = vertex_offset_accumulated
             current_vertex_offset_2 = vertex_offset_2_accumulated
             current_vertex_position = 0
-            current_vertex_format = vertex_format
+            current_vertex_format = run_key
 
         if use_strips:
             triangles = triangles_list_to_triangles_strip(bl_mesh)
@@ -1280,6 +1395,10 @@ def _serialize_meshes_data(bl_obj, bl_meshes, src_mod, dst_mod, materials_map, b
 
         triangles = [e + current_vertex_position for e in triangles]
         num_indices = len(triangles)
+        if use_strips:
+            num_polygons += sum(1 for i in range(num_indices - 2) if len(set(triangles[i:i + 3])) == 3)
+        else:
+            num_polygons += num_indices // 3
         # calculate padding for indices
         if ((num_indices * 2) % 4):
             triangles.append(triangles[-1])
@@ -1300,7 +1419,12 @@ def _serialize_meshes_data(bl_obj, bl_meshes, src_mod, dst_mod, materials_map, b
 
         # TODO: pre-check for no materials
         mesh.idx_material = materials_map[bl_mesh.data.materials[0].name]
-        mesh.vertex_format = vertex_format
+        # mod 153: the mesh's "vertex_format" is the number of weights per vertex (0 = rigid); the layout
+        # comes from the material vtype (corpus: live weights never exceed it in 12,588 meshes)
+        if dst_mod.header.version == 153:
+            mesh.vertex_format = max(max_bones_per_vertex, int(bl_mesh.data.get("mtfw_weight_count", 0)))
+        else:
+            mesh.vertex_format = vertex_format
         mesh.vertex_stride = vertex_stride
         mesh.vertex_stride_2 = vertex_stride_2
         # assert num_vertices == len(vertices_array) // 32
@@ -1349,15 +1473,16 @@ def _serialize_meshes_data(bl_obj, bl_meshes, src_mod, dst_mod, materials_map, b
         dst_mod.num_weight_bounds = len(meshes_data.weight_bounds)
 
     meshes_data._check()
+    dst_mod.header.num_edges = num_polygons   # rModel mPolygonNum (DX9 load 0xA53F50)
     return meshes_data, vertex_buffer, vertex_buffer_2, index_buffer
 
 
 def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_data):
     SCALE = 100
-    uvs_per_vertex = get_uvs_per_vertex(bl_mesh, 0)
-    uvs_per_vertex_2 = get_uvs_per_vertex(bl_mesh, 1)
-    uvs_per_vertex_3 = get_uvs_per_vertex(bl_mesh, 2)
-    uvs_per_vertex_4 = get_uvs_per_vertex(bl_mesh, 3)
+    uvs_per_vertex = _uvs_for_slot(bl_mesh, 0)
+    uvs_per_vertex_2 = _uvs_for_slot(bl_mesh, 1)
+    uvs_per_vertex_3 = _uvs_for_slot(bl_mesh, 2)
+    uvs_per_vertex_4 = _uvs_for_slot(bl_mesh, 3)
     color_per_vertex = _get_vertex_colors(bl_mesh)
     weights_per_vertex = get_bone_indices_and_weights_per_vertex(bl_mesh)
     max_bones_per_vertex = max({len(data) for data in weights_per_vertex.values()}, default=0)
@@ -1386,25 +1511,39 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
     elif dst_mod.header.version == 153:
         dmc4_vertex_format = int(mod_156_material_props.vtype, 16)
         skin_function = int(mod_156_material_props.func_skin, 16)
-        if dmc4_vertex_format == 0x1 and skin_function == 0x4:
+        if dmc4_vertex_format == 0x1:   # rModel load 0xA54459: decl 7/2 always reads stream 1 (TEXCOORD1, TANGENT)
             has_vertex_buffer_2 = True
             vtx_stride_2 = 8
             VertexBuff2Cls = Mod156.Vertex28
 
-        MOD153_VERTEX_MAPPER = {
-            0: 0,
-            1: 1,
-            2: 2,
-            3: 3
-        }
+        MOD153_VERTEX_MAPPER = {v: v for v in range(9)}
 
-        MOD153_VERTEX_CLS_MAPPER = {
+        MOD153_VERTEX_CLS_MAPPER = {   # same cases as the ksy's vertices switch
             0: Mod153.VfSkin,
             1: Mod153.VfSkinEx,
             2: Mod153.VfNonSkin,
-            3: Mod153.VfNonSkinCol
+            3: Mod153.VfNonSkinCol,
+            4: Mod153.VfSkin,
+            5: Mod153.VfSkin,      # skin + colour in the uv2 slot
+            6: Mod153.VfNonSkin,
+            7: Mod153.VfSkinEx,
+            8: Mod153.VfNonSkinCol,
         }
         VertexCls = MOD153_VERTEX_CLS_MAPPER[dmc4_vertex_format]
+        mesh_props = bl_mesh.data.albam_custom_properties.get_custom_properties_for_appid(app_id)
+        try:
+            vdecl = int(mesh_props.vdecl, 16)
+        except (TypeError, ValueError):
+            vdecl = None
+        try:
+            multitexture = int(getattr(mod_156_material_props, "func_multitexture", "0x0"), 16)
+        except (TypeError, ValueError):
+            multitexture = 0
+        if dmc4_vertex_format == 3 and multitexture == 1:   # decl 9: TEXCOORD2 in stream 1
+            vdecl = VDECL_LIGHTMAP
+        if not has_vertex_buffer_2 and vdecl in (VDECL_LIGHTMAP, VDECL_STREAM2_ZERO):
+            has_vertex_buffer_2, vtx_stride_2 = True, 4
+            VertexBuff2Cls = Mod153.Vertex24
         
         vertex_format = MOD153_VERTEX_MAPPER[dmc4_vertex_format]
         vtx_stride = 32
@@ -1430,22 +1569,38 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
         weights_per_vertex, max_bones_per_vertex=MAX_BONES, half_float=weight_half_float)
     vtx_stream = KaitaiStream(
         BytesIO(bytearray(vtx_stride * vertex_count)))
+    lightmap_per_vertex = {}
     if has_vertex_buffer_2:
         vtx_stream_2 = KaitaiStream(
-            BytesIO(bytearray(8 * vertex_count)))
+            BytesIO(bytearray(vtx_stride_2 * vertex_count)))
+        if vtx_stride_2 == 4 and LIGHTMAP_UV in bl_mesh.data.uv_layers:
+            lightmap_per_vertex = get_uvs_per_vertex(
+                bl_mesh, bl_mesh.data.uv_layers.find(LIGHTMAP_UV))
     bytes_empty = b'\x00\x00'
+    uv_filler = b'\xff\xff' if dst_mod.header.version == 153 else bytes_empty   # unused UV slots in DX9 files
+    skin_color = dst_mod.header.version == 153 and vertex_format == 5
     for vertex_index, vertex in enumerate(bl_mesh.data.vertices):
         vertex_struct = VertexCls(_parent=mesh, _root=mesh._root)
-        if has_vertex_buffer_2:
+        if has_vertex_buffer_2 and vtx_stride_2 == 4:   # vdecl 9: half2 lightmap UV, vdecl 1: zeros
+            vertex_struct_2 = VertexBuff2Cls(_parent=mesh, _root=mesh._root)
+            vertex_struct_2.occlusion = dst_mod.Vec4U1(_parent=vertex_struct_2, _root=vertex_struct_2._root)
+            raw = b"\x00\x00\x00\x00"
+            if lightmap_per_vertex:
+                uv_x, uv_y = _normalize_uv(*lightmap_per_vertex.get(vertex_index, (0, 0)))
+                raw = pack("<2e", uv_x, uv_y)
+            (vertex_struct_2.occlusion.x, vertex_struct_2.occlusion.y,
+             vertex_struct_2.occlusion.z, vertex_struct_2.occlusion.w) = raw
+        elif has_vertex_buffer_2:
             vertex_struct_2 = VertexBuff2Cls(_parent=mesh, _root=mesh._root)
             vertex_struct_2.occlusion = dst_mod.Vec4U1(
                 _parent=vertex_struct_2, _root=vertex_struct_2._root)
             vertex_struct_2.tangent = dst_mod.Vec4U1(
                 _parent=vertex_struct_2, _root=vertex_struct_2._root)
-            vertex_struct_2.occlusion.x = 255
-            vertex_struct_2.occlusion.y = 255
-            vertex_struct_2.occlusion.z = 255
-            vertex_struct_2.occlusion.w = 255
+            # stream 1 +0 is TEXCOORD1 (half2), 0 in the game's files (the ksy calls it "occlusion")
+            vertex_struct_2.occlusion.x = 0
+            vertex_struct_2.occlusion.y = 0
+            vertex_struct_2.occlusion.z = 0
+            vertex_struct_2.occlusion.w = 0
             # Tangents
 
             t = tangents.get(vertex_index, (0, 0, 0))
@@ -1512,8 +1667,12 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
                 vertex_struct.uv2.u = pack('e', uv_x)
                 vertex_struct.uv2.v = pack('e', uv_y)
             else:
-                vertex_struct.uv2.u = bytes_empty
-                vertex_struct.uv2.v = bytes_empty
+                vertex_struct.uv2.u = uv_filler
+                vertex_struct.uv2.v = uv_filler
+            if skin_color:   # DX9 vtype 5: D3DCOLOR (b, g, r, a) in the uv2 slot
+                c = color_per_vertex.get(vertex_index, (255, 255, 255, 255)) if color_per_vertex else (255, 255, 255, 255)
+                vertex_struct.uv2.u = bytes((c[0], c[1]))
+                vertex_struct.uv2.v = bytes((c[2], c[3]))
         # UV3
         if vertex_format in VERTEX_FORMATS_UV3:
             vertex_struct.uv3 = dst_mod.Vec2HalfFloat(
@@ -1524,8 +1683,8 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
                 vertex_struct.uv3.u = pack('e', uv_x)
                 vertex_struct.uv3.v = pack('e', uv_y)
             else:
-                vertex_struct.uv3.u = bytes_empty
-                vertex_struct.uv3.v = bytes_empty
+                vertex_struct.uv3.u = uv_filler
+                vertex_struct.uv3.v = uv_filler
         # UV4
         if vertex_format in VERTEX_FORMATS_UV4:
             vertex_struct.uv4 = dst_mod.Vec2HalfFloat(
@@ -1536,8 +1695,8 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
                 vertex_struct.uv4.u = pack('e', uv_x)
                 vertex_struct.uv4.v = pack('e', uv_y)
             else:
-                vertex_struct.uv4.u = bytes_empty
-                vertex_struct.uv4.v = bytes_empty
+                vertex_struct.uv4.u = uv_filler
+                vertex_struct.uv4.v = uv_filler
         # Vertex colors
         if vertex_format in VERTEX_FORMATS_RGBA:
             vertex_struct.rgba = dst_mod.Vec4U1(_parent=vertex_struct, _root=vertex_struct._root)
@@ -1830,10 +1989,58 @@ def _set_static_mesh_weight_bounds(dst_mod, bl_mesh_ob, meshes_data):
     return wb
 
 
+def _joint_space_weight_bound(armature, vertex_group, vertices_in_group, dst_mod, meshes_data):
+    """mod 153 weight bound: the box of the joint's weighted vertices in JOINT space (game units, Y-up):
+    p_game . inverse_bind[j] (row vectors). The game culls with c_world = (bsphere.xyz, 1) . joint world matrix,
+    radius bsphere.w, and an OBB from oabb (rows 0-2 axes, row 3 centre, joint space) with oabb_dimension
+    half-extents (uModel::updateBoundary 0x9E7DC0, cullPrimitivesAgainstFrustum 0x9EDDD0)."""
+    joint = armature.data.bones.find(vertex_group.name)
+    if joint < 0 or joint >= len(dst_mod.bones_data.inverse_bind_matrices):
+        return None
+    ibm = dst_mod.bones_data.inverse_bind_matrices[joint]
+    rows = [(r.x, r.y, r.z, r.w) for r in (ibm.row_1, ibm.row_2, ibm.row_3, ibm.row_4)]
+    local = []
+    for v in vertices_in_group:
+        if not any(g.group == vertex_group.index and g.weight > 0 for g in v.groups):
+            continue
+        p = (v.co[0] * 100, v.co[2] * 100, -v.co[1] * 100)   # the position written to the vertex buffer
+        local.append(tuple(p[0] * rows[0][k] + p[1] * rows[1][k] + p[2] * rows[2][k] + rows[3][k] for k in range(3)))
+    if not local:
+        return None
+    lo = [min(p[k] for p in local) for k in range(3)]
+    hi = [max(p[k] for p in local) for k in range(3)]
+    c = [(a + b) / 2 for a, b in zip(lo, hi)]
+    r = max(math.dist(c, p) for p in local)
+
+    wb = dst_mod.WeightBound(_parent=meshes_data, _root=meshes_data._root)
+
+    def vec4(owner, x, y, z, w):
+        v4 = dst_mod.Vec4(_parent=owner, _root=owner._root)
+        v4.x, v4.y, v4.z, v4.w = x, y, z, w
+        return v4
+
+    wb.bone_id = joint
+    wb.unk_01 = dst_mod.Vec3(_parent=wb, _root=wb._root)
+    wb.unk_01.x = wb.unk_01.y = wb.unk_01.z = 0.0
+    wb.bsphere = vec4(wb, c[0], c[1], c[2], r)
+    wb.bbox_min = vec4(wb, lo[0], lo[1], lo[2], 0.0)
+    wb.bbox_max = vec4(wb, hi[0], hi[1], hi[2], 0.0)
+    wb.oabb = dst_mod.Matrix4x4(_parent=wb, _root=wb._root)
+    wb.oabb.row_1 = vec4(wb.oabb, 1.0, 0.0, 0.0, 0.0)
+    wb.oabb.row_2 = vec4(wb.oabb, 0.0, 1.0, 0.0, 0.0)
+    wb.oabb.row_3 = vec4(wb.oabb, 0.0, 0.0, 1.0, 0.0)
+    wb.oabb.row_4 = vec4(wb.oabb, c[0], c[1], c[2], 1.0)
+    wb.oabb_dimension = vec4(wb, (hi[0] - lo[0]) / 2, (hi[1] - lo[1]) / 2, (hi[2] - lo[2]) / 2, 0.0)
+    wb._check()
+    return wb
+
+
 def _calculate_vertex_group_weight_bound(mesh_vertex_groups, armature, vertex_group, dst_mod, meshes_data):
     vertices_in_group = mesh_vertex_groups.get(vertex_group.index)
     if not vertices_in_group:
         return
+    if dst_mod.header.version == 153:
+        return _joint_space_weight_bound(armature, vertex_group, vertices_in_group, dst_mod, meshes_data)
 
     bone_index = armature.pose.bones.find(vertex_group.name)
     pose_bone = armature.pose.bones[bone_index]
