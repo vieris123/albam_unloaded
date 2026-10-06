@@ -305,8 +305,11 @@ def is_blimage_dds(bl_im):
         data = bl_im.packed_file.data
     else:
         fp = bpy.path.abspath(bl_im.filepath)
-        with open(fp, 'rb') as f:
-            data = f.read(4)
+        try:   # generated / unsaved images have no file: not DDS
+            with open(fp, 'rb') as f:
+                data = f.read(4)
+        except OSError:
+            return False
     id_magic = data[:4]
     if id_magic == b"DDS ":
         is_dds = True

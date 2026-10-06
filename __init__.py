@@ -40,6 +40,7 @@ def register():
     importlib.import_module("albam.engines.mtfw.effect")
     importlib.import_module("albam.engines.mtfw.effect_export")
     importlib.import_module("albam.engines.mtfw.effect_editor")
+    importlib.import_module("albam.engines.mtfw.effect_retype")
     importlib.import_module("albam.blender_ui.foot_ik")
     if os.getenv("ALBAM_ENABLE_REEN"):
         importlib.import_module("albam.engines.reng.archive")

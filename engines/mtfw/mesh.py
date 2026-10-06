@@ -26,6 +26,7 @@ from albam.lib.blender import (
     strip_triangles_to_triangles_list,
     triangles_list_to_triangles_strip,
 )
+from albam.exceptions import AlbamCheckFailure
 from albam.lib.misc import chunks
 from albam.registry import blender_registry
 from albam.vfs import VirtualFileData
@@ -389,6 +390,7 @@ def _is_edge_mesh(mod, mesh):
 VTYPE_SKIN_COLOR = 5   # DX9 vtype 5 (vdecl 12): skinned, with a D3DCOLOR where vtype 0 has uv2
 VDECL_LIGHTMAP = 9     # vtype 3 + 4-byte stream 2 holding a half2 texcoord
 VDECL_STREAM2_ZERO = 1  # vtype 2 + 4-byte stream 2, all zeros in the game's files
+TANGENT_W_ATTR = "mtfw_tangent_w"   # DMC4 tangent.w (direct-light occlusion), 0-1
 LIGHTMAP_UV = "uv_stream2"   # second texcoord stream (tiled values: not a 0-1 lightmap)
 
 
@@ -418,6 +420,14 @@ def build_blender_mesh(app_id, mod, mesh, name, bbox_data, use_tri_strips=False)
         _process_weights(mod, mesh, vertex, vertex_index, weights_per_bone)
     if skin_color:
         uvs_2 = []
+    # tangent.w is a per-vertex direct-light occlusion term in DMC4's shaders (not handedness): keep it
+    tangent_w = []
+    if mod.header.version == 153:
+        streams = mesh.vertices
+        if not hasattr(mesh.vertices[0], "tangent") and mesh.vertex_stride_2 == 8:
+            streams = mesh.vertices2
+        if streams and hasattr(streams[0], "tangent"):
+            tangent_w = [v.tangent.w / 255 for v in streams]
     lightmap = []
     if mod.header.version == 153 and mesh.vertex_stride_2 == 4 and mesh.vdecl == VDECL_LIGHTMAP:
         for v2 in mesh.vertices2:
@@ -449,6 +459,9 @@ def build_blender_mesh(app_id, mod, mesh, name, bbox_data, use_tri_strips=False)
     _build_uvs(me_ob, uvs_4, "uv4")
     if len(lightmap) == 2 * len(locations):
         _build_uvs(me_ob, lightmap, LIGHTMAP_UV)
+    if len(tangent_w) == len(locations):
+        attribute = me_ob.attributes.new(TANGENT_W_ATTR, "FLOAT", "POINT")
+        attribute.data.foreach_set("value", tangent_w)
     _build_vertex_colors(me_ob, vertex_colors, "vc")
     _build_weights(ob, weights_per_bone)
 
@@ -846,6 +859,13 @@ def export_mod(bl_obj):
     bl_meshes = [c for c in bl_obj.children_recursive if c.type == "MESH"]
     if export_settings.export_visible:
         bl_meshes = [mesh for mesh in bl_meshes if mesh.visible_get()]
+    if src_mod.header.version == 153:   # one material per mesh: the record has a single idx_material
+        mixed = [m.name for m in bl_meshes
+                 if len({p.material_index for p in m.data.polygons}) > 1]
+        if mixed:
+            raise AlbamCheckFailure(
+                "Some meshes use more than one material", details=", ".join(mixed),
+                solution="Separate them by material (Edit Mode > Mesh > Separate > By Material)")
 
     _serialize_top_level_mod(bl_meshes, src_mod, dst_mod)
     _init_mod_header(bl_obj, src_mod, dst_mod)
@@ -1530,6 +1550,12 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
             8: Mod153.VfNonSkinCol,
         }
         VertexCls = MOD153_VERTEX_CLS_MAPPER[dmc4_vertex_format]
+        if dmc4_vertex_format in (0, 1, 4, 5) and not has_bones:
+            raise AlbamCheckFailure(
+                f"Material {bl_mesh.material_slots[0].material.name} uses a skinned vertex layout on a model without bones",
+                details=f"mesh {bl_mesh.name}: vtype {dmc4_vertex_format} needs bone indices and weights",
+                solution="Set the material's VTYPE to VTYPE_NONSKIN (or VTYPE_NONSKIN_COL with vertex colours) and "
+                         "func skin to SKIN_NONE")
         mesh_props = bl_mesh.data.albam_custom_properties.get_custom_properties_for_appid(app_id)
         try:
             vdecl = int(mesh_props.vdecl, 16)
@@ -1576,6 +1602,14 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
         if vtx_stride_2 == 4 and LIGHTMAP_UV in bl_mesh.data.uv_layers:
             lightmap_per_vertex = get_uvs_per_vertex(
                 bl_mesh, bl_mesh.data.uv_layers.find(LIGHTMAP_UV))
+    tangent_w_attr = bl_mesh.data.attributes.get(TANGENT_W_ATTR)
+    tangent_w = [d.value for d in tangent_w_attr.data] if tangent_w_attr is not None else None
+
+    def _tangent_w(index):
+        if tangent_w is None or index >= len(tangent_w):
+            return 254
+        return min(max(round(tangent_w[index] * 255), 0), 255)
+
     bytes_empty = b'\x00\x00'
     uv_filler = b'\xff\xff' if dst_mod.header.version == 153 else bytes_empty   # unused UV slots in DX9 files
     skin_color = dst_mod.header.version == 153 and vertex_format == 5
@@ -1608,12 +1642,12 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
                 vertex_struct_2.tangent.x = round(((t[0] * 0.5) + 0.5) * 255)
                 vertex_struct_2.tangent.y = round(((t[2] * 0.5) + 0.5) * 255)
                 vertex_struct_2.tangent.z = round(((t[1] * -0.5) + 0.5) * 255)
-                vertex_struct_2.tangent.w = 254
+                vertex_struct_2.tangent.w = _tangent_w(vertex_index)
             except ValueError:
                 vertex_struct_2.tangent.x = 0
                 vertex_struct_2.tangent.y = 0
                 vertex_struct_2.tangent.z = 0
-                vertex_struct_2.tangent.w = 254
+                vertex_struct_2.tangent.w = _tangent_w(vertex_index)
         # Position types
         if has_bones:
             if MAX_BONES == 1:
@@ -1643,12 +1677,12 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
                 vertex_struct.tangent.x = round(((t[0] * 0.5) + 0.5) * 255)
                 vertex_struct.tangent.y = round(((t[2] * 0.5) + 0.5) * 255)
                 vertex_struct.tangent.z = round(((t[1] * -0.5) + 0.5) * 255)
-                vertex_struct.tangent.w = 254
+                vertex_struct.tangent.w = _tangent_w(vertex_index)
             except ValueError:
                 vertex_struct.tangent.x = 0
                 vertex_struct.tangent.y = 0
                 vertex_struct.tangent.z = 0
-                vertex_struct.tangent.w = 254
+                vertex_struct.tangent.w = _tangent_w(vertex_index)
         # UV
         if vertex_format not in VERTEX_FORMATS_BRIDGE:
             vertex_struct.uv = dst_mod.Vec2HalfFloat(
