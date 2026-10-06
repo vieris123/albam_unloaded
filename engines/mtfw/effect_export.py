@@ -264,6 +264,8 @@ def apply_to_scene(context, root, rebuild=False):
         from . import effect_sim
         effect_sim.store_source(root, data, root.get("efl_start_frame", context.scene.frame_current))
         effect_sim.invalidate()
+        from .effect_filter import apply_filter
+        apply_filter(root)
         context.scene.frame_set(context.scene.frame_current)
         _refresh_editor(context)
         return root, notes, False
@@ -346,7 +348,8 @@ def _copy_record_object(context, source, root, parent):
         collection.objects.link(ob)
     ob.empty_display_type, ob.empty_display_size = source.empty_display_type, source.empty_display_size
     for key in list(source.keys()):
-        if key.startswith("efl_") and key not in ("efl_root", "efl_raw", "efl_record", "efl_serial"):
+        if key.startswith("efl_") and key not in ("efl_root", "efl_raw", "efl_record", "efl_serial",
+                                                  "efl_filtered"):
             value = source[key]
             ob[key] = value.to_dict() if hasattr(value, "to_dict") else (
                 value.to_list() if hasattr(value, "to_list") else value)
@@ -451,7 +454,8 @@ class ALBAM_OT_EflCopyRecordTo(bpy.types.Operator):
     bl_options = {"REGISTER", "UNDO"}
     bl_property = "target"
 
-    target: bpy.props.EnumProperty(name="Effect", items=_effect_items)
+    target: bpy.props.EnumProperty(name="Effect", items=_effect_items,
+                                  description="The imported effect to copy the record into")
 
     @classmethod
     def poll(cls, context):

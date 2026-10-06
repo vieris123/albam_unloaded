@@ -522,7 +522,9 @@ def _update_strips(ob, scene, info):
 
 
 def _sim_objects(scene):
-    return [ob for ob in scene.objects if SIM_KEY in ob and ob.type in ("MESH", "EMPTY")]
+    # objects hidden by the spawn filter (effect_filter.py) are skipped; it updates them when they're shown again
+    return [ob for ob in scene.objects if SIM_KEY in ob and ob.type in ("MESH", "EMPTY")
+            and "efl_filter_hidden" not in ob]
 
 
 @persistent

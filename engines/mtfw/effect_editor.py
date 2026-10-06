@@ -10,9 +10,11 @@ from bpy.app.handlers import persistent
 
 from albam.registry import blender_registry
 from .efl import schema
+from .efl.field_help import lookup as field_help
 from .efl.edit import as_list, keyframe_value_type, to_prop
 from .efl.model import SLOTS
 from .efl.sim import ROT_ORDERS
+from . import effect_filter
 from .effect_export import all_record_objects, effect_root, ordered_record_objects, record_object
 
 MAX_VALUES = 8
@@ -34,7 +36,8 @@ _D3DBLEND = ("ZERO", "ONE", "SRCCOLOR", "INVSRCCOLOR", "SRCALPHA", "INVSRCALPHA"
 _AXES = ("+X", "-X", "+Y", "-Y", "+Z", "-Z", "None (+Z)")
 _ENUM_LABELS = {
     "BlendSrc": _D3DBLEND, "BlendDst": _D3DBLEND, "BlendOp": ("ADD", "SUBTRACT", "REVSUBTRACT", "MIN", "MAX"),
-    "RangeType": ("Point", "Box, X face", "Box, Y face", "Box, Z face", "Cylinder X", "Cylinder Y", "Cylinder Z",
+    "RangeType": ("Point", "Box, steps along X", "Box, steps along Y", "Box, steps along Z", "Cylinder X",
+                  "Cylinder Y", "Cylinder Z",
                   "Sphere", "Hemisphere"),
     "RangeDirType": ("None", "Diffuse", "Converge", "Unit"),
     "LineType": ("FOLLOW", "FIX", "FIX_END", "CHAIN", "LENGTH", "CLOTH"),
@@ -64,10 +67,22 @@ _ENUM_LABELS = {
 _ENUM_ITEMS = {name: [(str(i), f"{i} {label}", "") for i, label in enumerate(labels)]
                for name, labels in _ENUM_LABELS.items()}
 _NO_ITEMS = [("0", "0", "")]
-INP_TYPES = [("0", "Linear", ""), ("1", "Hermite", ""), ("2", "Lagrange", "4-point cubic")]
-REF_TYPES = [("0", "Particle age", ""), ("1", "Generator timer", ""), ("2", "Effect timer", ""),
-             ("3", "Parent effect timer", ""), ("4", "Global effect timer", ""), ("5", "Particle age (5)", ""),
-             ("6", "Particle age (6)", ""), ("7", "Particle age (7)", "")]
+INP_TYPES = [("0", "Linear", "Straight lines between keys"),
+             ("1", "Hermite", "A smooth curve through the keys"),
+             ("2", "Lagrange", "A 4-point cubic through the keys")]
+REF_TYPES = [("0", "Particle age", "Key frames count from each particle's birth"),
+             ("1", "Generator timer", "Key frames count on the generator's timer"),
+             ("2", "Effect timer", "Key frames count from the effect's start"),
+             ("3", "Parent effect timer", "Key frames count on the parent effect's timer"),
+             ("4", "Global effect timer", "Key frames count on the global effect timer"),
+             ("5", "Particle age (5)", "Treated like Particle age"),
+             ("6", "Particle age (6)", "Treated like Particle age"),
+             ("7", "Particle age (7)", "Treated like Particle age")]
+VALUE_TIP = "The field's value. Hover the field's name for what it does and how to edit it"
+TIER_TIPS = {"dx9": "Verified in the DX9 game code",
+             "se": "From the Special Edition symbols; not confirmed in the DX9 code",
+             "prior": "Name from an earlier reverse-engineering pass; its meaning isn't verified",
+             "unknown": "Meaning unknown"}
 _KEY_DEFAULTS = {"f32": [1.0, 0.0], "u32": [0, 0], "vec3": [0.0] * 6, "fixangle": [0] * 6,
                  "color": [255, 255, 255, 255, 255, 255, 255, 255]}
 
@@ -192,6 +207,10 @@ def _on_item_edit(item, context):
             ob.scale = item.floats[0], item.floats[2], item.floats[4]
     finally:
         _loading = False
+    if item.slot == "gen" and item.label in ("GroupFlag", "MaterialFlag"):
+        root = effect_root(ob)
+        if root is not None:
+            effect_filter.apply_filter(root)
 
 
 def _enum_items(item, context):
@@ -213,12 +232,16 @@ class AlbamEflFieldItem(bpy.types.PropertyGroup):
     shift: bpy.props.IntProperty()
     width: bpy.props.IntProperty()
     error: bpy.props.StringProperty()
-    floats: bpy.props.FloatVectorProperty(size=MAX_VALUES, precision=4, update=_on_item_edit)
-    ints: bpy.props.IntVectorProperty(size=MAX_VALUES, update=_on_item_edit)
-    text: bpy.props.StringProperty(update=_on_item_edit)
-    color_a: bpy.props.FloatVectorProperty(size=4, subtype="COLOR_GAMMA", min=0.0, max=1.0, update=_on_item_edit)
-    color_b: bpy.props.FloatVectorProperty(size=4, subtype="COLOR_GAMMA", min=0.0, max=1.0, update=_on_item_edit)
-    enum_value: bpy.props.EnumProperty(items=_enum_items, update=_on_item_edit)
+    help_key: bpy.props.StringProperty()   # "<slot>:<field>" in efl.field_help
+    floats: bpy.props.FloatVectorProperty(size=MAX_VALUES, precision=4, description=VALUE_TIP,
+                                          update=_on_item_edit)
+    ints: bpy.props.IntVectorProperty(size=MAX_VALUES, description=VALUE_TIP, update=_on_item_edit)
+    text: bpy.props.StringProperty(description=VALUE_TIP, update=_on_item_edit)
+    color_a: bpy.props.FloatVectorProperty(size=4, subtype="COLOR_GAMMA", min=0.0, max=1.0,
+                                           description=VALUE_TIP, update=_on_item_edit)
+    color_b: bpy.props.FloatVectorProperty(size=4, subtype="COLOR_GAMMA", min=0.0, max=1.0,
+                                           description=VALUE_TIP, update=_on_item_edit)
+    enum_value: bpy.props.EnumProperty(items=_enum_items, description=VALUE_TIP, update=_on_item_edit)
     # name (PropertyGroup.name) = "<slot>/<field>", label = the field name
     label: bpy.props.StringProperty()
 
@@ -360,10 +383,19 @@ def _on_kf_edit(owner, context):
 
 @blender_registry.register_blender_prop
 class AlbamEflKeyItem(bpy.types.PropertyGroup):
-    frame: bpy.props.IntProperty(min=0, update=_on_kf_edit)
-    values: bpy.props.FloatVectorProperty(size=6, precision=4, update=_on_kf_edit)
-    color_a: bpy.props.FloatVectorProperty(size=4, subtype="COLOR_GAMMA", min=0.0, max=1.0, update=_on_kf_edit)
-    color_b: bpy.props.FloatVectorProperty(size=4, subtype="COLOR_GAMMA", min=0.0, max=1.0, update=_on_kf_edit)
+    frame: bpy.props.IntProperty(
+        min=0, update=_on_kf_edit,
+        description="Game frame (60 fps) of this key, counted on the keyframe's Timer. Frames must increase")
+    values: bpy.props.FloatVectorProperty(
+        size=6, precision=4, update=_on_kf_edit,
+        description="The key's value and its random part: the game uses value + random x rand "
+                    "(X Y Z keys: one pair per axis)")
+    color_a: bpy.props.FloatVectorProperty(
+        size=4, subtype="COLOR_GAMMA", min=0.0, max=1.0, update=_on_kf_edit,
+        description="Colour A of this key. The game mixes colours A and B by a random amount")
+    color_b: bpy.props.FloatVectorProperty(
+        size=4, subtype="COLOR_GAMMA", min=0.0, max=1.0, update=_on_kf_edit,
+        description="Colour B of this key. The game mixes colours A and B by a random amount")
 
 
 def _on_record_index(state, context):
@@ -389,32 +421,60 @@ class AlbamEflRecordItem(bpy.types.PropertyGroup):
     is_new: bpy.props.BoolProperty()
 
 
-TABS = [("gen", "Generator", ""), ("ptcl", "Particle", ""), ("life", "Life", ""), ("move", "Move", ""),
-        ("keys", "Keys", "Keyframes"), ("more", "More", "Collision / culling")]
+TABS = [("gen", "Generator", "Generator block: where, when and how many particles spawn"),
+        ("ptcl", "Particle", "Particle block: the particle type and its look (texture, blending, colour, size)"),
+        ("life", "Life", "Life block: how long particles live and how they fade in and out"),
+        ("move", "Move", "Move block: how particles move after they spawn"),
+        ("keys", "Keys", "Keyframes: animate a field over time"),
+        ("more", "More", "The record's collision and culling settings")]
+
+
+def _on_filter_edit(state, context):
+    """Spawn filter widgets: store the masks on the effect and re-filter its records."""
+    if _loading or state.records_root is None:
+        return
+    effect_filter.set_masks(state.records_root, *effect_filter.masks_from_options(state))
+    effect_filter.apply_filter(state.records_root)
 
 
 @blender_registry.register_blender_prop_albam(name="efl_editor")
 class AlbamEflEditor(bpy.types.PropertyGroup):
     target: bpy.props.PointerProperty(type=bpy.types.Object)
-    tab: bpy.props.EnumProperty(items=TABS, default="ptcl")
-    search: bpy.props.StringProperty(name="Search", options={"TEXTEDIT_UPDATE"})
+    tab: bpy.props.EnumProperty(items=TABS, default="ptcl", description="Which part of the record to edit")
+    search: bpy.props.StringProperty(name="Search", options={"TEXTEDIT_UPDATE"},
+                                     description="Show only the fields whose name contains this text")
     show_unverified: bpy.props.BoolProperty(
         name="Unverified", description="Also show fields whose meaning isn't verified in the DX9 code")
     show_notes: bpy.props.BoolProperty(name="Notes", description="Show the reverse-engineering note of each field")
-    show_records: bpy.props.BoolProperty(name="Records", default=True)
+    show_records: bpy.props.BoolProperty(name="Records", default=True,
+                                         description="Show the list of the effect's records")
+    show_filter: bpy.props.BoolProperty(
+        name="Spawn Filter", default=True,
+        description="Show the spawn filter: which records the game builds for a given spawn call")
+    group_all: effect_filter.group_all_prop(_on_filter_edit)
+    group_bits: effect_filter.group_bits_prop(_on_filter_edit)
+    surface: effect_filter.surface_prop(_on_filter_edit)
     records_root: bpy.props.PointerProperty(type=bpy.types.Object)
     records: bpy.props.CollectionProperty(type=AlbamEflRecordItem)
-    records_index: bpy.props.IntProperty(update=_on_record_index)
+    records_index: bpy.props.IntProperty(update=_on_record_index,
+                                         description="Click a record to make it active and edit it")
     fields: bpy.props.CollectionProperty(type=AlbamEflFieldItem)
-    kf_field: bpy.props.EnumProperty(name="Keyframe", items=_kf_field_items, update=_on_kf_field)
+    kf_field: bpy.props.EnumProperty(
+        name="Keyframe", items=_kf_field_items, update=_on_kf_field,
+        description="Which keyframe of the record to edit. A field with keys uses them instead of its plain value")
     kf_vtype: bpy.props.StringProperty()
-    kf_inp: bpy.props.EnumProperty(name="Interpolation", items=INP_TYPES, update=_on_kf_edit)
-    kf_ref: bpy.props.EnumProperty(name="Timer", items=REF_TYPES, update=_on_kf_edit)
-    kf_loop: bpy.props.BoolProperty(name="Loop", update=_on_kf_edit)
-    kf_init_only: bpy.props.BoolProperty(name="Init only", description="Evaluated once at spawn",
-                                         update=_on_kf_edit)
+    kf_inp: bpy.props.EnumProperty(name="Interpolation", items=INP_TYPES, update=_on_kf_edit,
+                                   description="How the value changes between keys")
+    kf_ref: bpy.props.EnumProperty(name="Timer", items=REF_TYPES, update=_on_kf_edit,
+                                   description="Which clock the key frames count on")
+    kf_loop: bpy.props.BoolProperty(name="Loop", update=_on_kf_edit,
+                                    description="Start over after the last key instead of holding its value")
+    kf_init_only: bpy.props.BoolProperty(
+        name="Init only", update=_on_kf_edit,
+        description="Evaluate the keys once, when the particle spawns; after that the field's Add value applies. "
+                    "Off: the keys set the value every frame (and Add is ignored)")
     keys: bpy.props.CollectionProperty(type=AlbamEflKeyItem)
-    key_index: bpy.props.IntProperty()
+    key_index: bpy.props.IntProperty(description="Click a key to select it")
 
 
 # -- loading ----------------------------------------------------------------------------------------
@@ -423,6 +483,7 @@ def _add_field(state, slot, f, value):
     item = state.fields.add()
     item.name, item.label, item.slot = f"{slot}/{f.name}", f.name, slot
     item.ftype, item.tier, item.note = f.type, f.tier, f.note
+    item.help_key = f"{slot}:{f.name}"
     base, n = schema.parse_type(f.type)
     item.element, item.is_array = base, n is not None
     item.per = _TUPLE_SIZE.get(base, 1)
@@ -451,6 +512,7 @@ def _add_bit(state, slot, b, value):
     item = state.fields.add()
     item.name, item.label, item.slot = f"{slot}/{b.name}", b.name, slot
     item.tier, item.note, item.ftype = b.tier, b.note, f"bits {b.shift}..{b.shift + b.width - 1}"
+    item.help_key = f"{slot}:{b.name}"
     item.parent, item.shift, item.width = b.field, b.shift, b.width
     if b.name in _ENUM_ITEMS and _as_int(value) < len(_ENUM_LABELS[b.name]):
         item.kind = "enum"
@@ -491,7 +553,8 @@ def load_record(state, ob):
                     continue
                 for sf in sub_struct.fields:
                     if sf.name in subs[offset_field]:
-                        _add_field(state, f"{slot}:{offset_field}", sf, subs[offset_field][sf.name])
+                        item = _add_field(state, f"{slot}:{offset_field}", sf, subs[offset_field][sf.name])
+                        item.help_key = f"{f.sub}:{sf.name}"
     finally:
         _loading = False
     root = effect_root(ob)
@@ -529,6 +592,8 @@ def sync_records(state, root, active=None):
         state.records_root = root
         if root is None:
             return
+        state.group_all, state.group_bits, state.surface = effect_filter.options_from_masks(
+            *effect_filter.get_masks(root))
         try:
             obs = ordered_record_objects(root)
         except Exception:   # duplicated records: still list them
@@ -587,13 +652,87 @@ class ALBAM_OT_EflSyncRecords(bpy.types.Operator):
         return {"FINISHED"}
 
 
+_USAGE = {
+    "rangef": "Range: base and +rand. The game uses base + random x rand (a new random each time it's used)",
+    "rangeu16": "Range of whole numbers: base and +rand. The game uses base + random x rand",
+    "vec3": "X Y Z in game axes (Y is up)",
+    "vec4": "X Y Z W",
+    "point": "X Y",
+    "easecurve": "Ease curve: two shape values A and B",
+    "f32": "A number",
+    "u32": "A 32-bit word in hex (0x...). Arrays: comma-separated words",
+    "str64": "Text, at most 63 characters. Paths are relative to the arc root, without an extension",
+}
+
+
+def field_tooltip(item):
+    """Tooltip for an editor field: what it does (schema note), how to edit it, and how sure the layout is."""
+    lines = []
+    help_text = field_help(item.help_key)
+    read_only = item.kind == "readonly" and item.note in READ_ONLY.values()
+    if help_text:
+        lines.append(help_text)
+    if read_only:
+        lines.append(f"Read-only here: {item.note}")
+    elif item.note and not help_text:
+        lines.append(item.note[0].upper() + item.note[1:])
+    if item.kind == "bit":
+        lines.append(f"Bits {item.shift}..{item.shift + item.width - 1} of {item.parent} "
+                     f"(0..{(1 << item.width) - 1}). Editing it updates {item.parent}, and the other way round")
+    elif item.kind == "enum":
+        lines.append("Pick one of the values the game handles")
+        if item.parent:
+            lines.append(f"Stored in bits {item.shift}..{item.shift + item.width - 1} of {item.parent}")
+    elif item.kind == "color":
+        lines.append("Colour (stored as B, G, R, A bytes)" + (". Two colours: the game mixes A and B by a "
+                                                              "random amount" if item.count > 4 else ""))
+    else:
+        usage = _USAGE.get(item.element)
+        if item.element in ("rangef", "rangeu16") and "rand" in help_text:   # the help explains this range
+            usage = None
+        if usage:
+            lines.append(usage)
+        if item.is_array:
+            lines.append(f"{item.count // max(item.per, 1)} values")
+    if item.slot == "gen" and item.label in ("GroupFlag", "MaterialFlag"):
+        lines.append("Change the Spawn Filter above to preview which spawn calls build this record")
+    lines.append(f"Type {item.ftype}. {TIER_TIPS.get(item.tier, TIER_TIPS['unknown'])}")
+    if help_text and item.note and not read_only:
+        lines.append(f"RE note: {item.note}")
+    return ".\n".join(line.rstrip(".") for line in lines) + "."
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_EflFieldInfo(bpy.types.Operator):
+    """What this field does and how to edit it"""
+    bl_idname = "albam.efl_field_info"
+    bl_label = "Field Info"
+    bl_options = {"INTERNAL"}
+
+    field: bpy.props.StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+
+    @classmethod
+    def description(cls, context, properties):
+        item = _state(context).fields.get(properties.field)
+        return field_tooltip(item) if item is not None else cls.__doc__
+
+    def execute(self, context):
+        item = _state(context).fields.get(self.field)
+        if item is not None:   # clicking shows the tooltip in the status bar too
+            self.report({"INFO"}, f"{item.label}: " + field_tooltip(item).replace("\n", " "))
+        return {"FINISHED"}
+
+
 @blender_registry.register_blender_type
 class ALBAM_UL_EflRecords(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         if item.ob is None:
             layout.label(text=item.name + "  (deleted)", icon="ERROR")
             return
-        layout.label(text=item.name, icon="ADD" if item.is_new else "PARTICLES")
+        if item.ob.get("efl_filtered"):
+            layout.label(text=item.name + "  (filtered out)", icon="HIDE_ON")
+        else:
+            layout.label(text=item.name, icon="ADD" if item.is_new else "PARTICLES")
 
 
 @blender_registry.register_blender_type
@@ -737,7 +876,8 @@ def _draw_field(layout, item, show_notes):
     box_row = layout.row(align=True)
     split = box_row.split(factor=0.42, align=True)
     label = ("    " + item.label) if item.kind == "bit" or item.parent else item.label
-    split.label(text=label, icon="ERROR" if item.error else TIER_ICONS.get(item.tier, "QUESTION"))
+    split.operator("albam.efl_field_info", text=label, emboss=False,
+                   icon="ERROR" if item.error else TIER_ICONS.get(item.tier, "QUESTION")).field = item.name
     right = split.column(align=True)
     if item.kind in ("floats", "ints"):
         prop = "floats" if item.kind == "floats" else "ints"
@@ -793,6 +933,21 @@ class ALBAM_PT_EflEditor(bpy.types.Panel):
         row = layout.row(align=True)
         row.operator("albam.efl_apply_edits", text="Apply", icon="PLAY")
         row.operator("albam.efl_rebuild", text="Rebuild", icon="FILE_REFRESH")
+
+        box = layout.box()
+        box.row().prop(state, "show_filter", icon="TRIA_DOWN" if state.show_filter else "TRIA_RIGHT",
+                       emboss=False)
+        if state.show_filter:
+            if state.records_root != root:
+                box.operator("albam.efl_sync_records", text="Load this effect's filter", icon="FILE_REFRESH")
+            else:
+                effect_filter.draw_filter(box, state, root)
+                total = len(state.records)
+                shown = int(root.get("efl_filter_shown", total))
+                if shown == 0:
+                    box.label(text="No record passes: the game shows nothing", icon="ERROR")
+                else:
+                    box.label(text=f"Showing {shown} of {total} records", icon="HIDE_OFF")
 
         box = layout.box()
         header = box.row()

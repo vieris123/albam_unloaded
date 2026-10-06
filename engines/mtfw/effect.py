@@ -15,6 +15,7 @@ Verified against DX9 (efl_import_plan.md):
 Approximations: static mode shows the first flipbook frame.
 - With "Simulate particles", Billboard/Polygon/PrimModel records become animated particle systems
   (effect_sim.py + efl/sim.py); otherwise one static shape per record.
+- The spawn filter (effect_filter.py) hides the records the game wouldn't build for the chosen group / surface.
 """
 import math
 from pathlib import PureWindowsPath
@@ -31,7 +32,7 @@ from .efl.edit import block_props, keyframe_props, sub_props
 from .efl.schema import bgra_to_rgba
 from .efl.primmodel import build_from_block
 from .efl.sim import CLOTH_TYPES, ROT_ORDERS, emission_space, keyframes_of as sim_keyframes_of
-from . import effect_sim
+from . import effect_filter, effect_sim
 from .texture import build_blender_textures
 
 SCALE = 0.01   # game centimetres -> metres
@@ -62,6 +63,9 @@ class ImportOptionsEFL(bpy.types.PropertyGroup):
     sim_frames: bpy.props.IntProperty(
         name="Frames", default=300, min=1, max=3600,
         description="Game frames (60 fps) to simulate; generators that loop forever stop emitting after this")
+    group_all: effect_filter.group_all_prop()
+    group_bits: effect_filter.group_bits_prop()
+    surface: effect_filter.surface_prop()
 
 
 @blender_registry.register_import_options_custom_draw_func(extension="efl")
@@ -76,6 +80,8 @@ def draw_efl_options(panel_instance, context):
     row = layout.row()
     row.enabled = options.simulate
     row.prop(options, "sim_frames")
+    layout.label(text="Spawn filter (change it later in the Effect Editor):")
+    effect_filter.draw_filter(layout, options)
 
 
 @blender_registry.register_import_options_custom_poll_func(extension="efl")
@@ -99,7 +105,8 @@ def load_efl(file_item, context):
     options = context.scene.albam.import_options_efl
     armature = options.armature
     stem = PureWindowsPath(file_item.display_name).stem
-    builder = _EffectBuilder(app_id, context, stem, armature, options)
+    builder = _EffectBuilder(app_id, context, stem, armature, options,
+                             masks=effect_filter.masks_from_options(options))
     builder.build(efl, getattr(file_item, "relative_path", ""), efl_bytes)
     return None   # objects are linked into their own collection already
 
@@ -120,6 +127,7 @@ def rebuild_effect(context, root, efl_bytes):
                                         else getattr(scene_options, name)) for name in OPTION_NAMES})
     armature = root.parent if root.parent is not None and root.parent.type == "ARMATURE" else None
     start = root.get("efl_start_frame", context.scene.frame_current)
+    masks = effect_filter.get_masks(root)
     root_basis = root.matrix_basis.copy()
     old_collection = root.users_collection[0] if root.users_collection else None
     parent_collection = context.scene.collection
@@ -147,7 +155,7 @@ def rebuild_effect(context, root, efl_bytes):
     frame = context.scene.frame_current
     context.scene.frame_current = int(start)   # the builder starts playback and generator keys here
     try:
-        builder = _EffectBuilder(app_id, context, stem, armature, options, parent_collection)
+        builder = _EffectBuilder(app_id, context, stem, armature, options, parent_collection, masks)
         new_root = builder.build(efl, relative_path, efl_bytes)
     finally:
         context.scene.frame_current = frame
@@ -156,8 +164,9 @@ def rebuild_effect(context, root, efl_bytes):
 
 
 class _EffectBuilder:
-    def __init__(self, app_id, context, stem, armature, options, parent_collection=None):
+    def __init__(self, app_id, context, stem, armature, options, parent_collection=None, masks=None):
         self.app_id = app_id
+        self.masks = masks or (effect_filter.ALL, effect_filter.ALL)   # spawn filter (effect_filter.py)
         self.context = context
         self.stem = stem
         self.armature = armature
@@ -201,6 +210,8 @@ class _EffectBuilder:
         root.albam_asset.extension = "efl"
         exportable = self.context.scene.albam.exportable.file_list.add()
         exportable.bl_object = root
+        effect_filter.set_masks(root, *self.masks)
+        effect_filter.apply_filter(root)
         return root
 
     def build_record(self, index, record, root):

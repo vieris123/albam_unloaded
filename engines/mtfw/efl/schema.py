@@ -192,8 +192,8 @@ B = Bits
 # --- generator (record slot 0, and header unit generator) -- efl_import_plan.md 3.3 ----------
 
 GENERATOR = Struct("EFL_GENERATOR", 0x1E0, "dx9", [
-    F(0x00, "GroupFlag", "u32", "prior"),
-    F(0x04, "MaterialFlag", "u32", "prior"),
+    F(0x00, "GroupFlag", "u32", "dx9", "record built only if & caller's group mask != 0 (matchGeneratorFilter 0x9DD560)"),
+    F(0x04, "MaterialFlag", "u32", "dx9", "& caller's ground-surface bit (cUtil::getEfctMtrlFlg 0x45F780) != 0"),
     F(0x0B, "RandomNoNum", "u8", "dx9", "count for RandomNo selection (initGeneratorParam)"),
     F(0x10, "RandomNo", "u32[8]", "dx9", "indexed table; element size inferred"),
     F(0x30, "Pos", "vec3", "dx9", "moveUnitGenerator 0x96FF00 -> setQuatParentOfs"),
@@ -566,10 +566,10 @@ MOVE_PATH = [
     F(0x42, "KeyframeReleaseFrameParamOffset", "rel16", "dx9", sub="kf:u32"),
     F(0x44, "ReleaseFrame", "rangeu16", "dx9"),
     F(0x48, "Acceleration", "rangef", "dx9"),
-    F(0x50, "Path3DScaleX", "rangef", "se", "no DX9 reader"),
-    F(0x58, "Path3DScaleY", "rangef", "se", "no DX9 reader"),
-    F(0x60, "Path3DScaleZ", "rangef", "se", "no DX9 reader"),
-    F(0x68, "PathLengthScale", "rangef", "se", "no DX9 reader"),
+    F(0x50, "Path3DScaleX", "rangef", "dx9", "rolled once per generator start (initGeneratorParam 0x96B9C3)"),
+    F(0x58, "Path3DScaleY", "rangef", "dx9", "rolled once per generator start (initGeneratorParam 0x96B9C3)"),
+    F(0x60, "Path3DScaleZ", "rangef", "dx9", "rolled once per generator start (initGeneratorParam 0x96B9C3)"),
+    F(0x68, "PathLengthScale", "rangef", "dx9", "rolled once per generator start (initGeneratorParam 0x96B9C3)"),
 ]
 _CHAIN = 0x80   # EFL_PARAM_CHAIN inside EFL_MOVE_PATH_CHAIN
 MOVE_CHAIN_PARAM = [
