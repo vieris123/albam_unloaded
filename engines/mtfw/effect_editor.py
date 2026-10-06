@@ -753,11 +753,14 @@ class ALBAM_OT_EflRevertRecord(bpy.types.Operator):
     def execute(self, context):
         from .efl import EffectList
         from .efl.edit import block_props, keyframe_props, record_from_raw, sub_props
-        from .effect_export import _raw_of, source_bytes
+        from .efl.model import Block
+        from .effect_export import _raw_of, _replaced_of, source_bytes
         ob = _state(context).target
         index = int(ob["efl_record"])
         if index >= 0:
             record = EffectList.from_bytes(source_bytes(effect_root(ob))).records[index]
+            for slot, (btype, data) in (_replaced_of(ob) or {}).items():   # a changed type not applied yet
+                setattr(record, slot, Block(slot, btype, bytearray(data)))
         else:
             record = record_from_raw(_raw_of(ob))
         keyframes, subs = {}, {}
@@ -975,6 +978,13 @@ class ALBAM_PT_EflEditor(bpy.types.Panel):
         if state.tab == "keys":
             self.draw_keys(layout, state)
             return
+        if state.tab in ("ptcl", "move"):
+            props = active.get(f"efl_{state.tab}")
+            row = layout.row(align=True)
+            row.label(text=f"Type: {props.get('type_name', '?') if props is not None else 'none'}",
+                      icon="PARTICLES" if state.tab == "ptcl" else "FORCE_FORCE")
+            if props is not None:
+                row.operator("albam.efl_change_type", text="Change Type", icon="FILE_REFRESH").slot = state.tab
         row = layout.row(align=True)
         row.prop(state, "search", text="", icon="VIEWZOOM")
         row.prop(state, "show_unverified", toggle=True)

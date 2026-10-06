@@ -21,10 +21,10 @@ from mathutils import Matrix, Quaternion
 from albam.exceptions import AlbamCheckFailure
 from albam.registry import blender_registry
 from albam.vfs import VirtualFileData
-from .efl import EffectList
+from .efl import EffectList, schema
 from .efl.edit import (apply_keyframes, apply_props, apply_subs, as_list, record_from_raw, record_raw,
                        restructure)
-from .efl.model import SLOTS
+from .efl.model import Block, SLOTS
 
 SCALE = 0.01             # game centimetres -> metres
 POS_TOLERANCE = 1e-3     # cm
@@ -114,6 +114,26 @@ def _raw_of(ob):
             if slot in SLOTS}
 
 
+def _replaced_of(ob):
+    """{slot: (type, bytes)} of blocks a source record's object replaces (Change Type), or None."""
+    raw = ob.get("efl_replaced")
+    if not raw:
+        return None
+    return {slot: (int(raw[slot]["type"]), base64.b64decode(raw[slot]["data"])) for slot in raw.keys()
+            if slot in SLOTS}
+
+
+def _replace_block(efl, record, slot, block):
+    """Put block in place of the record's slot block, at the same position in the file."""
+    old = getattr(record, slot)
+    index = next((i for i, b in enumerate(efl.blocks) if b is old), None) if old is not None else None
+    if index is None:
+        efl.blocks.append(block)
+    else:
+        efl.blocks[index] = block
+    setattr(record, slot, block)
+
+
 def build_efl_bytes(root):
     """(file bytes, notes, record objects in file order) with every edit applied; raises AlbamCheckFailure."""
     bpy.context.view_layer.update()   # world matrices of moved / new record objects
@@ -138,6 +158,10 @@ def build_efl_bytes(root):
         notes.append(f"record added from {ob.name}")
     order = [objects[i] for i in keep] + extra_obs
     restructure(efl, keep, extra)
+    for record, ob in zip(efl.records, order):   # blocks whose type was changed (efl/retype.py)
+        for slot, (btype, data) in (_replaced_of(ob) or {}).items():
+            _replace_block(efl, record, slot, Block(slot, btype, bytearray(data)))
+            notes.append(f"{ob.name}: {slot} changed to {schema.type_name(slot, btype)}")
 
     for index, (record, ob) in enumerate(zip(efl.records, order)):
         label = f"record {index:02d} ({ob.name})"
@@ -168,7 +192,8 @@ def build_efl_bytes(root):
 def structure_changed(root):
     """True if records were added or removed since the effect was built."""
     count = EffectList.from_bytes(source_bytes(root)).records
-    return bool(new_record_objects(root)) or len(record_objects(root)) != len(count)
+    objects = record_objects(root)
+    return bool(new_record_objects(root)) or len(objects) != len(count) or         any(ob.get("efl_replaced") for ob in objects.values())
 
 
 def _short(value):
@@ -343,13 +368,14 @@ def _copy_record_object(context, source, root, parent):
     if raw is None:
         efl = EffectList.from_bytes(source_bytes(src_root))
         raw = record_raw(efl.records[int(source["efl_record"])])
+    raw.update(_replaced_of(source) or {})
     ob = bpy.data.objects.new(source.name + "+", None)
     for collection in root.users_collection:
         collection.objects.link(ob)
     ob.empty_display_type, ob.empty_display_size = source.empty_display_type, source.empty_display_size
     for key in list(source.keys()):
         if key.startswith("efl_") and key not in ("efl_root", "efl_raw", "efl_record", "efl_serial",
-                                                  "efl_filtered"):
+                                                  "efl_filtered", "efl_replaced"):
             value = source[key]
             ob[key] = value.to_dict() if hasattr(value, "to_dict") else (
                 value.to_list() if hasattr(value, "to_list") else value)
