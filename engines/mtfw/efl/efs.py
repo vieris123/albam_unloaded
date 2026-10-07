@@ -1,24 +1,108 @@
 """DMC4 .efs (rEffectStrip) curves, used by PathStrip moves (move type 3) and generator RangeStripPath.
 
-Layout (DX9 loader sub_AD9810):
-    0x00 'EFS\\0'  0x04 version 0x20060725  0x08 data size  0x0C 0  0x10 part count  0x14 joint count (?)
-    0x18 total vertex count  0x1C 0
-    0x20 body: u32 offset per part (relative to the body); each part = u32 vertex count, u32 0, then 32-byte
-         vertices: f32 pos[3] (cm), u8 joints[4], f32[4] (normal/up)
+Layout (DX9 loader sub_AD9810; names from the SE PDB, rEffectStrip::EFS_HEADER / PARTS_PARAM / VERTEX_PARAM /
+INDEX_PARAM). DX9 (0x20060725, 53 files) and SE (0x20080912, 2 files) share it byte for byte apart from the
+version:
+    0x00 'EFS\\0'  0x04 Version  0x08 ParamBuffSize (file size - 0x20)  0x0C EfsHeader320c (0 in every file)
+    0x10 PartsNum  0x14 JointNum (0 in every file)  0x18 TotalVertexNum  0x1C TotalIndexNum (0 in every file)
+    0x20 body: u32 offset per part (relative to the body); each part = PARTS_PARAM (u32 VertexNum, u32 IndexNum),
+         then VERTEX_PARAM[VertexNum], 32 bytes: f32 Pos[3] (cm), u8 BlendIndex0-3, f32 Norm[3] (unit length in
+         every file), u8 BlendWeight0-3 (0 in every file); then INDEX_PARAM[IndexNum], 8 bytes: u16 VertexNo0-2,
+         u16 reserved (triangles, for STRIP_TYPE_MODEL; no file has any).
+STRIP_TYPE (SE enum): 0 VERTEX, 1 PATH_LINEAR, 2 PATH_HERMITE, 3 PATH_SPLINE, 4 MODEL. STRIP_FLAG: 0x1 ORDER,
+0x2 REVERSE, 0x4 NORM_OFF, 0x8 PATH_LOOP, 0x10 CENTER_FIX, 0x20 ALL_PARTS, 0x40 SKINING.
 Only positions are used here.
 """
 from __future__ import annotations
 
 import math
 import struct
+from dataclasses import dataclass, field
 
 MAGIC = b"EFS\0"
+VERSION_DX9 = 0x20060725
+VERSION_SE = 0x20080912
 HEADER_SIZE = 0x20
 VERTEX_SIZE = 32
+INDEX_SIZE = 8
 
 
 class EfsError(Exception):
     pass
+
+
+@dataclass
+class Vertex:
+    pos: tuple                          # cm, game axes (Y up)
+    norm: tuple = (0.0, 0.0, 1.0)       # unit length in every file
+    blend_indices: tuple = (0, 0, 0, 0)
+    blend_weights: tuple = (0, 0, 0, 0)
+
+
+@dataclass
+class Part:
+    vertices: list = field(default_factory=list)
+    indices: list = field(default_factory=list)   # (VertexNo0, VertexNo1, VertexNo2, reserved), STRIP_TYPE_MODEL only
+
+
+@dataclass
+class EffectStrip:
+    version: int = VERSION_DX9
+    parts: list = field(default_factory=list)
+    header_320c: int = 0                # EfsHeader320c, 0 in every file
+    joint_num: int = 0                  # JointNum, 0 in every file
+
+
+def parse_strip(data):
+    """Every field of an .efs, for editing (parse() gives only the positions)."""
+    data = bytes(data)
+    if len(data) < HEADER_SIZE or data[:4] != MAGIC:
+        raise EfsError("not an EFS file (bad magic)")
+    version, size, h320c, parts, joints = struct.unpack_from("<5I", data, 4)
+    if HEADER_SIZE + parts * 4 > len(data):
+        raise EfsError("part table runs past the end of the file")
+    strip = EffectStrip(version, [], h320c, joints)
+    for i in range(parts):
+        base = HEADER_SIZE + struct.unpack_from("<I", data, HEADER_SIZE + i * 4)[0]
+        if base + 8 > len(data):
+            raise EfsError(f"part {i} starts past the end of the file")
+        vn, inn = struct.unpack_from("<II", data, base)
+        start = base + 8
+        if start + vn * VERTEX_SIZE + inn * INDEX_SIZE > len(data):
+            raise EfsError(f"part {i}: its vertices / indices run past the end of the file")
+        part = Part()
+        for j in range(vn):
+            o = start + j * VERTEX_SIZE
+            pos = struct.unpack_from("<3f", data, o)
+            bi = tuple(data[o + 12:o + 16])
+            norm = struct.unpack_from("<3f", data, o + 16)
+            bw = tuple(data[o + 28:o + 32])
+            part.vertices.append(Vertex(pos, norm, bi, bw))
+        o = start + vn * VERTEX_SIZE
+        part.indices = [struct.unpack_from("<4H", data, o + k * INDEX_SIZE) for k in range(inn)]
+        strip.parts.append(part)
+    return strip
+
+
+def to_bytes(strip):
+    """.efs bytes: header, part offset table, then each part (PARTS_PARAM, vertices, indices) in order."""
+    table = HEADER_SIZE and len(strip.parts) * 4
+    blobs, offsets, at = [], [], table
+    for part in strip.parts:
+        out = bytearray(struct.pack("<II", len(part.vertices), len(part.indices)))
+        for v in part.vertices:
+            out += struct.pack("<3f", *v.pos) + bytes(v.blend_indices) + struct.pack("<3f", *v.norm) \
+                + bytes(v.blend_weights)
+        for idx in part.indices:
+            out += struct.pack("<4H", *idx)
+        offsets.append(at)
+        at += len(out)
+        blobs.append(bytes(out))
+    body = b"".join(struct.pack("<I", o) for o in offsets) + b"".join(blobs)
+    header = MAGIC + struct.pack("<7I", strip.version, len(body), strip.header_320c, len(strip.parts),
+                                 strip.joint_num, sum(len(p.vertices) for p in strip.parts),
+                                 sum(len(p.indices) for p in strip.parts))
+    return header + body
 
 
 def parse(data):

@@ -18,6 +18,7 @@ Approximations: static mode shows the first flipbook frame.
 - The spawn filter (effect_filter.py) hides the records the game wouldn't build for the chosen group / surface.
 """
 import math
+import zlib
 from pathlib import PureWindowsPath
 from types import SimpleNamespace
 
@@ -32,7 +33,7 @@ from .efl.edit import block_props, keyframe_props, sub_props
 from .efl.schema import bgra_to_rgba
 from .efl.primmodel import build_from_block
 from .efl.sim import CLOTH_TYPES, ROT_ORDERS, emission_space, keyframes_of as sim_keyframes_of, refracts
-from . import effect_filter, effect_sim
+from . import effect_ean, effect_efs, effect_filter, effect_sim
 from .texture import MISSING_TEXTURE_PROP, build_blender_textures
 
 SCALE = 0.01   # game centimetres -> metres
@@ -125,6 +126,22 @@ def load_efl(file_item, context):
 OPTION_NAMES = ("build_geometry", "load_textures", "simulate", "sim_frames")
 
 
+def linked_bytes(ob):
+    """Current file bytes of a linked .efs / .ean object."""
+    if ob.albam_asset.extension == "efs":
+        return effect_efs.build_efs_bytes(ob)
+    return effect_ean.build_ean_bytes(ob)
+
+
+def linked_hash(ob):
+    return f"{zlib.crc32(linked_bytes(ob)):08x}"   # a string: ID property ints are signed 32-bit
+
+
+def linked_objects(root):
+    """{"efs:<path>" / "ean:<path>": object} of the .efs / .ean files an imported effect references."""
+    return {ob["efl_linked"]: ob for ob in bpy.data.objects if ob.get("efl_root") == root and "efl_linked" in ob}
+
+
 def rebuild_effect(context, root, efl_bytes):
     """Replace an imported effect with one built from efl_bytes (same file path, armature, start frame and import
     options); the new root's source bytes are efl_bytes. Returns the new root."""
@@ -152,10 +169,19 @@ def rebuild_effect(context, root, efl_bytes):
     for i in reversed(range(len(exportable))):
         if exportable[i].bl_object == root:
             exportable.remove(i)
+    linked = linked_objects(root)   # edited .efs / .ean survive the rebuild
     doomed = {o for o in bpy.data.objects if o.get("efl_root") == root}
     if old_collection is not None:
         doomed |= set(old_collection.all_objects)
     doomed.add(root)
+    doomed -= set(linked.values())
+    for ob in linked.values():
+        if old_collection is not None and ob.name in old_collection.objects:
+            old_collection.objects.unlink(ob)
+        if ob.parent in doomed:
+            world = ob.matrix_world.copy()
+            ob.parent = None
+            ob.matrix_world = world
     from . import effect_sim
     for ob in doomed:
         effect_sim.forget(ob.name)
@@ -166,17 +192,23 @@ def rebuild_effect(context, root, efl_bytes):
     frame = context.scene.frame_current
     context.scene.frame_current = int(start)   # the builder starts playback and generator keys here
     try:
-        builder = _EffectBuilder(app_id, context, stem, armature, options, parent_collection, masks)
+        builder = _EffectBuilder(app_id, context, stem, armature, options, parent_collection, masks, linked)
         new_root = builder.build(efl, relative_path, efl_bytes)
     finally:
         context.scene.frame_current = frame
+    for ob in builder.linked_existing.values():   # no longer referenced by any record
+        if ob.name in bpy.data.objects:
+            bpy.data.objects.remove(ob)
     new_root.matrix_basis = root_basis
     return new_root
 
 
 class _EffectBuilder:
-    def __init__(self, app_id, context, stem, armature, options, parent_collection=None, masks=None):
+    def __init__(self, app_id, context, stem, armature, options, parent_collection=None, masks=None, linked=None):
         self.app_id = app_id
+        self.linked_existing = dict(linked or {})   # "efs:<path>" / "ean:<path>" -> object kept from a rebuild
+        self.linked = {}                            # the linked .efs / .ean objects this build uses
+        self.root = None
         self.masks = masks or (effect_filter.ALL, effect_filter.ALL)   # spawn filter (effect_filter.py)
         self.context = context
         self.stem = stem
@@ -199,6 +231,7 @@ class _EffectBuilder:
 
     def build(self, efl, relative_path, efl_bytes=b""):
         root = self.link(bpy.data.objects.new(f"EFL_{self.stem}", None))
+        self.root = root
         root.empty_display_type = "PLAIN_AXES"
         root.empty_display_size = 0.1
         root.rotation_euler = (math.pi / 2, 0.0, 0.0)   # game Y-up -> Blender Z-up
@@ -215,6 +248,10 @@ class _EffectBuilder:
             effect_sim.store_source(root, efl_bytes, self.context.scene.frame_current)
         for index, record in enumerate(efl.records):
             self.build_record(index, record, root)
+        for key, ob in self.linked.items():   # .efs / .ean the effect references, edited and exported with it
+            ob["efl_root"] = root
+            ob["efl_linked"] = key
+        root["efl_linked_hash"] = {key: linked_hash(ob) for key, ob in self.linked.items()}
         # export (effect_export.py) rebuilds the file from these bytes and the record objects' properties
         root.albam_asset.original_bytes = efl_bytes
         root.albam_asset.app_id = self.app_id
@@ -473,18 +510,48 @@ class _EffectBuilder:
         return result
 
     def efs_for(self, path):
-        """Parts of an .efs curve (cm), or None if it isn't under the Game Files roots."""
+        """Parts of an .efs curve (cm), or None if it isn't under the Game Files roots. The curve also becomes an
+        editable `EFS_` object parented to the first generator that uses it; its current points are what the preview
+        uses, and export writes it back when it changed."""
         if path in self.efs:
             return self.efs[path]
         parts = None
-        try:
-            parts = efs.parse(self.context.scene.albam.rfs.get_vfile(self.app_id, path + ".efs").get_bytes())
-        except KeyError:
-            print(f"EFL: strip {path}.efs not found under the Game Files roots")
-        except efs.EfsError as err:
-            print(f"EFL: could not read {path}.efs: {err}")
+        ob = self._reuse_linked(f"efs:{path}")
+        if ob is not None:
+            parts = efs.parse(effect_efs.build_efs_bytes(ob))
+        else:
+            try:
+                vfile = self.context.scene.albam.rfs.get_vfile(self.app_id, path + ".efs")
+                data = vfile.get_bytes()
+                strip = efs.parse_strip(data)
+                parts = efs.parse(data)
+                ob = effect_efs.create_efs_object(PureWindowsPath(path).name, strip, data, self.collection,
+                                                  game_space=True)
+                ob.albam_asset.app_id = self.app_id
+                ob.albam_asset.relative_path = vfile.relative_path
+            except KeyError:
+                print(f"EFL: strip {path}.efs not found under the Game Files roots")
+            except efs.EfsError as err:
+                print(f"EFL: could not read {path}.efs: {err}")
+        if ob is not None:
+            self.linked[f"efs:{path}"] = ob
+            parent = self.current_generator or self.root
+            if ob.parent is None or ob.parent.name not in bpy.data.objects:   # game-axes points: identity frame
+                ob.parent = parent
+                ob.matrix_parent_inverse.identity()
+                ob.matrix_basis.identity()
         self.efs[path] = parts
         return parts
+
+    def _reuse_linked(self, key):
+        """A linked object kept from the previous build, moved into this build's collection."""
+        ob = self.linked_existing.pop(key, None)
+        if ob is None or ob.name not in bpy.data.objects:
+            return None
+        for collection in list(ob.users_collection):
+            collection.objects.unlink(ob)
+        self.collection.objects.link(ob)
+        return ob
 
     def ground_height(self, record):
         """Ground plane (world z = 0, the character's feet) in the generator's game space at import, in cm;
@@ -591,15 +658,32 @@ class _EffectBuilder:
                            "rect_px": list(pattern)}
 
     def anim_for(self, anim_path):
+        """A particle's .ean flipbook, or None. It also becomes an editable `EAN_` holder under the effect root
+        (Flipbook panel); its current frames are what the preview uses, and export writes it back when it changed."""
         if anim_path in self.anims:
             return self.anims[anim_path]
         anim = None
-        try:
-            anim = ean.parse(self.context.scene.albam.rfs.get_vfile(self.app_id, anim_path + ".ean").get_bytes())
-        except KeyError:
-            print(f"EFL: flipbook {anim_path}.ean not found under the Game Files roots; showing the whole texture")
-        except ean.EanError as err:
-            print(f"EFL: could not read {anim_path}.ean: {err}")
+        ob = self._reuse_linked(f"ean:{anim_path}")
+        if ob is not None:
+            anim = effect_ean.ean_from_object(ob)
+        else:
+            try:
+                vfile = self.context.scene.albam.rfs.get_vfile(self.app_id, anim_path + ".ean")
+                data = vfile.get_bytes()
+                anim = ean.parse(data)
+                ob = effect_ean.create_ean_object(PureWindowsPath(anim_path).name, anim, data, self.collection)
+                ob.albam_asset.app_id = self.app_id
+                ob.albam_asset.relative_path = vfile.relative_path
+            except KeyError:
+                print(f"EFL: flipbook {anim_path}.ean not found under the Game Files roots; showing the whole texture")
+            except ean.EanError as err:
+                print(f"EFL: could not read {anim_path}.ean: {err}")
+        if ob is not None:
+            self.linked[f"ean:{anim_path}"] = ob
+            if ob.parent is None or ob.parent.name not in bpy.data.objects:
+                ob.parent = self.root
+                ob.matrix_parent_inverse.identity()
+                ob.matrix_basis.identity()
         self.anims[anim_path] = anim
         return anim
 

@@ -640,6 +640,39 @@ class ALBAM_OT_EflSelectRecord(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _linked_changes(root):
+    try:
+        from .effect_export import linked_changes
+        return linked_changes(root)
+    except Exception:   # e.g. a strip mid-edit with a branch: drawing must not fail
+        return []
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_EflSelectLinked(bpy.types.Operator):
+    """Select this .efs strip or .ean flipbook to edit it: a strip is a mesh (Edit Mode), a flipbook opens in the
+    Flipbook panel. Press Apply afterwards to see the edits in the effect's preview"""
+    bl_idname = "albam.efl_select_linked"
+    bl_label = "Edit Linked File"
+    bl_options = {"REGISTER", "UNDO"}
+
+    name: bpy.props.StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+
+    def execute(self, context):
+        ob = bpy.data.objects.get(self.name)
+        if ob is None or ob.name not in context.view_layer.objects:
+            return {"CANCELLED"}
+        for other in context.selected_objects:
+            other.select_set(False)
+        ob.hide_set(False)
+        context.view_layer.objects.active = ob
+        ob.select_set(True)
+        if ob.albam_asset.extension == "ean":
+            from .effect_ean import load_target
+            load_target(context.scene.albam.ean_editor, ob)
+        return {"FINISHED"}
+
+
 @blender_registry.register_blender_type
 class ALBAM_OT_EflSyncRecords(bpy.types.Operator):
     """List the records of the active effect"""
@@ -947,6 +980,17 @@ class ALBAM_PT_EflEditor(bpy.types.Panel):
                 box.label(text=f"... and {len(missing) - 3} more")
             box.label(text="Add the folder containing effect\\tex (e.g. the base game's) as a Game Files root,")
             box.label(text="then press Rebuild")
+        from .effect import linked_objects
+        linked = linked_objects(root)
+        if linked:
+            box = layout.box()
+            box.label(text="Linked files (exported with the effect when changed)", icon="LINKED")
+            changed = {ob.name for ob, _ in _linked_changes(root)}
+            for key, ob in sorted(linked.items()):
+                row = box.row(align=True)
+                icon = "CURVE_PATH" if key.startswith("efs:") else "IMAGE_DATA"
+                label = ob.albam_asset.relative_path + ("  (edited: Apply to preview)" if ob.name in changed else "")
+                row.operator("albam.efl_select_linked", text=label, icon=icon, emboss=False).name = ob.name
 
         box = layout.box()
         box.row().prop(state, "show_filter", icon="TRIA_DOWN" if state.show_filter else "TRIA_RIGHT",

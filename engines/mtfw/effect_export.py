@@ -190,10 +190,26 @@ def build_efl_bytes(root):
 
 
 def structure_changed(root):
-    """True if records were added or removed since the effect was built."""
+    """True if records were added or removed, a block's type changed, or a linked .efs / .ean was edited since the
+    effect was built (those are read at build time, so the preview needs a rebuild)."""
     count = EffectList.from_bytes(source_bytes(root)).records
     objects = record_objects(root)
-    return bool(new_record_objects(root)) or len(objects) != len(count) or         any(ob.get("efl_replaced") for ob in objects.values())
+    if new_record_objects(root) or len(objects) != len(count) or any(ob.get("efl_replaced") for ob in objects.values()):
+        return True
+    return bool(linked_changes(root))
+
+
+def linked_changes(root):
+    """[(object, bytes)] of the effect's linked .efs / .ean whose data differs from what the effect was built with."""
+    from .effect import linked_bytes, linked_objects
+    import zlib
+    built = root.get("efl_linked_hash") or {}
+    out = []
+    for key, ob in linked_objects(root).items():
+        data = linked_bytes(ob)
+        if key not in built or f"{zlib.crc32(data):08x}" != str(built[key]):
+            out.append((ob, data))
+    return out
 
 
 def _short(value):
@@ -274,8 +290,16 @@ def export_efl(bl_obj):
     print(f"EFL export {asset.relative_path}: {len(notes)} change(s)")
     for note in notes:
         print("  " + note)
+    vfiles = [VirtualFileData(asset.app_id, asset.relative_path, data_bytes=data)]
+    from .effect import linked_bytes, linked_objects
+    for key, ob in sorted(linked_objects(bl_obj).items()):   # referenced .efs / .ean that were edited
+        linked = linked_bytes(ob)
+        if linked != bytes(ob.albam_asset.original_bytes):
+            vfiles.append(VirtualFileData(ob.albam_asset.app_id, ob.albam_asset.relative_path, data_bytes=linked))
+            notes.append(f"{ob.albam_asset.relative_path} changed")
+            print(f"  also writes {ob.albam_asset.relative_path}")
     bl_obj["efl_export_notes"] = notes[:200]
-    return [VirtualFileData(asset.app_id, asset.relative_path, data_bytes=data)]
+    return vfiles
 
 
 # -- applying edits to the scene --------------------------------------------------------------------
