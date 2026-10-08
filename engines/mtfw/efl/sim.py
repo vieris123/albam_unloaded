@@ -20,7 +20,8 @@ Sources (DX9):
     life       sub_9729B0: Appear / Keep / Vanish frames, each s + rand % (r + 1); alpha ramps in, holds, ramps out
     flipbook   sub_961DB0: pattern += PatSpeed per frame when AnimFlag MOVE; LOOP wraps, FINISH kills, else holds;
                sequence = SeqNoMin + rand % (SeqNoRange + 1); a PatNo keyframe gives the pattern (or the speed when
-               DrawFlags_0x41 bit 0 is set)
+               DrawFlags_0x41 bit 0 is set); AnimFlag 0x400 / 0x800 flip each particle's U / V with probability
+               1/2 (getAnimFlag 0x980140)
     paths      move types 3-6 (initParticleMovePath* 0x9739D0.., moveParticleMovePath* 0x996D60..): the particle
                rides a path in generator space (it follows the generator) until its release timer runs out, then
                continues as an Add particle in world space. 5 PathKeyframe: keyframed offset; 6 PathLine:
@@ -75,7 +76,40 @@ NO_LIFE_FRAMES = 120          # records without a life block: show particles thi
 MAX_PARTICLES = 4000          # per record, to keep previews responsive
 INTENSITY_MAX = 127.0         # initParticleBillboard / the shader clamp intensity to [0, 127]
 REFRACT_FLAG = 0x10           # ParticleOptionFlag: refraction (initGeneratorParam 0x96B612 -> prim ATTR_REFRACT)
-OCCLUSION_FLAG = 0x200        # CullingFlag: occlusion test, checked first, so it disables refraction
+OCCLUSION_FLAG = 0x2          # CullingFlag OCCLUSION, checked first (0x96B603), so it disables refraction
+
+
+COLOR_BLEND_BITS = ((2, 0x1), (1, 0x2), (0, 0x4), (3, 0x8))   # (BGRA byte, nEffect::COLOR_FLAG bit), the game's order
+COLOR_EACH_RANDOM = 0x10
+
+
+def _random_flips(anim_flag, rng):
+    """uEffectVFR::getAnimFlag 0x980140: VFLIP_RAND (0x800) then HFLIP_RAND (0x400) each add their flip with
+    probability 1/2. Returns only the flips the record's AnimFlag doesn't already have."""
+    flip = 0
+    if anim_flag & 0x800 and rng.random() < 0.5:
+        flip |= 0x200
+    if anim_flag & 0x400 and rng.random() < 0.5:
+        flip |= 0x100
+    return flip & ~anim_flag
+
+
+def _src_color(ptcl, rng):
+    """A particle's start colour, BGRA bytes (uEffectVFR::calcSrcColor 0x9801B0): Color0, with each channel whose
+    COLOR_FLAG blend bit (R 0x1, G 0x2, B 0x4, A 0x8) is set mixed toward Color1 by one random t, re-rolled after
+    every channel with EACH_RANDOM (0x10). CHOICE (0x20) isn't handled by DX9."""
+    c0 = list(ptcl.get("Color0"))
+    flag = ptcl.get("ColorFlag") if ptcl.has("ColorFlag") else 0
+    if not flag & 0xF or not ptcl.has("Color1"):
+        return c0
+    c1 = list(ptcl.get("Color1"))
+    out, t = list(c0), rng.random()
+    for byte, bit in COLOR_BLEND_BITS:
+        if flag & bit:
+            out[byte] = int((1.0 - t) * c1[byte] + c0[byte] * t)
+            if flag & COLOR_EACH_RANDOM and bit != 0x8:
+                t = rng.random()
+    return out
 
 
 def refracts(ptcl):
@@ -213,6 +247,7 @@ class Particle:
     _track: list = None
     end: int = None       # birth + lifetime, set by callers that filter by life window
     refract: bool = False  # refraction shader: the colour isn't multiplied by intensity
+    flip: int = 0          # AnimFlag 0x100 / 0x200 rolled from the _RAND bits that the record doesn't set itself
 
     def lifetime(self):
         return sum(self.life) if self.life else NO_LIFE_FRAMES
@@ -320,6 +355,7 @@ class ParticleState:
     light: tuple = None   # Light: (start cm, end cm)
     shape: tuple = None   # Polygon (W, 0, H, 0) half-extents / PrimModel (Radius0, Radius1, Height0, Height1), cm
     uv_scroll: tuple = None   # Model: (u, v) offset in UV units
+    flip: int = 0         # extra flipbook flips (AnimFlag 0x100 / 0x200) on top of the record's own
 
 
 def _unit(v):
@@ -612,7 +648,7 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
     scale = _rf(rng, ptcl.get("Scale")) if has("Scale") else 1.0
     scale_add = _rf(rng, ptcl.get("ScaleAdd")) if has("ScaleAdd") else 0.0
     intensity = _rf(rng, ptcl.get("Intensity")) if has("Intensity") else 1.0
-    color = bgra_to_rgba(ptcl.get("Color0")) if has("Color0") else (255, 255, 255, 255)
+    color = bgra_to_rgba(_src_color(ptcl, rng)) if has("Color0") else (255, 255, 255, 255)
     aspect = _rf(rng, ptcl.get("AspectRatio")) if has("AspectRatio") else 1.0
     angle = _rf(rng, ptcl.get("Angle")) if has("Angle") else 0.0
     angle_add = _rf(rng, ptcl.get("AngleAdd")) if has("AngleAdd") else 0.0
@@ -623,7 +659,7 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
         model_scale_add = tuple(_rf(rng, r) for r in ptcl.get("ModelScaleAdd"))
     else:
         model_scale, model_scale_add = (1.0, 1.0, 1.0), (0.0, 0.0, 0.0)
-    sequence, pattern, pat_speed, anim_flag, pat_count, key_is_speed = 0, 0.0, 0.0, 0, 1, False
+    sequence, pattern, pat_speed, anim_flag, pat_count, key_is_speed, flip = 0, 0.0, 0.0, 0, 1, False, 0
     if has("ModelFlags"):   # Model: the "pattern" is the mesh part number
         pat_count = max(pat_counts[0], 1) if pat_counts else 1
         pattern = float(_ru(rng, (ptcl.get("PartsNoMin"), ptcl.get("PartsNoRange"))))
@@ -631,7 +667,8 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
         pat_speed = ptcl.get("AnimSpeed") if anim_flag & ANIM_MOVE else 0.0
     elif has("PatSpeed"):
         anim_flag = ptcl.get("AnimFlag")
-        sequence = min(_ru(rng, (ptcl.get("SeqNoMin"), ptcl.get("SeqNoRange"))), len(pat_counts) - 1)
+        flip = _random_flips(anim_flag, rng)
+        sequence =min(_ru(rng, (ptcl.get("SeqNoMin"), ptcl.get("SeqNoRange"))), len(pat_counts) - 1)
         pat_count = max(pat_counts[sequence], 1)
         pattern = float(min(_ru(rng, (ptcl.get("PatNoMin"), ptcl.get("PatNoRange"))), pat_count - 1))
         pat_speed = ptcl.get("PatSpeed")
@@ -669,7 +706,7 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
     particle = Particle(birth, offset, d, speed, accel, coef, gravity, life_frames, scale, scale_add, angle, angle_add,
                     rot, rot_add, model_scale, model_scale_add, color, intensity, aspect, sequence, pattern,
                     pat_speed, pat_count, anim_flag, key_is_speed, axis, order, keys, path, line, strip, light,
-                    shape=shape, scroll=scroll, refract=refracts(ptcl))
+                    shape=shape, scroll=scroll, refract=refracts(ptcl), flip=flip)
     if line is not None and line.get("rope") is not None:
         line["rope"].birth = birth   # generator-timer rope keys run from the particle's birth frame
     c = template.collision
@@ -1664,4 +1701,4 @@ def state_at(p, frame):
         if strip is None:
             return None
     return ParticleState(pos, alpha, scale, min(max(p.aspect, 0.0), 15.9375), angle, rot, model_scale,
-                         rgba, p.sequence, int(pattern), anchor, line, strip, light, shape, uv_scroll)
+                         rgba, p.sequence, int(pattern), anchor, line, strip, light, shape, uv_scroll, p.flip)

@@ -14,7 +14,9 @@ Layout (names from the SE PDB, rEffectAnim::EAN_HEADER / SEQ_INDEX / SEQ_PAT; ch
     SEQ_PAT: s16 (U, V, W, H) pixel rect; SE appends f32 U0, V0, U1, V1 (the rect in texture UVs), so SE
     patterns are 24 bytes, DX9 ones 8.
 ANIM_FLAG (SE enum): 0x1 MOVE, 0x2 LOOP, 0x4 REVERSE, 0x8 FINISH, 0x10 REVERSE_RAND, 0x100 HFLIP, 0x200 VFLIP,
-0x400 HFLIP_RAND, 0x800 VFLIP_RAND, 0x1000 ROT, 0x2000 NO_INP, 0x8000 KEYFRAME.
+0x400 HFLIP_RAND, 0x800 VFLIP_RAND, 0x1000 ROT, 0x2000 NO_INP, 0x8000 KEYFRAME. In DX9, getAnimFlag 0x980140 turns
+the _RAND flips into 0x100 / 0x200 per particle (a coin flip each); REVERSE_RAND isn't handled; KEYFRAME (| MOVE) is
+set at runtime when the particle has a PatNo keyframe (initParticleBillboard 0x978026), it isn't a file flag.
 The game turns a pattern into UVs in sub_9632F0: u = x / texture width, v = y / texture height, with AnimFlag
 0x100 = flip U, 0x200 = flip V, 0x1000 = rotate the cell. Sequences are picked by SeqNoMin (+ random SeqNoRange),
 patterns by PatNoMin (+ random PatNoRange), animated over time by PatSpeed.
@@ -33,6 +35,8 @@ PATTERN_SIZE = {VERSION_DX9: 8, VERSION_SE: 0x18}   # SE adds U0, V0, U1, V1
 
 ANIM_FLIP_U = 0x100
 ANIM_FLIP_V = 0x200
+ANIM_FLIP_U_RAND = 0x400   # uEffectVFR::getAnimFlag 0x980140: each particle gets 0x100 with probability 1/2
+ANIM_FLIP_V_RAND = 0x800   # likewise 0x200 (rolled before the U one)
 ANIM_ROTATE = 0x1000
 
 
@@ -178,6 +182,11 @@ def uv_affine(pattern, tex_width, tex_height, anim_flag=0):
     if rotate:
         return (0.0, du, u0), (-dv, 0.0, 1.0 - v0)
     return (du, 0.0, u0), (0.0, dv, 1.0 - v0 - dv)
+
+
+def flip_affine_row(a, b, off):
+    """One uv_affine row with its rectangle edges swapped (what flip U / flip V does to that axis), rotated or not."""
+    return -a, -b, off + a + b
 
 
 IDENTITY_AFFINE = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0))

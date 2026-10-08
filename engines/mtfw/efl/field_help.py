@@ -156,7 +156,8 @@ HELP = {
     'ptcl:AnimFlag': (
         'Flipbook playback: 1 play (advance by PatSpeed), 2 loop, 4 play backwards, 8 remove the particle when the '
         'flipbook ends (otherwise it holds the last frame). 0x100 flips the texture horizontally, 0x200 vertically, '
-        '0x1000 rotates it.'
+        '0x1000 rotates it. 0x400 / 0x800 flip each particle horizontally / vertically at random (half of them), '
+        'which makes repeated particles look less alike.'
     ),
     'ptcl:AnimPath': (
         'The .ean flipbook table (game path without extension, e.g. effect\\ean\\com\\ec032_16) that lists where each '
@@ -293,7 +294,11 @@ HELP = {
         'Probably the other end of a random colour range: each particle gets a colour between Color0 and Color1. Set '
         'it equal to Color0 for one fixed colour.'
     ),
-    'ptcl:ColorFlag': "Not understood yet; keep the game's value.",
+    'ptcl:ColorFlag': (
+        'How each particle picks its start colour between Color0 and Color1: the ticked channels (red, green, blue, '
+        'alpha) are mixed toward Color1 by a random amount; with Each Channel Random every channel gets its own '
+        'amount, otherwise they share one, so the colour stays on the line between the two. None ticked = Color0.'
+    ),
     'ptcl:ColorPlaceInpType': (
         'Easing of the colour gradient along the line: 0 linear, 1 fast start (sine), 2 slow start (1 - cos), 3 '
         'smooth at both ends.'
@@ -307,8 +312,15 @@ HELP = {
         ' that row.'
     ),
     'ptcl:CullingFlag': (
-        '0x1 turns on the distance/angle fade set in the culling block (More tab): the particle fades with distance '
-        'or view angle and is hidden when the fade reaches 0. 0x40 marks that a culling block is present.'
+        'Culling switches. Distance / Angle Fade (0x1) turns on the fade set in the culling block (More tab): the '
+        'particle fades with distance or view angle and is hidden when the fade reaches 0. Occlusion Test (0x2) hides '
+        "it behind geometry (and turns refraction off). Per Particle (0x4) works the fade out for each particle "
+        'instead of once for the generator; Angle Fade (0x80) fades by the viewing angle.'
+    ),
+    'ptcl:VolumeBlendRate': (
+        'Volume look, 0 = off. Any other value draws the particle with the game\'s volume shader (or the depth-volume '
+        'or parallax one when those options are ticked), with this value as its strength; the files use 1 to 100, '
+        'and most particles have it. The Blender preview ignores it. Refraction and the occlusion test take priority.'
     ),
     'ptcl:CurveCoef': (
         'How far the middle of the curve is pushed toward the bend direction, in cm (or relative to the end distance '
@@ -366,8 +378,12 @@ HELP = {
     'ptcl:FixModelScale': 'Scale of the stored FIX points along X, Y, Z. 1 = as stored.',
     'ptcl:FixModelScaleAdd': 'Change of FixModelScale per frame; positive grows the shape, negative shrinks it.',
     'ptcl:FixOtDepth': (
-        'Probably forces a fixed draw-order depth instead of the computed one. Not confirmed in the DX9 game; keep '
-        "the game's value."
+        'Fixed draw-order key (0 to 32767) used instead of the depth from the camera when ParticleOptionFlag has '
+        'Fixed Sort Depth.'
+    ),
+    'ptcl:OtDepthBias': (
+        'Moves the draw-order position this far toward the camera (cm) when ParticleOptionFlag has Sort Bias Toward '
+        "Camera. 0 in every game file."
     ),
     'ptcl:FixPoint0': (
         "One of the line's stored points (LineType FIX), in cm in the particle's space, before FixModelScale and "
@@ -432,13 +448,20 @@ HELP = {
         'previewed in Blender.'
     ),
     'ptcl:LightAttribute': (
-        "Not understood yet; the game passes it on to the light as attribute flags. Keep the game's value."
+        "How the Light particle's light is computed: SH (0x2, spherical harmonics), Per-Pixel (0x8; the game drops it "
+        "when the light can't do per-pixel) or Simple (0x10). Every game file uses Simple. The Blender preview always "
+        'uses a point light.'
     ),
     'ptcl:LightColorW': (
         "Passed to the light as the fourth component of its colour; the game's files use 1 or 2. Probably a "
         'brightness multiplier.'
     ),
-    'ptcl:LightGroupFlag': "Not understood yet; keep the game's value.",
+    'ptcl:LightGroupFlag': (
+        "Light-group mask, the same kind the game's models use (one bit per group). On a Light particle it is the "
+        'groups its light shines on (0xFFFFFFFF = all, as most files do); a model is most likely lit when its own '
+        'light group shares a bit with it. On other particles it makes them lit by lights of those groups; 0 = unlit (most '
+        'effects; mainly Model particles use it). The Blender preview draws particles unlit.'
+    ),
     'ptcl:LightMaskY': 'Not read by the DX9 game (a Special Edition field); editing it has no effect.',
     'ptcl:LightType': (
         "0 point light, 1 spot light. The game's effect files only use point lights, and the Blender preview always "
@@ -488,8 +511,8 @@ HELP = {
     'ptcl:member_zigzag_0x7c': "Not understood yet (0 in every DX9 file); keep the game's value.",
     'ptcl:ModelAnimFlag': (
         'Option bits for Model particles. 1: step through mesh groups at AnimSpeed; 2: loop at the end; 4: step '
-        'backwards; 8: kill the particle at the end; 0x10: scroll the texture by ScrollU/ScrollV; 0x10000: apply '
-        'ModelZofs.'
+        'backwards; 8: kill the particle at the end; 0x10: scroll the texture by ScrollU/ScrollV (in DX9; the Special '
+        'Edition renamed this bit to a random reverse); 0x10000: apply ModelZofs.'
     ),
     'ptcl:ModelBillboardType': (
         'Turns the mesh toward the camera: 2, 3 or 4 keep the X, Y or Z axis fixed while the rest turns to face the '
@@ -535,9 +558,16 @@ HELP = {
         'NormAttenuateAngle range. Including the value 2 bit makes it one-sided.'
     ),
     'ptcl:ParticleOptionFlag': (
-        'Drawing options: 0x4 soft particle (fades where it meets geometry), 0x10 refraction, 0x80 no depth test '
-        '(draws on top of everything), 0x200 size also follows the world scale, 0x1000 no fog, 0x10000 billboard '
-        'pivot at PatCenter, 0x80000 fades the border vertices of a PrimModel to transparent (soft edges).'
+        'Drawing options. Draw order: Sort Each Particle sorts every particle by its own depth (otherwise the whole '
+        'generator sorts as one), Fixed Sort Depth uses FixOtDepth, Sort at Owner sorts at the character or object '
+        'that owns the effect, Keep Behind Camera still draws particles whose sort depth is behind the camera, Sort '
+        'Bias Toward Camera moves the sort position by OtDepthBias. Look: Soft Edges fades where it meets geometry, '
+        'Refraction bends the scene behind it, Full Resolution skips the reduced-size effect buffer, No Depth Test '
+        'draws on top of everything, No Fog, Face Culling hides back faces, Parallax / Depth Volume pick the volume '
+        'shader variant (with VolumeBlendRate). Size and rotation: World Scale follows the parent\'s scale, Scale '
+        'After Rotation applies ModelScale along the turned axes, Local Rotation stops turning toward the movement '
+        'direction, Align Once at Spawn turns toward it only when the particle spawns. Pivot at PatCenter, Extended '
+        'Line Position (lines), Fade Edges (PrimModel border vertices fade to transparent).'
     ),
     'ptcl:PartsNoMax': (
         'Highest mesh group a keyframe on the part number can select; keyed values are clamped to it.'
@@ -550,8 +580,9 @@ HELP = {
         'How many extra mesh groups above PartsNoMin a particle may pick at random. 0 always draws PartsNoMin.'
     ),
     'ptcl:PassBits': (
-        "Probably extra render-pass bits added to the generator's pass mask. Not understood yet; keep the game's "
-        'value.'
+        'Extra view bits next to TransMode: the generator is drawn in a view if the view shares a bit with '
+        'TransMode or with these (1 and 2 = view mode bits 8 and 9, which views clear by default). Which views set '
+        "them isn't known yet; the files use 1 (most), 0 and 2. Keep the game's value."
     ),
     'ptcl:PatCenter': (
         'A pixel position inside the flipbook frame, from its top-left corner, used as the pivot: for billboards with'
@@ -732,10 +763,11 @@ HELP = {
         'not previewed in Blender.'
     ),
     'ptcl:TransMode': (
-        'Which views draw the particle: bit 1 = the normal view, bit 2 = reflections. Without bit 1 the particle '
-        "isn't drawn normally, so use 1 (or 3) for a visible effect. This is not a blend mode."
+        'Which render passes draw the particle (cTrans::MODE bits): 0x1 the normal view, 0x2 reflections, 0x4 '
+        'receives shadows, 0x8 casts shadows, 0x10 environment map, 0x20 motion blur. Without 0x1 the particle '
+        "isn't drawn normally, so use 1 (or 3) for a visible effect. The game's files use only 1, 0 and once 3. "
+        "It is the same pass mask the game's models have. This is not a blend mode."
     ),
-    'ptcl:uknDraw_0x14': 'Not understood yet; it is 0 in every DX9 effect. Keep it 0.',
     'ptcl:VertexInf': (
         "Springiness: how much of each stretch correction is fed back into the rope's velocity. Higher values make "
         'the rope snap back and wobble more.'

@@ -11,7 +11,7 @@ from bpy.app.handlers import persistent
 from albam.registry import blender_registry
 from .efl import schema
 from .efl.field_help import lookup as field_help
-from .efl.edit import as_list, keyframe_value_type, to_prop
+from .efl.edit import as_list, keyframe_value_type, to_prop, upgrade_props
 from .efl.model import SLOTS
 from .efl.sim import ROT_ORDERS
 from . import effect_filter
@@ -67,6 +67,73 @@ _ENUM_LABELS = {
 _ENUM_ITEMS = {name: [(str(i), f"{i} {label}", "") for i, label in enumerate(labels)]
                for name, labels in _ENUM_LABELS.items()}
 _NO_ITEMS = [("0", "0", "")]
+# integer fields shown as one checkbox per named bit (bits without a name keep their value)
+_FLAG_LABELS = {
+    "TransMode": ((0x1, "World (main view)"), (0x2, "Reflection"), (0x4, "Shadow Receive"), (0x8, "Shadow Cast"),
+                  (0x10, "Environment Map"), (0x20, "Motion Blur")),   # cTrans::MODE
+    "ColorFlag": ((0x1, "Blend Red"), (0x2, "Blend Green"), (0x4, "Blend Blue"), (0x8, "Blend Alpha"),
+                  (0x10, "Each Channel Random")),   # nEffect::COLOR_FLAG (0x20 CHOICE isn't in DX9)
+    "AnimFlag": ((0x1, "Play"), (0x2, "Loop"), (0x4, "Backwards"), (0x8, "Remove at End"),
+                 (0x100, "Flip Horizontal"), (0x200, "Flip Vertical"), (0x400, "Random Flip Horizontal"),
+                 (0x800, "Random Flip Vertical"), (0x1000, "Rotate 90°")),   # rEffectAnim::ANIM_FLAG, DX9 bits
+    "ParticleOptionFlag": (   # rEffectList::PARTICLE_OPTION_FLAG, the bits the DX9 game reads
+        (0x1, "Sort Each Particle"), (0x2, "Fixed Sort Depth"), (0x100, "Sort at Owner"), (0x40, "Keep Behind Camera"),
+        (0x80000000, "Sort Bias Toward Camera"), (0x4, "Soft Edges"), (0x10, "Refraction"), (0x20, "Full Resolution"),
+        (0x80, "No Depth Test"), (0x1000, "No Fog"), (0x400000, "Face Culling"), (0x400, "Parallax Volume"),
+        (0x800, "Depth Volume"), (0x200, "World Scale"), (0x40000, "Scale After Rotation"), (0x100000, "Local Rotation"),
+        (0x200000, "Align Once at Spawn"), (0x10000, "Pivot at PatCenter"), (0x20000, "Extended Line Position"),
+        (0x80000, "Fade Edges")),
+    "LightAttribute": ((0x2, "SH"), (0x8, "Per-Pixel"), (0x10, "Simple")),   # rEffectList::LIGHT_ATTR
+    "CullingFlag": ((0x1, "Distance / Angle Fade"), (0x2, "Occlusion Test"), (0x4, "Per Particle"),
+                    (0x80, "Angle Fade")),   # rEffectList::CULLING_FLAG
+    "ModelAnimFlag": ((0x1, "Play Parts"), (0x2, "Loop"), (0x4, "Backwards"), (0x8, "Remove at End"),
+                      (0x10, "UV Scroll"), (0x10000, "Use ModelZofs")),   # nEffect::MODEL_ANIM_FLAG; 0x10 per DX9
+}
+
+# Particle tab sections: (key, label, tooltip, field and bit-field names). Fields of a Line / Cloth extension go in
+# "line"; anything not listed goes in "other". A bit-field not listed goes with the word it lives in.
+PTCL_SECTIONS = [
+    ("draw", "Drawing & Blending", "When and how the particle is drawn: views, blending, draw order, culling",
+     ("TransMode", "PrimMaterialFlags", "BlendSrc", "BlendDst", "BlendOp", "PassBits", "ParticleOptionFlag",
+      "CullingFlag", "VolumeBlendRate", "FixOtDepth", "OtDepthBias", "zOfs", "EntryType", "DrawFlags_0x41",
+      "DiffuseFactor",
+      "LightGroupFlag")),
+    ("tex", "Texture & Flipbook", "Textures, the .ean flipbook and how its frames play",
+     ("BaseMapPath", "MaskMapPath", "NormalMapPath", "TexturePath", "LensFlarePath", "AnimPath", "AnimFlag",
+      "SeqNoMin", "SeqNoRange", "PatNoMin", "PatNoMax", "PatNoRange", "PatSpeed", "PatCenter", "TextureInvW",
+      "TextureInvH", "ScrollU", "ScrollV", "HoriTexDivNum", "RotTexDivNum")),
+    ("color", "Colour", "Colours, intensity and fading",
+     ("Color0", "Color1", "ColorFlag", "Intensity", "ColorPlaceNo", "ColorPlaceType", "ColorPlaceInpType",
+      "HoriColorPlaceNo", "PlaceColor", "PlaceColor1", "PlaceColor2", "StripColorFlags", "LayerDivideNum",
+      "NormAttenuateFlag", "NormAttenuateAngleStart", "NormAttenuateAngleEnd", "NormAttenuateCurve")),
+    ("size", "Size & Shape", "Scale, size and the shape of polygons and PrimModels",
+     ("Scale", "ScaleAdd", "AspectRatio", "AspectRatioAdd", "Width", "WidthAdd", "Height", "HeightAdd", "Radius",
+      "RadiusAdd", "HeadSize", "HeadSizeAdd", "PlaceSize", "PlaceSizeAdd", "WidthPlaceRate", "DistortRate",
+      "PolygonFlags", "PolygonAxis", "PolygonBillBoardType", "PolygonDivideNum", "PolygonFixType", "PrimFlags",
+      "PrimModelType", "HoriDivNum", "HoriDrawStart", "HoriDrawEnd", "RotDivNum", "RotDrawStart", "RotDrawEnd",
+      "SplineDivideNum", "SizePlaceType", "SizePlaceInpType", "SizePlaceNo", "ModelScale", "ModelScaleAdd")),
+    ("rot", "Rotation", "Angle, rotation, spin and which way the particle faces",
+     ("Angle", "AngleAdd", "Rot", "RotAdd", "RotAddCoef", "RotAxisOrder", "RotAxisType", "RotOrder", "Axis",
+      "DirAxisType", "ModelBillboardType")),
+    ("model", "Model", "The .mod drawn by Model particles and its animation",
+     ("ModelPath", "ModelFlags", "ModelAnimFlag", "ModelZofs", "AnimSpeed", "PartsNoMin", "PartsNoRange",
+      "PartsNoMax")),
+    ("line", "Line & Cloth", "Line, trail and cloth settings, including the LineType / ClothType extension",
+     ("LineFlags", "LineType", "LineOfsNum", "SizePlaceFlags", "ClothType", "ClothParam", "FollowFrame")),
+    ("light", "Light", "Light particles: colour, range and spot settings",
+     ("LightAttribute", "LightColorW", "LightMaskY", "LightTypeFlags", "LightType",
+      "AttenuateStart", "AttenuateStartAdd", "AttenuateEnd", "AttenuateEndAdd", "SpotFlags")),
+    ("other", "Other", "Fields not sorted into a section, mostly not understood yet", ()),
+]
+_PTCL_SECTION_OF = {name: key for key, _, _, names in PTCL_SECTIONS for name in names}
+_PTCL_SECTION_INDEX = {key: i for i, (key, *_) in enumerate(PTCL_SECTIONS)}
+
+
+def ptcl_section(name, word=None, extension=False):
+    """Section key of a particle field (or of a bit-field living in word)."""
+    if extension:
+        return "line"
+    return _PTCL_SECTION_OF.get(name) or _PTCL_SECTION_OF.get(word) or "other"
 INP_TYPES = [("0", "Linear", "Straight lines between keys"),
              ("1", "Hermite", "A smooth curve through the keys"),
              ("2", "Lagrange", "A 4-point cubic through the keys")]
@@ -118,6 +185,8 @@ def _item_value(item):
             raise ValueError(f"must be 0..{(1 << item.width) - 1}")
     elif item.kind == "enum":
         values = [int(item.enum_value)]
+    elif item.kind == "flags":
+        return to_prop(sum(1 << i for i in range(32) if item.flags[i]))
     elif item.kind == "hex":
         parts = [p.strip() for p in item.text.replace(";", ",").split(",") if p.strip()]
         values = [int(p, 0) for p in parts]
@@ -154,6 +223,10 @@ def _show(item, value):
     elif item.kind == "enum":
         v = _as_int(flat[0])
         item.enum_value = str(v)
+    elif item.kind == "flags":
+        v = _as_int(flat[0]) & 0xFFFFFFFF
+        for i in range(32):
+            item.flags[i] = bool(v >> i & 1)
     elif item.kind == "hex":
         item.text = ", ".join(f"{_as_int(v):#x}" for v in flat)
     elif item.kind == "color":
@@ -233,6 +306,7 @@ class AlbamEflFieldItem(bpy.types.PropertyGroup):
     width: bpy.props.IntProperty()
     error: bpy.props.StringProperty()
     help_key: bpy.props.StringProperty()   # "<slot>:<field>" in efl.field_help
+    section: bpy.props.StringProperty()    # Particle tab: PTCL_SECTIONS key
     floats: bpy.props.FloatVectorProperty(size=MAX_VALUES, precision=4, description=VALUE_TIP,
                                           update=_on_item_edit)
     ints: bpy.props.IntVectorProperty(size=MAX_VALUES, description=VALUE_TIP, update=_on_item_edit)
@@ -242,6 +316,8 @@ class AlbamEflFieldItem(bpy.types.PropertyGroup):
     color_b: bpy.props.FloatVectorProperty(size=4, subtype="COLOR_GAMMA", min=0.0, max=1.0,
                                            description=VALUE_TIP, update=_on_item_edit)
     enum_value: bpy.props.EnumProperty(items=_enum_items, description=VALUE_TIP, update=_on_item_edit)
+    flags: bpy.props.BoolVectorProperty(size=32, update=_on_item_edit,
+                                        description="Tick to set this flag. Hover the field's name for what each does")
     # name (PropertyGroup.name) = "<slot>/<field>", label = the field name
     label: bpy.props.StringProperty()
 
@@ -475,6 +551,9 @@ class AlbamEflEditor(bpy.types.PropertyGroup):
                     "Off: the keys set the value every frame (and Add is ignored)")
     keys: bpy.props.CollectionProperty(type=AlbamEflKeyItem)
     key_index: bpy.props.IntProperty(description="Click a key to select it")
+    ptcl_open: bpy.props.BoolVectorProperty(
+        size=len(PTCL_SECTIONS), default=[key in ("tex", "color", "size") for key, *_ in PTCL_SECTIONS],
+        description="Click to show or hide this group of particle fields")
 
 
 # -- loading ----------------------------------------------------------------------------------------
@@ -494,6 +573,9 @@ def _add_field(state, slot, f, value):
         item.note = reason or item.note
     elif base == "str64":
         item.kind = "text"
+    elif f.name in _FLAG_LABELS and slot in ("ptcl", "gen", "life", "move") and n is None and \
+            base in ("u8", "u16", "u32", "s8", "s16", "s32"):
+        item.kind = "flags"
     elif base == "u32":
         item.kind = "hex"
     elif base == "color" and item.count <= 8:
@@ -519,6 +601,7 @@ def _add_bit(state, slot, b, value):
     else:
         item.kind = "bit"
     _show(item, value)
+    return item
 
 
 def load_record(state, ob):
@@ -534,6 +617,10 @@ def load_record(state, ob):
             props = ob.get(f"efl_{slot}")
             if props is None:
                 continue
+            upgraded = upgrade_props(props.to_dict() if hasattr(props, "to_dict") else props)
+            if upgraded is not props and set(upgraded) != set(props.keys()):   # an older import: store today's fields
+                ob[f"efl_{slot}"] = upgraded
+                props = ob[f"efl_{slot}"]
             struct = schema.struct_for_props(slot, int(props["type"]), props)
             bits = {}
             for b in struct.bits:
@@ -541,10 +628,12 @@ def load_record(state, ob):
             for f in struct.fields:
                 if f.name not in props or f.sub:   # offsets are layout (older imports stored them)
                     continue
-                _add_field(state, slot, f, props[f.name])
+                item = _add_field(state, slot, f, props[f.name])
+                extension = f.offset >= struct.base_size
+                item.section = ptcl_section(f.name, extension=extension)
                 for b in bits.get(f.name, []):
                     if b.name in props:
-                        _add_bit(state, slot, b, props[b.name])
+                        _add_bit(state, slot, b, props[b.name]).section = ptcl_section(b.name, f.name, extension)
             subs = (ob.get("efl_sub") or {}).get(slot) or {}
             for offset_field in subs.keys():
                 f = struct.by_name.get(offset_field)
@@ -650,8 +739,9 @@ def _linked_changes(root):
 
 @blender_registry.register_blender_type
 class ALBAM_OT_EflSelectLinked(bpy.types.Operator):
-    """Select this .efs strip or .ean flipbook to edit it: a strip is a mesh (Edit Mode), a flipbook opens in the
-    Flipbook panel. Press Apply afterwards to see the edits in the effect's preview"""
+    """Select this .efs strip or .ean flipbook to edit it. A strip is a mesh: edit its points in Edit Mode. A
+    flipbook is a mesh whose faces' UVs are the frames: Select Frames in the Image Editor's Albam tab (Flipbook
+    panel), then edit them in the UV editor. Press Apply afterwards to see the edits in the effect's preview"""
     bl_idname = "albam.efl_select_linked"
     bl_label = "Edit Linked File"
     bl_options = {"REGISTER", "UNDO"}
@@ -716,6 +806,8 @@ def field_tooltip(item):
         lines.append("Pick one of the values the game handles")
         if item.parent:
             lines.append(f"Stored in bits {item.shift}..{item.shift + item.width - 1} of {item.parent}")
+    elif item.kind == "flags":
+        lines.append("Tick the flags to set them; bits without a checkbox keep their value")
     elif item.kind == "color":
         lines.append("Colour (stored as B, G, R, A bytes)" + (". Two colours: the game mixes A and B by a "
                                                               "random amount" if item.count > 4 else ""))
@@ -908,6 +1000,25 @@ class ALBAM_UL_EflKeys(bpy.types.UIList):
                 row.prop(item, "values", index=2 * axis, text="XYZ"[axis])
 
 
+def _draw_sections(layout, state, items, searching):
+    """Particle tab: the fields in collapsible groups (all open while searching)."""
+    groups = {}
+    for item in items:
+        groups.setdefault(item.section if item.section in _PTCL_SECTION_INDEX else "other", []).append(item)
+    for index, (key, label, _, _) in enumerate(PTCL_SECTIONS):
+        group = groups.get(key)
+        if not group:
+            continue
+        box = layout.box()
+        is_open = searching or state.ptcl_open[index]
+        box.prop(state, "ptcl_open", index=index, text=f"{label} ({len(group)})", emboss=False,
+                 icon="TRIA_DOWN" if is_open else "TRIA_RIGHT")
+        if is_open:
+            col = box.column(align=False)
+            for item in group:
+                _draw_field(col, item, state.show_notes)
+
+
 def _draw_field(layout, item, show_notes):
     box_row = layout.row(align=True)
     split = box_row.split(factor=0.42, align=True)
@@ -934,6 +1045,14 @@ def _draw_field(layout, item, show_notes):
         right.prop(item, "ints", index=0, text="")
     elif item.kind == "enum":
         right.prop(item, "enum_value", text="")
+    elif item.kind == "flags":
+        named = 0
+        for bit, text in _FLAG_LABELS.get(item.label, ()):
+            right.prop(item, "flags", index=bit.bit_length() - 1, text=text)
+            named |= bit
+        value = sum(1 << i for i in range(32) if item.flags[i])
+        other = value & ~named
+        right.label(text=f"= {value:#x}" + (f"  (other bits {other:#x} kept)" if other else ""))
     elif item.kind in ("hex", "text"):
         right.prop(item, "text", text="")
     elif item.kind == "color":
@@ -982,15 +1101,17 @@ class ALBAM_PT_EflEditor(bpy.types.Panel):
             box.label(text="then press Rebuild")
         from .effect import linked_objects
         linked = linked_objects(root)
-        if linked:
-            box = layout.box()
-            box.label(text="Linked files (exported with the effect when changed)", icon="LINKED")
-            changed = {ob.name for ob, _ in _linked_changes(root)}
-            for key, ob in sorted(linked.items()):
-                row = box.row(align=True)
-                icon = "CURVE_PATH" if key.startswith("efs:") else "IMAGE_DATA"
-                label = ob.albam_asset.relative_path + ("  (edited: Apply to preview)" if ob.name in changed else "")
-                row.operator("albam.efl_select_linked", text=label, icon=icon, emboss=False).name = ob.name
+        box = layout.box()
+        box.label(text="Linked files (exported with the effect when changed)", icon="LINKED")
+        changed = {ob.name for ob, _ in _linked_changes(root)}
+        for key, ob in sorted(linked.items()):
+            row = box.row(align=True)
+            icon = "CURVE_PATH" if key.startswith("efs:") else "IMAGE_DATA"
+            label = ob.albam_asset.relative_path + ("  (edited: Apply to preview)" if ob.name in changed else "")
+            row.operator("albam.efl_select_linked", text=label, icon=icon, emboss=False).name = ob.name
+        row = box.row(align=True)
+        row.operator("albam.efs_new", icon="CURVE_PATH")
+        row.operator("albam.ean_new", icon="IMAGE_DATA")
 
         box = layout.box()
         box.row().prop(state, "show_filter", icon="TRIA_DOWN" if state.show_filter else "TRIA_RIGHT",
@@ -1046,8 +1167,7 @@ class ALBAM_PT_EflEditor(bpy.types.Panel):
         row.prop(state, "show_notes", toggle=True)
         row.operator("albam.efl_revert_record", text="", icon="LOOP_BACK")
         search = state.search.lower()
-        shown = 0
-        col = layout.column(align=False)
+        visible = []
         for item in state.fields:
             in_tab = (":" in item.slot) if state.tab == "more" else item.slot == state.tab
             if not in_tab:
@@ -1056,11 +1176,16 @@ class ALBAM_PT_EflEditor(bpy.types.Panel):
                 continue
             if search and search not in item.label.lower():
                 continue
-            if state.tab == "more" and (shown == 0 or col_slot != item.slot):
-                col.label(text=item.slot.split(":", 1)[1].replace("ParamOffset", ""), icon="MOD_PHYSICS")
-            col_slot = item.slot
-            _draw_field(col, item, state.show_notes)
-            shown += 1
+            visible.append(item)
+        shown = len(visible)
+        if state.tab == "ptcl":
+            _draw_sections(layout, state, visible, bool(search))
+        else:
+            col = layout.column(align=False)
+            for i, item in enumerate(visible):
+                if state.tab == "more" and (i == 0 or visible[i - 1].slot != item.slot):
+                    col.label(text=item.slot.split(":", 1)[1].replace("ParamOffset", ""), icon="MOD_PHYSICS")
+                _draw_field(col, item, state.show_notes)
         if not shown:
             layout.label(text="Nothing to show here" + ("" if state.show_unverified else
                                                          " (try Unverified)"))

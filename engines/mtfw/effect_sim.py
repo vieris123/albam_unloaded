@@ -24,6 +24,7 @@ from mathutils import Euler, Matrix, Quaternion, Vector
 
 from albam.registry import blender_registry
 from .efl import EffectList
+from .efl.ean import ANIM_FLIP_U, ANIM_FLIP_V, flip_affine_row
 from .efl.sim import ROT_ORDERS, SPACE_FOLLOW, SPACE_FOLLOW_TRANSLATION, simulate, state_at
 
 NODE_GROUP = "ALBAM_EFL_Particles_v4"   # v1: uv_off/uv_scale; v2: affine uv_u/uv_v; v3: + tint; v4: + shape
@@ -145,6 +146,20 @@ def frame_tables(anim, image, anim_flag, ean_module):
         return [[whole]]
     return [[(ean_module.uv_affine(p, tex_w, tex_h, anim_flag), abs(p[2]), abs(p[3])) for p in seq.patterns]
             or [whole] for seq in anim.sequences]
+
+
+def _frame_row(rows, seq_offsets, seq_counts, s):
+    """The flipbook row (affine UV + pixel size) of a particle state's frame, with its own random flips applied."""
+    seq = min(s.sequence, len(seq_counts) - 1)
+    row = rows[seq_offsets[seq] + min(s.pattern, seq_counts[seq] - 1)]
+    if not s.flip:
+        return row
+    row = list(row)
+    if s.flip & ANIM_FLIP_U:
+        row[0:3] = flip_affine_row(*row[0:3])
+    if s.flip & ANIM_FLIP_V:
+        row[3:6] = flip_affine_row(*row[3:6])
+    return row
 
 
 def table_info(tables):
@@ -303,8 +318,7 @@ def update_object(ob, scene):
         if groups:   # Model: first mesh whose idx_group matches the part number, else mesh 0
             part.append(groups.index(s.pattern) if s.pattern in groups else 0)
 
-        seq = min(s.sequence, len(seq_counts) - 1)
-        row = rows[seq_offsets[seq] + min(s.pattern, seq_counts[seq] - 1)]
+        row = _frame_row(rows, seq_offsets, seq_counts, s)
         if kind == 0:
             facing = (cam_world - pos_world).to_track_quat("Z", "Y") if cam_world is not None else Quaternion()
             q = to_local_rot @ facing @ Quaternion((0.0, 0.0, 1.0), s.angle)
@@ -412,8 +426,7 @@ def _update_lines(ob, scene, info):
         last = len(pts) - 1
         if last < 1:
             continue
-        seq = min(s.sequence, len(seq_counts) - 1)
-        a, b, ou, c, d, ov = rows[seq_offsets[seq] + min(s.pattern, seq_counts[seq] - 1)][:6]
+        a, b, ou, c, d, ov = _frame_row(rows, seq_offsets, seq_counts, s)[:6]
         base = len(verts)
         for i, (pw, half, rgba) in enumerate(pts):
             tangent = (pts[min(i + 1, last)][0] - pts[max(i - 1, 0)][0])
@@ -495,8 +508,7 @@ def _update_strips(ob, scene, info):
         for i in range(1, len(a_pts)):
             lengths.append(lengths[-1] + ((a_pts[i] - a_pts[i - 1]).length + (b_pts[i] - b_pts[i - 1]).length) / 2)
         total = lengths[-1] or 1.0
-        seq = min(s.sequence, len(seq_counts) - 1)
-        ra, rb, ou, rc, rd, ov = rows[seq_offsets[seq] + min(s.pattern, seq_counts[seq] - 1)][:6]
+        ra, rb, ou, rc, rd, ov = _frame_row(rows, seq_offsets, seq_counts, s)[:6]
         base = len(verts)
         for i, (pa, pb) in enumerate(zip(a_pts, b_pts)):
             t = lengths[i] / total

@@ -331,7 +331,7 @@ class _EffectBuilder:
             image = self.image_for(base_map)
         tables = effect_sim.frame_tables(None, image, 0, ean)   # whole texture, its pixel size
         if ptcl.has("AnimPath") and ptcl.get("AnimPath") and base_map:
-            tables = effect_sim.frame_tables(self.anim_for(ptcl.get("AnimPath")),
+            tables = effect_sim.frame_tables(self.anim_for(ptcl.get("AnimPath"), self.images.get(base_map)),
                                              self.images.get(base_map), ptcl.get("AnimFlag"), ean)
         rot_order = ptcl.get("RotOrder") if ptcl.has("PrimFlags") or ptcl.has("PolygonFlags") else 5
         extra = {}
@@ -580,7 +580,7 @@ class _EffectBuilder:
     def frame_size(self, ptcl):
         """Pixel size of the particle's first flipbook frame (the whole texture without a flipbook)."""
         image = self.images.get(_base_map(ptcl)) or None
-        anim = self.anim_for(ptcl.get("AnimPath")) if ptcl.has("AnimPath") and ptcl.get("AnimPath") else None
+        anim = self.anim_for(ptcl.get("AnimPath"), image) if ptcl.has("AnimPath") and ptcl.get("AnimPath") else None
         pattern = anim.pattern(ptcl.get("SeqNoMin"), ptcl.get("PatNoMin")) if anim is not None else None
         if pattern is not None:
             return abs(pattern[2]), abs(pattern[3])
@@ -640,7 +640,7 @@ class _EffectBuilder:
         """Effect textures are flipbook sheets; show only the particle's first frame, as the game does at spawn."""
         if not (ptcl.has("AnimPath") and ptcl.get("AnimPath") and _base_map(ptcl)):
             return
-        anim = self.anim_for(ptcl.get("AnimPath"))
+        anim = self.anim_for(ptcl.get("AnimPath"), self.images.get(_base_map(ptcl)))
         image = self.images.get(_base_map(ptcl))
         if anim is None or image is None:
             return
@@ -657,9 +657,10 @@ class _EffectBuilder:
         ob["efl_frame"] = {"sequence": seq_no, "pattern": pat_no, "pattern_count": len(sequence.patterns),
                            "rect_px": list(pattern)}
 
-    def anim_for(self, anim_path):
-        """A particle's .ean flipbook, or None. It also becomes an editable `EAN_` holder under the effect root
-        (Flipbook panel); its current frames are what the preview uses, and export writes it back when it changed."""
+    def anim_for(self, anim_path, image=None):
+        """A particle's .ean flipbook, or None. It also becomes an editable `EAN_` mesh under the effect root (frames as
+        UVs over image, the particle's texture; hidden until picked in the Effect Editor's Linked files); its current
+        frames are what the preview uses, and export writes it back when it changed."""
         if anim_path in self.anims:
             return self.anims[anim_path]
         anim = None
@@ -671,7 +672,9 @@ class _EffectBuilder:
                 vfile = self.context.scene.albam.rfs.get_vfile(self.app_id, anim_path + ".ean")
                 data = vfile.get_bytes()
                 anim = ean.parse(data)
-                ob = effect_ean.create_ean_object(PureWindowsPath(anim_path).name, anim, data, self.collection)
+                ob = effect_ean.create_ean_object(PureWindowsPath(anim_path).name, anim, data, self.collection,
+                                                  image)
+                ob.hide_set(True)
                 ob.albam_asset.app_id = self.app_id
                 ob.albam_asset.relative_path = vfile.relative_path
             except KeyError:

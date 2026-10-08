@@ -206,3 +206,141 @@ def export_efs(bl_obj):
     data = build_efs_bytes(bl_obj)
     asset = bl_obj.albam_asset
     return [VirtualFileData(asset.app_id, asset.relative_path, data_bytes=data)]
+
+
+# -- new strips -------------------------------------------------------------------------------------
+
+PATH_MAX = 63   # str64 field, NUL-terminated
+SKIP_TYPES = ("efl_record", "efl_root", "efl_generator")
+
+
+def _source_items(self, context):
+    items = [("LINE", "Straight line", "A straight line of points along the generator's +Y axis (up in the game)")]
+    for ob in context.scene.objects:
+        if ob.type in ("MESH", "CURVE") and not any(k in ob for k in SKIP_TYPES) and "efs_version" not in ob \
+                and "ean_data" not in ob:
+            items.append((ob.name, ob.name, f"Use {ob.name}'s points: each connected chain of a mesh, or each "
+                                             "spline of a curve, becomes a part"))
+    _source_items.cache = items   # Blender needs the list kept alive
+    return items
+
+
+def _use_items(self, context):
+    from .effect_export import record_object
+    record = record_object(context.active_object)
+    items = [("RANGE", "Spawn strip (RangeStripPath)",
+              "Particles spawn along the strip (generator Range strip, spread by RangeStripType / Flag)")]
+    move = record.get("efl_move") if record is not None else None
+    if move is not None and int(move.get("type", -1)) == 3:
+        items.append(("PATH", "Move path (PathStripPath)", "Particles ride along the strip (this record's PathStrip move)"))
+    _use_items.cache = items
+    return items
+
+
+def _strip_from_points(chains):
+    """EffectStrip from lists of game-space points (cm)."""
+    strip = efs.EffectStrip(efs.VERSION_DX9)
+    for points in chains:
+        strip.parts.append(efs.Part([efs.Vertex(tuple(p), (0.0, 1.0, 0.0)) for p in points]))
+    return strip
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_EfsNew(bpy.types.Operator):
+    """Make a new .efs strip for the active effect record and point the record at it: particles then spawn along it
+    (spawn strip) or ride it (PathStrip moves). Its points come from a curve or mesh you drew, or a straight line.
+    The effect rebuilds so the preview uses it; exporting the effect writes the new file"""
+    bl_idname = "albam.efs_new"
+    bl_label = "New Strip"
+    bl_options = {"REGISTER", "UNDO"}
+
+    path: bpy.props.StringProperty(
+        name="Game Path", maxlen=PATH_MAX,
+        description="Where the strip goes in the game files, without the extension, e.g. effect\\efs\\com\\my_strip. "
+                    "Export writes it there; Patch adds it to the .arc")
+    use_for: bpy.props.EnumProperty(name="Use For", items=_use_items,
+                                    description="Which of the record's strip fields points at the new file")
+    source: bpy.props.EnumProperty(name="Points From", items=_source_items,
+                                   description="Where the strip's points come from")
+    points: bpy.props.IntProperty(name="Points", default=8, min=2, max=4096,
+                                  description="Number of points of the straight line")
+    length: bpy.props.FloatProperty(name="Length (cm)", default=200.0, min=0.0,
+                                    description="Length of the straight line in game centimetres")
+
+    @classmethod
+    def poll(cls, context):
+        from .effect_export import record_object
+        return record_object(context.active_object) is not None
+
+    def invoke(self, context, event):
+        from .effect_export import effect_root, record_object
+        record = record_object(context.active_object)
+        root = effect_root(record)
+        stem = root.get("efl_stem", "effect") if root is not None else "effect"
+        number = int(record["efl_record"])
+        self.path = "effect\\efs\\com\\" + f"{stem}_{number if number >= 0 else 'new'}"
+        return context.window_manager.invoke_props_dialog(self, width=420)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "path")
+        layout.prop(self, "use_for")
+        layout.prop(self, "source")
+        if self.source == "LINE":
+            row = layout.row(align=True)
+            row.prop(self, "points")
+            row.prop(self, "length")
+
+    def execute(self, context):
+        from .effect import linked_objects
+        from .effect_export import _report_failure, apply_to_scene, effect_root, record_object
+        record = record_object(context.active_object)
+        root = effect_root(record)
+        path = self.path.strip().replace("/", "\\")
+        if path.lower().endswith(".efs"):
+            path = path[:-4]
+        if not path or len(path.encode("latin-1", "replace")) > PATH_MAX:
+            self.report({"ERROR"}, f"Give a game path of 1 to {PATH_MAX} characters")
+            return {"CANCELLED"}
+        if f"efs:{path}" in linked_objects(root):
+            self.report({"ERROR"}, f"This effect already has a strip at {path}")
+            return {"CANCELLED"}
+        generator = record   # strips are in the generator's space (game axes)
+        to_local = generator.matrix_world.inverted()
+        if self.source == "LINE":
+            step = self.length / (self.points - 1)
+            chains = [[(0.0, i * step, 0.0) for i in range(self.points)]]
+        else:
+            src = context.scene.objects.get(self.source)
+            if src is None:
+                self.report({"ERROR"}, "Pick the curve or mesh to take the points from")
+                return {"CANCELLED"}
+            evaluated = src.evaluated_get(context.evaluated_depsgraph_get())
+            mesh = evaluated.to_mesh()
+            try:
+                world = [src.matrix_world @ v.co for v in mesh.vertices]
+                chains = [[tuple(c / SCALE for c in to_local @ world[i]) for i in chain] for chain in _chains(mesh)]
+            finally:
+                evaluated.to_mesh_clear()
+            if not chains:
+                self.report({"ERROR"}, f"{src.name} has no points")
+                return {"CANCELLED"}
+        strip = _strip_from_points(chains)
+        collection = root.users_collection[0] if root.users_collection else context.scene.collection
+        ob = create_efs_object(path.rsplit("\\", 1)[-1], strip, b"", collection, game_space=True)
+        ob.albam_asset.app_id = root.albam_asset.app_id
+        ob.albam_asset.relative_path = path + ".efs"
+        ob.parent = generator
+        ob.matrix_parent_inverse.identity()
+        ob["efl_root"] = root
+        ob["efl_linked"] = f"efs:{path}"
+        if self.use_for == "PATH":
+            record["efl_move"]["PathStripPath"] = path
+        else:
+            record["efl_gen"]["RangeStripPath"] = path
+        try:
+            apply_to_scene(context, root)
+        except Exception as err:
+            return _report_failure(self, err)
+        self.report({"INFO"}, f"New strip {path}.efs ({sum(len(p.vertices) for p in strip.parts)} points)")
+        return {"FINISHED"}

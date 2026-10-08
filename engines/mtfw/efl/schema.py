@@ -250,24 +250,45 @@ GENERATOR = Struct("EFL_GENERATOR", 0x1E0, "dx9", [
 # --- particle param (slot 1) -- plan 3.4/3.5; chain = COMMON [+ DRAW [+ PRIM]] + tail ------------
 
 PTCL_COMMON = [
-    F(0x00, "TransMode", "u8", "dx9", "scene pass mask, not a blend mode: 1 main view, 2 reflections; 0 = not drawn in the main view"),
+    F(0x00, "TransMode", "u8", "dx9", "cTrans::MODE pass mask as on every uModel (not a blend mode): 0x1 WORLD, 0x2 REFLECTION, "
+                                       "0x4 SHADOW_RECV, 0x8 SHADOW_CAST, 0x10 ENV, 0x20 MOTIONBLUR; corpus: 1, 0, once 3"),
     F(0x01, "EntryType", "u8", "se"),
-    F(0x02, "CullingFlag", "u16", "dx9", "bit0 ON -> culling draw variant"),
-    F(0x04, "ParticleOptionFlag", "u32", "dx9", "0x4 DEPTHBLEND (soft), 0x10 REFRACT, 0x80 NO_ZTEST, 0x200 WMAT_SCALE, "
-                                                 "0x1000 NO_FOG, 0x10000 PAT_CENTER, 0x80000 EDGE_ALPHA_OFF"),
-    F(0x08, "LightGroupFlag", "u32", "se"),
+    F(0x02, "CullingFlag", "u8", "dx9",
+      "rEffectList::CULLING_FLAG: 0x1 ON (culling draw variant, mTransType 0x11..), 0x2 OCCLUSION (prim ATTR_OCCLUSION, "
+      "checked before refraction; initGeneratorParam 0x96B603), 0x4 PARTICLE, 0x80 ANGLE (direction computed once per "
+      "generator unless PARTICLE, 0x96B6A2)"),
+    F(0x03, "VolumeBlendRate", "u8", "dx9",
+      "SE BlendState; != 0 -> prim ATTR_VOLUME (PRIM_EX_VOLUME), ATTR_DEPTHVOLUME with option 0x800, ATTR_PARALLAX "
+      "with option 0x400, unless refraction / occlusion (initGeneratorParam 0x96B61F); the value goes into every "
+      "vertex (sub_961250 and the other builders). Corpus 0-100, non-zero on 26,626 of 34,703 particles"),
+    F(0x04, "ParticleOptionFlag", "u32", "dx9",
+      "rEffectList::PARTICLE_OPTION_FLAG, DX9 readers: 0x1 OT_DEPTH sort per particle, 0x2 OT_FIX = FixOtDepth, 0x100 "
+      "OT_UNIT sort at the unit, 0x40 NO_CLIP keep negative depths, sign bit = OtDepthBias toward the camera "
+      "(setPrimEnv 0x99DB60); 0x4 ATTR_DEPTHBLEND, 0x10 ATTR_REFRACT (SE ALPHA_BLUR), 0x20 ATTR_NOREDUCTION, 0x80 "
+      "ATTR_NOZTEST, 0x1000 ATTR_NOFOG, 0xC00000 ATTR_CULLING, 0x400 / 0x800 PARALLAX / DEPTH_VOLUME with "
+      "VolumeBlendRate, 0x200 WMAT_SCALE, 0x40000 MDLSCL_AFTER (scale after rotation), 0x100000 ROT_LOCAL (no turn to "
+      "the motion), 0x200000 ROT_INIT (turn once at spawn) (initGeneratorParam 0x96B560, calcParticleMatrix "
+      "0x98A77F / 0x98B3FE), 0x10000 PAT_CENTER, 0x20000 EXT_LINE_POS (line renderers), 0x80000 = border vertices get alpha 0 "
+      "(buildPrimModelRing 0x9CDB1B; SE calls it EDGE_ALPHA_OFF but in DX9 set means fade); "
+      "0x8 INV_VOLUME has no DX9 reader"),
+    F(0x08, "LightGroupFlag", "u32", "dx9",
+      "light-group mask, the same one models use: Light particles hand it to their light (updateParticleLight "
+      "0x99C1BB; 0xFFFFFFFF on 153 of 177), other particles are lit when != 0 (prim ATTR_LIGHTING, "
+      "initGeneratorParam 0x96B5E1; 337 Model, 21 Polygon)"),
     F(0x0C, "zOfs", "s32", "se"),
-    F(0x10, "FixOtDepth", "u16", "se"),
+    F(0x10, "FixOtDepth", "u16", "dx9", "draw-order key with ParticleOptionFlag 0x2 (setPrimEnv 0x99DBEE)"),
     F(0x12, "PrimMaterialFlags", "u16", "dx9", "blend nibbles -> calcPrimMaterial 0x9DEBF0 -> render blend state"),
 ]
 PTCL_COMMON_BITS = [
     B("BlendSrc", "PrimMaterialFlags", 0, 4, "dx9", "D3DBLEND - 1 (4 = SRCALPHA); sRender::dispatchCommands 0x8F48A6"),
     B("BlendDst", "PrimMaterialFlags", 4, 4, "dx9", "D3DBLEND - 1 (5 = INVSRCALPHA alpha blend, 1 = ONE additive)"),
     B("BlendOp", "PrimMaterialFlags", 8, 4, "dx9", "D3DBLENDOP - 1 (0 = ADD, 2 = REVSUBTRACT)"),
-    B("PassBits", "PrimMaterialFlags", 12, 4, "dx9", "ORed into Generator.mFlags bits 8-11 (scene pass mask); unresolved"),
+    B("PassBits", "PrimMaterialFlags", 12, 4, "dx9", "Generator+24 bits 8-11 (initGeneratorParam), ANDed with the view's "
+                                                     "cTrans CONTEXT.mMode bits 8-11 by isGeneratorVisible 0x53D460; not a cTrans::PASS"),
 ]
 PTCL_DRAW = [
-    F(0x14, "uknDraw_0x14", "u32", "unknown", "always 0 in the DX9 corpus"),
+    F(0x14, "OtDepthBias", "f32", "dx9", "sort position moved this far toward the camera when ParticleOptionFlag's "
+                                           "sign bit is set (setPrimEnv 0x99DC38); 0 in every DX9 file"),
     F(0x18, "Intensity", "rangef", "dx9"),
     F(0x20, "Scale", "rangef", "dx9"),
     F(0x28, "ScaleAdd", "rangef", "dx9"),
@@ -275,7 +296,8 @@ PTCL_DRAW = [
     F(0x34, "KeyframeScaleParamOffset", "rel32", "dx9", sub="kf:f32"),
     F(0x38, "member_0x38", "s32", "unknown"),
     F(0x3C, "member_0x3c", "s32", "unknown"),
-    F(0x40, "ColorFlag", "u8", "se"),
+    F(0x40, "ColorFlag", "u8", "dx9", "nEffect::COLOR_FLAG: 1/2/4/8 mix R/G/B/A toward Color1 by a random t, 0x10 re-roll "
+                                       "t per channel (calcSrcColor 0x9801B0); 0x20 CHOICE not in DX9"),
     F(0x41, "DrawFlags_0x41", "u8", "dx9", "bit0 KeyframePatSpeedParamFlag (test dword@0x40 & 0x100)"),
     F(0x42, "KeyframeColorParamOffset", "rel16", "se", sub="kf:color"),
     F(0x44, "KeyframePatNoParamOffset", "rel16", "dx9", "initParticleBillboard 0x977E71; 12-byte keys (corpus)", sub="kf:f32"),
@@ -284,7 +306,9 @@ PTCL_DRAW = [
     F(0x4C, "Color1", "color", "dx9"),
 ]
 PTCL_LIGHT_HEAD = [
-    F(0x40, "LightAttribute", "u32", "dx9", "low byte | 0x40 -> uLight attributes"),
+    F(0x40, "LightAttribute", "u32", "dx9",
+      "rEffectList::LIGHT_ATTR: 0x2 SH, 0x8 PERPIXEL (dropped when the light can't), 0x10 SIMPLE (every DX9 file); "
+      "updateParticleLight 0x99C19E writes low byte | 0x40 into the light"),
     F(0x44, "ColorFlag", "u8", "dx9"),
     F(0x45, "LightTypeFlags", "u8", "dx9"),
     F(0x46, "KeyframeColorParamOffset", "rel16", "dx9", sub="kf:color"),
@@ -292,7 +316,10 @@ PTCL_LIGHT_HEAD = [
     F(0x4C, "Color1", "color", "dx9"),
 ]
 PTCL_PRIM = [
-    F(0x50, "AnimFlag", "u16", "dx9"),
+    F(0x50, "AnimFlag", "u16", "dx9",
+      "rEffectAnim::ANIM_FLAG: 1 MOVE, 2 LOOP, 4 REVERSE, 8 FINISH (sub_961DB0), 0x100 / 0x200 flip U / V, 0x1000 "
+      "rotate (sub_9632F0), 0x400 / 0x800 flip U / V at random per particle (getAnimFlag 0x980140); REVERSE_RAND "
+      "0x10 not in DX9, 0x8000 KEYFRAME is runtime-only"),
     F(0x52, "SeqNoMin", "u8", "dx9", "initParticleBillboard 0x978090"),
     F(0x53, "SeqNoRange", "u8", "dx9"),
     F(0x54, "PatNoMin", "u16", "dx9"),
@@ -453,7 +480,10 @@ PTCL_TAILS = {
         F(0xF0, "ModelFlags", "u32", "dx9"),
         F(0xF4, "PartsNoMax", "f32", "dx9", "clamp for the PatNo keyframe"),
         F(0xF8, "AnimSpeed", "f32", "dx9", "part index step per frame"),
-        F(0xFC, "ModelAnimFlag", "u32", "dx9", "1 animate parts, 2 loop, 4 reverse, 8 kill at end, 0x10 UV scroll, 0x10000 ModelZofs"),
+        F(0xFC, "ModelAnimFlag", "u32", "dx9",
+          "nEffect::MODEL_ANIM_FLAG 1 MOVE, 2 LOOP, 4 REVERSE, 8 FINISH; in DX9 0x10 is UV scroll (initParticleModel "
+          "0x97BB04, move 0x99008D, renderModel 0x9A228B), not SE's REVERSE_RAND; 0x10000 ModelZofs; 0x10000000+ "
+          "runtime"),
         F(0x100, "ScrollU", "rangef", "dx9", "UV per frame"),
         F(0x108, "ScrollV", "rangef", "dx9"),
         F(0x110, "ModelZofs", "f32", "dx9", "cm along camera->particle; negative pulls toward the camera"),

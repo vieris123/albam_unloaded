@@ -146,9 +146,25 @@ def block_props(block):
     return props
 
 
+def upgrade_props(props):
+    """Particle props stored by older imports, in today's field names: CullingFlag was a u16 holding VolumeBlendRate
+    in its high byte, and OtDepthBias was the u32 uknDraw_0x14. Returns props unchanged when nothing is old."""
+    if props is None or ("VolumeBlendRate" in props or "CullingFlag" not in props) and "uknDraw_0x14" not in props:
+        return props
+    out = dict(props)
+    if "VolumeBlendRate" not in out and "CullingFlag" in out:
+        word = _scalar(0, out["CullingFlag"])
+        out["CullingFlag"], out["VolumeBlendRate"] = word & 0xFF, word >> 8 & 0xFF
+    if "uknDraw_0x14" in out:
+        raw = _scalar(0, out.pop("uknDraw_0x14")) & 0xFFFFFFFF
+        out["OtDepthBias"] = struct.unpack("<f", struct.pack("<I", raw))[0]
+    return out
+
+
 def apply_props(block, props):
     """Write changed values of props (a mapping like block_props) into block.
     Returns (changes, problems): changes = [(name, old, new)], problems = [message]."""
+    props = upgrade_props(props)
     problems = []
     current = {"type": block.type, "type_name": block.type_name, "struct": block.struct.name}
     for key in READ_ONLY_KEYS:
