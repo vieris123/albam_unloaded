@@ -37,6 +37,7 @@ from .material import (
     check_mtfw_shader_group,
 )
 from .texture import check_dds_textures
+from .model_settings import export_light_group, set_light_group
 from .structs.mod_156 import Mod156
 from .structs.mod_153 import Mod153
 from .structs.mod_21 import Mod21
@@ -365,6 +366,8 @@ def build_blender_model(file_list_item, context):
     bl_object.albam_asset.app_id = app_id
     bl_object.albam_asset.relative_path = file_list_item.relative_path
     bl_object.albam_asset.extension = file_list_item.extension
+    if hasattr(mod, "model_info"):
+        set_light_group(bl_object.albam_mod, mod.model_info.light_group)
 
     exportable = context.scene.albam.exportable.file_list.add()
     exportable.bl_object = bl_object
@@ -870,6 +873,8 @@ def export_mod(bl_obj):
                 solution="Separate them by material (Edit Mode > Mesh > Separate > By Material)")
 
     _serialize_top_level_mod(bl_meshes, src_mod, dst_mod)
+    if hasattr(dst_mod, "model_info"):
+        dst_mod.model_info.light_group = export_light_group(bl_obj, src_mod.model_info.light_group)
     _init_mod_header(bl_obj, src_mod, dst_mod)
 
     bone_palettes = _create_bone_palettes(src_mod, bl_obj, bl_meshes)
