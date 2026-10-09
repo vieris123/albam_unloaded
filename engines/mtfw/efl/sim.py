@@ -83,6 +83,66 @@ COLOR_BLEND_BITS = ((2, 0x1), (1, 0x2), (0, 0x4), (3, 0x8))   # (BGRA byte, nEff
 COLOR_EACH_RANDOM = 0x10
 
 
+CULL_PER_PARTICLE, CULL_ANGLE = 0x4, 0x80          # culling block CullingFlag (rEffectList::CULLING_FLAG)
+CULL_BOTH_DIR, CULL_ANGLE_RANGE, CULL_OVERLAP = 0x1, 0x800, 0x1000   # CullingOptionFlag (CULLING_OPTION_FLAG)
+CULL_DIST, CULL_NEAR_CLIP, CULL_FAR_CLIP = 0x2000, 0x4000, 0x8000
+
+
+def culling_params(block):
+    """The culling block of a particle block, for culling_fade, or None (CullingFlag bit 0 off / no block)."""
+    if block is None or not block.has("CullingFlag") or not block.get("CullingFlag") & 1:
+        return None
+    sub = next((s for s in block.subblocks() if s.kind == "culling"), None)
+    if sub is None:
+        return None
+    f = sub.fields()
+    word = f["CullingFlags"]
+    direction = rotate(_AXES.get(word >> 8 & 0xF, (0, 0, 1)), f["CullingRot"], word >> 12 & 0xF)
+    return {"flags": word & 0xFF, "option": word >> 16 & 0xFFFF, "dir": list(direction),
+            "near": [f["CullingDistNearStart"], f["CullingDistNearEnd"]],
+            "far": [f["CullingDistFarStart"], f["CullingDistFarEnd"]],
+            "angle": [f["CullingAngleStart"], f["CullingAngleEnd"]], "rate": f["CullingRate"]}
+
+
+def _angle_fade(c, cosine):
+    a = math.acos(min(max(cosine, -1.0), 1.0))
+    start, end = c["angle"]
+    if c["option"] & CULL_ANGLE_RANGE:
+        if start >= a:
+            return 1.0
+        return 1.0 - (a - start) / c["rate"] if a < end and c["rate"] else 0.0
+    return 1.0 - a / end if end > a else 0.0
+
+
+def culling_fade(c, to_camera, direction):
+    """uEffectVFR::calc_culling_fade 0x963BD0: alpha factor from the distance to the camera and the angle between
+    the culling direction and the way to the camera. to_camera = camera - position (game cm), direction = the
+    culling direction (calcDir(CullingRot) turned into world space)."""
+    d = math.sqrt(sum(v * v for v in to_camera))
+    fade = 1.0
+    if c["option"] & CULL_DIST:
+        (near_start, near_end), (far_start, far_end) = c["near"], c["far"]
+        if near_start >= d or d >= far_end:
+            return 0.0
+        if d < near_end:
+            if c["option"] & CULL_NEAR_CLIP:
+                return 0.0
+            fade = (d - near_start) / (near_end - near_start)
+        elif d > far_start:
+            if c["option"] & CULL_FAR_CLIP:
+                return 0.0
+            fade = 1.0 - (d - far_start) / (far_end - far_start)
+    if c["flags"] & CULL_ANGLE:
+        v = tuple(x / d for x in to_camera) if d >= 1.1920929e-07 else tuple(to_camera)
+        cosine = sum(a * b for a, b in zip(direction, v))
+        angle = _angle_fade(c, cosine)
+        if c["option"] & CULL_BOTH_DIR:
+            other = _angle_fade(c, -cosine)
+            angle = min(angle, other) if c["option"] & CULL_OVERLAP else max(angle, other)
+        fade *= angle
+    return fade
+
+
 def _random_flips(anim_flag, rng):
     """uEffectVFR::getAnimFlag 0x980140: VFLIP_RAND (0x800) then HFLIP_RAND (0x400) each add their flip with
     probability 1/2. Returns only the flips the record's AnimFlag doesn't already have."""
@@ -123,8 +183,11 @@ SPACE_FOLLOW_TRANSLATION = "translation"  # world space, but carried along by th
 PATH_TYPES = (3, 4, 5, 6)
 
 _AXES = {0: (1, 0, 0), 1: (-1, 0, 0), 2: (0, 1, 0), 3: (0, -1, 0), 4: (0, 0, 1), 5: (0, 0, -1), 6: (0, 0, 1)}
-# setMatFromAngle 0x95FF60: RotOrder enum -> order the axes are applied in
-ROT_ORDERS = ("ZYX", "ZXY", "YZX", "YXZ", "XZY", "XYZ")
+# setMatFromAngle 0x95FF70: RotOrder enum -> MtMatrix::setRotate<name> (ROT_ORDER_NAMES). The names don't give the
+# order the axes are applied in: emulating the six functions (2026-10-09) shows RotOrder 0-5 apply the axes in the
+# order of ROT_ORDERS (alphabetical), which is also Blender's Euler order string (first letter applied first).
+ROT_ORDER_NAMES = ("ZYX", "ZXY", "YZX", "YXZ", "XZY", "XYZ")
+ROT_ORDERS = ("XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX")
 
 # block field -> particle property it drives
 _PTCL_KEYS = {

@@ -25,10 +25,12 @@ from mathutils import Euler, Matrix, Quaternion, Vector
 from albam.registry import blender_registry
 from .efl import EffectList
 from .efl.ean import ANIM_FLIP_U, ANIM_FLIP_V, flip_affine_row
-from .efl.sim import ROT_ORDERS, SPACE_FOLLOW, SPACE_FOLLOW_TRANSLATION, simulate, state_at
+from .efl.sim import (CULL_PER_PARTICLE, ROT_ORDERS, SPACE_FOLLOW, SPACE_FOLLOW_TRANSLATION, culling_fade, simulate,
+                      state_at)
 
-NODE_GROUP = "ALBAM_EFL_Particles_v4"   # v1: uv_off/uv_scale; v2: affine uv_u/uv_v; v3: + tint; v4: + shape
-TINT_GROUPS = ("ALBAM_EFL_Particles_v3", "ALBAM_EFL_Particles_v4")   # alpha carries the colour alpha
+NODE_GROUP = "ALBAM_EFL_Particles_v5"   # v1: uv_off/uv_scale; v2: affine uv_u/uv_v; v3: + tint; v4: + shape;
+                                        # v5: + scale_after
+TINT_GROUPS = ("ALBAM_EFL_Particles_v3", "ALBAM_EFL_Particles_v4", "ALBAM_EFL_Particles_v5")   # alpha = colour alpha
 UV_STRIDE = 8                           # per pattern: a, b, off_u, c, d, off_v, width px, height px
 GAME_FPS = 60.0
 SCALE = 0.01
@@ -37,7 +39,9 @@ LINE_KINDS = (1, 3, 4, 12, 13, 14)   # Polyline, Texline, Line + cloth variants:
 STRIP_KINDS = (15,)                  # PolygonStrip sword trails
 HAIRLINE_KINDS = (3, 4, 13, 14)      # 1-pixel strips in the game
 MODEL_KIND, LIGHT_KIND = 5, 10
-MODEL_NODE_GROUP = "ALBAM_EFL_Models_v2"   # v2: + UV scroll on "uv1"
+MODEL_NODE_GROUP = "ALBAM_EFL_Models_v3"   # v2: + UV scroll on "uv1"; v3: + scale_after
+GAME_TO_BLENDER = Matrix(((1.0, 0.0, 0.0), (0.0, 0.0, -1.0), (0.0, 1.0, 0.0)))   # game Y-up -> Blender Z-up
+BLENDER_TO_GAME = GAME_TO_BLENDER.transposed()
 MODEL_UV = "uv1"                           # Albam's first .mod UV layer
 MAX_LIGHTS = 8                       # light pool per record
 LINE_HALF_WIDTH = 0.25       # cm; Line particles are 1-pixel strips in the game
@@ -294,10 +298,13 @@ def update_object(ob, scene):
     to_local = ob.matrix_world.inverted()                 # identity for unparented (world-space) objects
     to_local_rot = to_local.to_quaternion()
     cam_world = scene.camera.matrix_world.translation if scene.camera is not None else None
+    cam_rot = scene.camera.matrix_world.to_quaternion() if scene.camera is not None else Quaternion()
 
     co, rot, scale, alpha, tint, uv_u, uv_v, off, sc, part = [], [], [], [], [], [], [], [], [], []
-    shape, shape_w, shape_on, scroll = [], [], [], []
+    shape, shape_w, shape_on, scroll, after = [], [], [], [], []
+    culling = _Culling(info, gen_now, cam_world)
     groups = list(info.get("model_groups", []))
+    orient = info.get("orient") if kind in (2, 5, 6) else None
     zofs = info.get("model_zofs", 0.0) * SCALE
     for p, s in alive:
         local = Vector(s.pos) * SCALE
@@ -315,29 +322,35 @@ def update_object(ob, scene):
             pos_world = pos_world + (pos_world - cam_world).normalized() * zofs
             pos = to_local @ pos_world
         co.extend(pos)
+        after.extend((1.0, 1.0, 1.0))
         if groups:   # Model: first mesh whose idx_group matches the part number, else mesh 0
             part.append(groups.index(s.pattern) if s.pattern in groups else 0)
 
         row = _frame_row(rows, seq_offsets, seq_counts, s)
-        if kind == 0:
-            facing = (cam_world - pos_world).to_track_quat("Z", "Y") if cam_world is not None else Quaternion()
-            q = to_local_rot @ facing @ Quaternion((0.0, 0.0, 1.0), s.angle)
+        if kind == 0:   # screen-aligned: the vertex shader expands the quad along the camera's right / up axes
+            q = to_local_rot @ cam_rot @ Quaternion((0.0, 0.0, 1.0), s.angle)
             rot.extend(q.to_euler("XYZ"))
             size = s.scale * unit
             if sized:   # 1 cm source quad: width = S * pattern w * aspect, height = S * pattern h
                 scale.extend((size * row[6] * s.aspect, size * row[7], 1.0))
             else:
                 scale.extend((size,) * 3)
+        elif orient is not None:   # Model / PrimModel: calcParticleMatrix; Polygon: sub_988B00 (same rules)
+            r = to_local_rot.to_matrix() @ _model_rotation(ob, scene, p, s, frame, order, orient, gen_now, world_m,
+                                                           space, cam_rot if scene.camera is not None else None)
+            rot.extend(r.to_euler("XYZ"))
+            if orient["after"]:
+                scale.extend((s.scale * unit,) * 3)
+                after[-3:] = list(s.model_scale)
+            else:
+                scale.extend(m * s.scale * unit for m in s.model_scale)
         else:
             r = Euler(s.rot, order).to_matrix().to_4x4()
             if space != SPACE_FOLLOW:   # carry the birth-frame generator rotation into world space
                 r = to_local @ Matrix.LocRotScale(None, world_m.to_quaternion(), None) @ r
             rot.extend(r.to_euler("XYZ"))
-            if kind in (5, 6):
-                scale.extend(m * s.scale * unit for m in s.model_scale)
-            else:
-                scale.extend((s.scale * unit,) * 3)
-        alpha.append(s.alpha * s.color[3] if v3 else s.alpha)
+            scale.extend((s.scale * unit,) * 3)
+        alpha.append((s.alpha * s.color[3] if v3 else s.alpha) * culling.fade(pos_world))
         if s.shape is not None:   # node group rebuilds the source as sum(basis * shape)
             shape.extend(s.shape[:3])
             shape_w.append(s.shape[3])
@@ -364,7 +377,8 @@ def update_object(ob, scene):
                                 ("uv_off", "FLOAT_VECTOR", off), ("uv_scale", "FLOAT_VECTOR", sc),
                                 ("alpha", "FLOAT", alpha), ("shape", "FLOAT_VECTOR", shape),
                                 ("shape_w", "FLOAT", shape_w), ("shape_on", "FLOAT", shape_on),
-                                ("uv_scroll", "FLOAT_VECTOR", scroll)):
+                                ("uv_scroll", "FLOAT_VECTOR", scroll), ("scale_after", "FLOAT_VECTOR", after),
+                                ("p_center", "FLOAT_VECTOR", co)):
         attr = mesh.attributes.get(name) or mesh.attributes.new(name, kind_, "POINT")
         attr.data.foreach_set("vector" if kind_ == "FLOAT_VECTOR" else "value", values)
     if groups:
@@ -416,6 +430,7 @@ def _update_lines(ob, scene, info):
     across = 0.0 if info["kind"] in (3, 13) else None   # Texline: u fixed, texture runs along the line
 
     verts, faces, uvs, colors = [], [], [], []
+    culling = _Culling(info, gen_now, cam)
     for p, s in _alive_states(ob, frame):
         if not s.line:
             continue
@@ -427,6 +442,7 @@ def _update_lines(ob, scene, info):
         if last < 1:
             continue
         a, b, ou, c, d, ov = _frame_row(rows, seq_offsets, seq_counts, s)[:6]
+        fade = culling.fade(pts[0][0])
         base = len(verts)
         for i, (pw, half, rgba) in enumerate(pts):
             tangent = (pts[min(i + 1, last)][0] - pts[max(i - 1, 0)][0])
@@ -439,7 +455,7 @@ def _update_lines(ob, scene, info):
                 verts.append(to_local @ (pw + offset))
                 u, v = (float(k) if across is None else across), 1.0 - i / last   # across, along (head v = 1)
                 uvs.append((a * u + b * v + ou, c * u + d * v + ov))
-                colors.append((rgba[0], rgba[1], rgba[2], rgba[3] * s.alpha))
+                colors.append((rgba[0], rgba[1], rgba[2], rgba[3] * s.alpha * fade))
             if i:
                 j = base + 2 * i
                 faces.append((j - 2, j - 1, j + 1, j))
@@ -492,6 +508,7 @@ def _update_strips(ob, scene, info):
     to_local = ob.matrix_world.inverted()
 
     verts, faces, uvs, colors = [], [], [], []
+    culling = _Culling(info, gen_now, scene.camera.matrix_world.translation if scene.camera is not None else None)
     for p, s in _alive_states(ob, frame):
         if not s.strip:
             continue
@@ -509,6 +526,7 @@ def _update_strips(ob, scene, info):
             lengths.append(lengths[-1] + ((a_pts[i] - a_pts[i - 1]).length + (b_pts[i] - b_pts[i - 1]).length) / 2)
         total = lengths[-1] or 1.0
         ra, rb, ou, rc, rd, ov = _frame_row(rows, seq_offsets, seq_counts, s)[:6]
+        fade = culling.fade((a_pts[0] + b_pts[0]) / 2)
         base = len(verts)
         for i, (pa, pb) in enumerate(zip(a_pts, b_pts)):
             t = lengths[i] / total
@@ -517,7 +535,7 @@ def _update_strips(ob, scene, info):
                 verts.append(to_local @ point)
                 u, v = t, 1.0 - k      # cell-local: along, A edge on top
                 uvs.append((ra * u + rb * v + ou, rc * u + rd * v + ov))
-                colors.append((color[0], color[1], color[2], color[3] * s.alpha))
+                colors.append((color[0], color[1], color[2], color[3] * s.alpha * fade))
             if i:
                 j = base + 2 * i
                 faces.append((j - 2, j, j + 1, j - 1))
@@ -610,6 +628,127 @@ def unregister_handlers():
 
 # -- node groups ------------------------------------------------------------------------------
 
+def _after_scale(nodes, links, geometry):
+    """ParticleOptionFlag 0x40000 (MDLSCL_AFTER, calcParticleMatrix 0x98A77F): ModelScale applies after the rotation,
+    along the points object's axes: position = p_center + (position - p_center) * scale_after ((1, 1, 1) otherwise)."""
+    def attr(name):
+        n = nodes.new("GeometryNodeInputNamedAttribute")
+        n.data_type = "FLOAT_VECTOR"
+        n.inputs["Name"].default_value = name
+        return n.outputs["Attribute"]
+
+    def math(operation, a, b):
+        n = nodes.new("ShaderNodeVectorMath")
+        n.operation = operation
+        links.new(a, n.inputs[0])
+        links.new(b, n.inputs[1])
+        return n.outputs["Vector"]
+
+    center = attr("p_center")
+    offset = math("SUBTRACT", nodes.new("GeometryNodeInputPosition").outputs["Position"], center)
+    moved = math("ADD", center, math("MULTIPLY", offset, attr("scale_after")))
+    set_pos = nodes.new("GeometryNodeSetPosition")
+    links.new(geometry, set_pos.inputs["Geometry"])
+    links.new(moved, set_pos.inputs["Position"])
+    return set_pos.outputs["Geometry"]
+
+
+class _Culling:
+    """Per-frame culling fade of a record (calc_culling_fade): once for the generator, or per particle with the
+    block's PARTICLE flag. Distances are game cm (Blender m / SCALE); the direction follows the generator."""
+
+    def __init__(self, info, gen_now, cam_world):
+        self.c = info.get("culling")
+        if self.c is None or cam_world is None:
+            self.c = None
+            return
+        self.cam = cam_world
+        self.dir = (gen_now.to_3x3() @ Vector(self.c["dir"])).normalized()
+        self.per_particle = bool(self.c["flags"] & CULL_PER_PARTICLE)
+        self.shared = None if self.per_particle else self.at(gen_now.translation)
+
+    def at(self, pos_world):
+        return culling_fade(self.c, (self.cam - pos_world) / SCALE, self.dir)
+
+    def fade(self, pos_world):
+        if self.c is None:
+            return 1.0
+        return self.at(pos_world) if self.per_particle else self.shared
+
+
+def _view_basis(mode, view):
+    """uEffectVFR::build_view_basis 0x9B4EC0 in column form: view = the camera's axes in game world (columns). Mode 1
+    (and any other value) keeps the camera's rotation; 2 / 3 / 4 keep world X / Y / Z and turn the other two axes
+    around it toward the camera (rows n2_2 = L x camera axis n2_1, n2_1 = L x row n2_2). The game's basis is a
+    reflection; the row n2_1 is negated here so Blender gets a rotation (a flat quad looks the same)."""
+    picks = {2: (0, 1, 2), 3: (1, 2, 0), 4: (2, 0, 1)}   # mode -> (locked n2, camera axis n2_1, n2_2)
+    if mode not in picks:
+        return view
+    n2, n2_1, n2_2 = picks[mode]
+    lock = Vector([1.0 if i == n2 else 0.0 for i in range(3)])
+    a = lock.cross(view.col[n2_1])
+    if a.length < 1.1920929e-07:   # looking straight along the locked axis
+        a = view.col[n2_2].cross(lock)
+    a.normalize()
+    b = lock.cross(a).normalized()
+    rows = [None, None, None]
+    rows[n2], rows[n2_2], rows[n2_1] = lock, a, b
+    basis = Matrix(rows).transposed()   # rows (where each local axis goes) -> columns
+    if basis.determinant() < 0:
+        basis.col[n2_1] = -basis.col[n2_1]
+    return basis
+
+
+def _model_rotation(ob, scene, p, s, frame, order, orient, gen_now, world_m, space, cam_rot=None):
+    """World (Blender) rotation of a Model / PrimModel particle, as uEffectVFR::calcParticleMatrix 0x98A6A0 builds it
+    (Polygon: sub_988B00, the same branches without MDLSCL_AFTER)
+    (column form G . R): R = Euler(Rot, RotOrder); G = the generator's current rotation (Generator+0x150, rebuilt each
+    frame by updateWorldMatrix); ParticleOptionFlag 0x100000 ROT_LOCAL drops G (world axes); 0x200000 ROT_INIT (sets
+    ROT_LOCAL too) adds the Euler angles of the generator's rotation at spawn to Rot (sub_98C800: the spawn call never
+    has the direction flag, so it always takes the generator branch); with neither, a DirAxisType other than 6 and
+    a move direction, G is replaced by the shortest rotation taking that axis onto the direction (world space).
+    Billboard modes (ModelBillboardType / PolygonBillBoardType; renderModel 0x9A2A31, renderPolygon 0x99F8AD) multiply
+    the result by the camera basis (_view_basis): column form V . G . R, so with an unrotated generator mode 1 lies in
+    the screen plane with Rot on top."""
+    rot = s.rot
+    if orient["init"]:
+        birth = _birth_matrix(ob, scene, p.birth, gen_now).to_quaternion().to_matrix()
+        spawn = (BLENDER_TO_GAME @ birth).to_euler(order)
+        rot = tuple(a + b for a, b in zip(rot, spawn))
+    r = Euler(rot, order).to_matrix()
+    inner = None   # G in game world
+    if orient["local"]:
+        inner = Matrix.Identity(3)
+    elif orient["axis"] is not None:
+        direction = _move_direction(ob, scene, p, s, frame, gen_now, world_m, space)
+        if direction is not None:
+            inner = Vector(orient["axis"]).rotation_difference(BLENDER_TO_GAME @ direction).to_matrix()
+    if inner is None:
+        inner = BLENDER_TO_GAME @ gen_now.to_quaternion().to_matrix()
+    mode = orient.get("billboard", 0)
+    if mode and cam_rot is not None:
+        inner = _view_basis(mode, BLENDER_TO_GAME @ cam_rot.to_matrix()) @ inner
+    return GAME_TO_BLENDER @ inner @ r
+
+
+def _move_direction(ob, scene, p, s, frame, gen_now, world_m, space):
+    """The direction the game hands calcParticleMatrix, in Blender world space: Move None reports the spawn direction
+    in generator space (moveParticleMoveNone 0x995E60), Add / Mul / paths their velocity (moveParticleMoveAdd 0x996160:
+    normalize(speed - fall)), approximated by the position change over a frame."""
+    if space == SPACE_FOLLOW and not p.path:
+        d = gen_now.to_3x3() @ Vector(p.dir)
+    else:
+        other = state_at(p, frame - 1) if frame - 1 >= p.birth else state_at(p, frame + 1)
+        if other is None:
+            return None
+        delta = Vector(s.pos) - Vector(other.pos)
+        if frame - 1 < p.birth:
+            delta = -delta
+        m = gen_now if s.anchor is None else world_m
+        d = m.to_3x3() @ delta
+    return d.normalized() if d.length > 1e-9 else None
+
+
 def _model_node_group():
     """Instance one child of a collection per point (instance_index), with rot / scale3."""
     ng = bpy.data.node_groups.get(MODEL_NODE_GROUP)
@@ -653,7 +792,7 @@ def _model_node_group():
     store = nodes.new("GeometryNodeStoreNamedAttribute")
     store.data_type, store.domain = "FLOAT2", "CORNER"
     store.inputs["Name"].default_value = MODEL_UV
-    links.new(realize.outputs["Geometry"], store.inputs["Geometry"])
+    links.new(_after_scale(nodes, links, realize.outputs["Geometry"]), store.inputs["Geometry"])
     links.new(exists.outputs["Exists"], store.inputs["Selection"])
     links.new(add.outputs["Vector"], store.inputs["Value"])
     links.new(store.outputs["Geometry"], group_out.inputs["Geometry"])
@@ -746,7 +885,7 @@ def _node_group():
     links.new(dot_v.outputs["Value"], combine_uv.inputs["Y"])
     store_uv = node("GeometryNodeStoreNamedAttribute", 450, 0, data_type="FLOAT2", domain="CORNER")
     store_uv.inputs["Name"].default_value = "UVMap"
-    links.new(reshape.outputs["Geometry"], store_uv.inputs["Geometry"])
+    links.new(_after_scale(nodes, links, reshape.outputs["Geometry"]), store_uv.inputs["Geometry"])
     links.new(combine_uv.outputs["Vector"], store_uv.inputs["Value"])
 
     # material colour: EdgeAlpha = (tint rgb, source edge alpha * particle alpha)

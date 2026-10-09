@@ -210,7 +210,8 @@ def load_ean(file_item, context):
     exportable = context.scene.albam.exportable.file_list.add()
     exportable.bl_object = ob
     for other in context.view_layer.objects:
-        other.select_set(False)
+        if other is not None:   # a rebuild may have just removed it
+            other.select_set(False)
     context.view_layer.objects.active = ob
     ob.select_set(True)
     return None   # linked above
@@ -665,7 +666,8 @@ class ALBAM_OT_EanNewForImage(_NewFlipbookProps, bpy.types.Operator):
         ob.albam_asset.relative_path = path + ".ean"
         context.scene.albam.exportable.file_list.add().bl_object = ob
         for other in context.view_layer.objects:
-            other.select_set(False)
+            if other is not None:   # a rebuild may have just removed it
+                other.select_set(False)
         context.view_layer.objects.active = ob
         ob.select_set(True)
         load_target(_state(context), ob)

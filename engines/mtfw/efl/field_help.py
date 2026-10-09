@@ -97,7 +97,11 @@ HELP = {
         'Shape of the spawn area, sized by Range: 0 point (at the generator), 1-3 box (the axis X/Y/Z is the one '
         'RangeDivideNum steps along), 4-6 ring/cylinder around X/Y/Z, 7 sphere, 8 upper hemisphere (+Y).'
     ),
-    'gen:RelationType': "Not understood yet; keep the game's value.",
+    'gen:RelationType': (
+        "How the generator follows its joint (or the owner): 0 fully (position and rotation), 2 position only: it "
+        'moves with the joint but keeps its own rotation in world axes. In Blender a type 2 generator on a bone gets a '
+        "companion Empty named <record>_rot: rotate that one; its rotation is exported as Quat. 3 ignores the parent."
+    ),
     'gen:Scale': (
         "Scale of the generator along X, Y, Z. It scales the generator's space (spawn area, path offsets); particle "
         "size only follows it when the particle's ParticleOptionFlag 0x200 is set. The base is the Empty's scale; a "
@@ -300,8 +304,8 @@ HELP = {
         'amount, otherwise they share one, so the colour stays on the line between the two. None ticked = Color0.'
     ),
     'ptcl:ColorPlaceInpType': (
-        'Easing of the colour gradient along the line: 0 linear, 1 fast start (sine), 2 slow start (1 - cos), 3 '
-        'smooth at both ends.'
+        'Easing of the colour gradient (along the line, or across a PrimModel): 0 linear, 1 fast start (sine), '
+        '2 slow start (1 - cos), 3 smooth at both ends.'
     ),
     'ptcl:ColorPlaceNo': (
         'Point index used by the colour gradient modes that blend toward a given point (ColorPlaceType 2 peak at, 3 '
@@ -357,8 +361,9 @@ HELP = {
     ),
     'ptcl:DiffuseFactor': 'Not read by the DX9 game (a Special Edition field); editing it has no effect.',
     'ptcl:DirAxisType': (
-        '6 = the particle is not turned toward its direction of travel and keeps only its Rot. Other values probably '
-        'turn that axis (0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z) along the direction of travel, e.g. for streaks.'
+        '6 = the particle is not turned toward its direction of travel and keeps only its Rot (turning with the '
+        'generator). Other values turn that axis (0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z) along the direction of travel, '
+        'e.g. for streaks (verified for Model, PrimModel and Polygon; the preview does it for those).'
     ),
     'ptcl:DistortRate': (
         "Stretches each corner's distance from the pivot, in the order top-left, top-right, bottom-left, bottom-right"
@@ -515,8 +520,9 @@ HELP = {
         'Edition renamed this bit to a random reverse); 0x10000: apply ModelZofs.'
     ),
     'ptcl:ModelBillboardType': (
-        'Turns the mesh toward the camera: 2, 3 or 4 keep the X, Y or Z axis fixed while the rest turns to face the '
-        "camera. 0 probably means no camera facing; other values aren't mapped."
+        "Camera facing of the mesh: 0 = no camera facing; 1 = takes the camera's rotation, so it"
+        ' lies flat in the screen plane (its own Rot still applies on top); 2, 3, 4 = keep the world X, Y or Z axis fixed and turn around it toward the camera (a cylindrical billboard, e.g. 3 for upright flames).'
+        ' A tilted generator (e.g. on a bone) tilts it too, as in the game.'
     ),
     'ptcl:ModelFlags': (
         "Packed settings word for Model particles: RotOrder, DirAxisType (6 = don't turn with the movement "
@@ -565,8 +571,9 @@ HELP = {
         'Refraction bends the scene behind it, Full Resolution skips the reduced-size effect buffer, No Depth Test '
         'draws on top of everything, No Fog, Face Culling hides back faces, Parallax / Depth Volume pick the volume '
         'shader variant (with VolumeBlendRate). Size and rotation: World Scale follows the parent\'s scale, Scale '
-        'After Rotation applies ModelScale along the turned axes, Local Rotation stops turning toward the movement '
-        'direction, Align Once at Spawn turns toward it only when the particle spawns. Pivot at PatCenter, Extended '
+        'After Rotation applies ModelScale along the turned axes, Ignore Generator Rotation keeps the particle on world '
+        "axes (it doesn't turn with the generator or toward its movement), Keep Spawn Rotation adds the generator's "
+        'rotation at spawn time and then keeps it (Model / PrimModel). Pivot at PatCenter, Extended '
         'Line Position (lines), Fade Edges (PrimModel border vertices fade to transparent).'
     ),
     'ptcl:PartsNoMax': (
@@ -627,7 +634,9 @@ HELP = {
         ' marks), 4/6 the XY plane facing +Z, 5 facing -Z.'
     ),
     'ptcl:PolygonBillBoardType': (
-        "Probably a camera-facing mode for the quad. The values aren't mapped yet; keep the game's value."
+        "Camera facing of the quad: 0 = no camera facing; 1 = takes the camera's rotation, so it"
+        ' lies flat in the screen plane (its own Rot still applies on top); 2, 3, 4 = keep the world X, Y or Z axis fixed and turn around it toward the camera (a cylindrical billboard, e.g. 3 for upright flames).'
+        ' A tilted generator (e.g. on a bone) tilts it too, as in the game.'
     ),
     'ptcl:PolygonDivideNum': (
         'Splits the quad into this many + 1 strips when drawn. The shape looks the same; the preview ignores it.'
@@ -692,7 +701,9 @@ HELP = {
         'arcs and slices.'
     ),
     'ptcl:RotOrder': (
-        'Order in which the X, Y and Z rotations of Rot are applied: 0 ZYX, 1 ZXY, 2 YZX, 3 YXZ, 4 XZY, 5 XYZ.'
+        "Order in which the X, Y and Z rotations of Rot are applied (first letter first, as in Blender's rotation "
+        'mode): 0 XYZ, 1 XZY, 2 YXZ, 3 YZX, 4 ZXY, 5 ZYX. The game names these 0 ZYX ... 5 XYZ, which is not the '
+        'order they apply. Only matters when more than one angle is non-zero.'
     ),
     'ptcl:RotTexDivNum': (
         'Textured types: 0 puts the whole texture on every segment around; N spreads one copy of the texture across N'
@@ -970,8 +981,8 @@ HELP = {
         'For PathLine it is the direction of the line.'
     ),
     'move:RotOrder': (
-        'Order the three Rot angles are applied in: 0 ZYX, 1 ZXY, 2 YZX, 3 YXZ, 4 XZY, 5 XYZ (first letter is applied'
-        ' first). Only matters when more than one angle is non-zero.'
+        'Order the three Rot angles are applied in (first letter first): 0 XYZ, 1 XZY, 2 YXZ, 3 YZX, 4 ZXY, 5 ZYX. '
+        'Only matters when more than one angle is non-zero.'
     ),
     'move:ShrinkCoef': "Not read by the DX9 game; keep the game's value.",
     'move:Speed': (
@@ -1055,37 +1066,50 @@ HELP = {
     ),
 
     # -- culling ---------------------------------------------------------------------------------------------
-    'culling:CullingAngleEnd': 'Probably the angle where the angle-based fade is complete.',
+    'culling:CullingAngleEnd': (
+        'Angle (radians) between the culling direction and the way to the camera where the angle fade reaches 0. '
+        'Without the angle-range option the fade runs from 1 when facing straight along the direction down to 0 here.'
+    ),
     'culling:CullingAngleStart': (
-        'Probably the angle between the view and the CullingRot direction where an angle-based fade starts.'
+        'With the angle-range option (CullingOptionFlag 0x800): up to this angle (radians) the particle is fully '
+        'visible; past it the fade drops by CullingRate. Needs the angle fade (CullingFlag 0x80).'
     ),
     'culling:CullingDistFarEnd': (
-        'Probably the camera distance (cm) where the particle has fully faded out; farther than this it is not drawn.'
+        'Camera distance (cm) where the particle has faded out; farther than this it is hidden. Needs CullingOptionFlag '
+        '0x2000 (distance fade).'
     ),
     'culling:CullingDistFarStart': (
-        'Probably the camera distance (cm) where the particle starts fading out with distance.'
+        'Camera distance (cm) where the particle starts fading out (or is cut off at once with CullingOptionFlag '
+        '0x8000).'
     ),
     'culling:CullingDistNearEnd': (
-        'Probably the camera distance (cm) where the near fade-in is complete and the particle is fully visible.'
+        'Camera distance (cm) where the near fade-in is complete; between NearStart and this the particle fades in '
+        '(or stays hidden with CullingOptionFlag 0x4000).'
     ),
     'culling:CullingDistNearStart': (
-        'Probably the camera distance (cm) where the particle starts fading in as the camera moves away; closer than '
-        "this it is hidden. Faded-out particles aren't drawn."
+        'Camera distance (cm) below which the particle is hidden: closer than this to the camera it is not drawn.'
     ),
     'culling:CullingFlag': (
-        'Low byte of CullingFlags: the culling options (4 switches the distance between per-particle and per-'
-        'generator, 2 = probably an occlusion test using OcclusionRadius).'
+        "Low byte of CullingFlags, the same switches as the particle's CullingFlag: 0x4 works the fade out for each "
+        'particle instead of once at the generator, 0x80 turns on the angle fade, 0x2 the occlusion test.'
     ),
     'culling:CullingFlags': (
-        "Packed word, only used when the particle's CullingFlag bit 0 is on. Low byte: options (4 switches the "
-        'distance between per-particle and per-generator, 2 = probably an occlusion test using OcclusionRadius). Bits'
-        ' 8-11: axis of the CullingRot direction (as RotAxisType); bits 12-15: its rotation order.'
+        "Packed word, only used when the particle's CullingFlag bit 0 is on. Low byte: CullingFlag; bits 8-11: axis "
+        'turned by CullingRot into the culling direction; bits 12-15: its rotation order; upper half: '
+        'CullingOptionFlag. Edit the individual fields instead.'
     ),
-    'culling:CullingOptionFlag': "Upper half of CullingFlags. Not understood yet; keep the game's value.",
-    'culling:CullingRate': "Not understood yet; keep the game's value.",
+    'culling:CullingOptionFlag': (
+        'Fade options: 0x2000 distance fade (CullingDist*), 0x4000 / 0x8000 cut off at once instead of fading near / '
+        'far, 0x800 angle range (fade from CullingAngleStart by CullingRate), 0x1 also accept the opposite direction, '
+        '0x1000 with 0x1: both directions must pass (otherwise either one is enough).'
+    ),
+    'culling:CullingRate': (
+        'With the angle-range option: how many radians past CullingAngleStart the fade takes to reach 0 (the files '
+        'use CullingAngleEnd - CullingAngleStart).'
+    ),
     'culling:CullingRot': (
-        'Probably angles in radians that turn the axis from CullingFlags into the direction used for the angle fade '
-        '(CullingAngleStart/End).'
+        'Angles in radians that turn the axis from CullingFlags into the culling direction (it then turns with the '
+        'generator). The angle fade compares it with the way to the camera.'
     ),
     'culling:CullingRotAxisType': (
         'Bits 8-11 of CullingFlags: the axis that CullingRot turns into the direction used for the angle fade (same '

@@ -33,7 +33,8 @@ from .efl.edit import block_props, keyframe_props, sub_props
 from .efl.schema import bgra_to_rgba
 from .efl.primmodel import build_from_block
 from .efl.sim import CLOTH_TYPES, ROT_ORDERS, emission_space, keyframes_of as sim_keyframes_of, refracts
-from . import effect_ean, effect_efs, effect_filter, effect_sim
+from .efl.sim import _AXES as _SIM_AXES, culling_params as sim_culling_params
+from . import effect_ean, effect_efs, effect_export, effect_filter, effect_sim
 from .texture import MISSING_TEXTURE_PROP, build_blender_textures
 
 SCALE = 0.01   # game centimetres -> metres
@@ -288,8 +289,9 @@ class _EffectBuilder:
             ob.rotation_mode = "QUATERNION"
             ob.rotation_quaternion = _quaternion(gen.get("Quat"))
             ob.scale = [s for s, _ in gen.get("Scale")]
-            self.animate_generator(ob, gen, index)
         self._attach(ob, gen, root)
+        if gen is not None:
+            self.animate_generator(ob, gen, index)
         self.current_generator = ob
 
         if ptcl is not None and ptcl.has("TransMode") and not ptcl.get("TransMode") & 1:
@@ -333,7 +335,7 @@ class _EffectBuilder:
         if ptcl.has("AnimPath") and ptcl.get("AnimPath") and base_map:
             tables = effect_sim.frame_tables(self.anim_for(ptcl.get("AnimPath"), self.images.get(base_map)),
                                              self.images.get(base_map), ptcl.get("AnimFlag"), ean)
-        rot_order = ptcl.get("RotOrder") if ptcl.has("PrimFlags") or ptcl.has("PolygonFlags") else 5
+        rot_order = ptcl.get("RotOrder") if ptcl.has("RotOrder") else 5   # PrimFlags / PolygonFlags / ModelFlags
         extra = {}
         efs_parts = self.efs_for(gen.get("RangeStripPath")) if gen.get("RangeStripPath") else None
         if efs_parts:
@@ -353,6 +355,17 @@ class _EffectBuilder:
             ground = self.ground_height(record)
             if ground is not None:
                 extra["ground_y"] = ground
+        culling = sim_culling_params(ptcl)
+        if culling is not None:
+            extra["culling"] = culling
+        if ptcl.type in (2, 5, 6):   # calcParticleMatrix / Polygon sub_988B00: rotation options, move-direction axis
+            option = ptcl.get("ParticleOptionFlag")
+            axis = ptcl.get("DirAxisType") if ptcl.has("DirAxisType") else 6
+            extra["orient"] = {"local": bool(option & 0x300000), "init": bool(option & 0x200000),
+                               "after": ptcl.type != 2 and bool(option & 0x40000),   # Polygon has no MDLSCL_AFTER
+                               "billboard": ptcl.get("PolygonBillBoardType" if ptcl.type == 2 else "ModelBillboardType")
+                               if ptcl.has("PolygonBillBoardType") or ptcl.has("ModelBillboardType") else 0,
+                               "axis": _SIM_AXES.get(axis) if axis < 6 else None}
         return {"kind": ptcl.type, "frames": self.options.sim_frames, "rot_order": rot_order,
                 "space": emission_space(record),
                 "particle_scale": gen.get("ParticleScale")[0] or 1.0, **effect_sim.table_info(tables), **extra}
@@ -383,9 +396,10 @@ class _EffectBuilder:
                 if name == "pos":
                     ob.location = [c * SCALE for c in value]
                     ob.keyframe_insert("location", frame=scene_frame)
-                elif name == "rot":
-                    ob.rotation_quaternion = Euler(value, order).to_quaternion()
-                    ob.keyframe_insert("rotation_quaternion", frame=scene_frame)
+                elif name == "rot":   # RelationType 2: the rotation lives on the companion
+                    target = effect_export.rotation_handle(ob) or ob
+                    target.rotation_quaternion = Euler(value, order).to_quaternion()
+                    target.keyframe_insert("rotation_quaternion", frame=scene_frame)
                 else:
                     ob.scale = value
                     ob.keyframe_insert("scale", frame=scene_frame)
@@ -417,6 +431,8 @@ class _EffectBuilder:
         ob.parent_type = "BONE"
         ob.parent_bone = bone.name
         ob.matrix_parent_inverse = Matrix.Translation((0.0, -bone.length, 0.0))
+        if gen.get("AxisFlags") >> 8 & 0xF == effect_export.RELATION_POSITION_ONLY:   # position only: world rotation
+            effect_export.attach_rotation_handle(ob, root, ob.rotation_quaternion.copy())
 
     # -- particles ---------------------------------------------------------------------------
 
@@ -794,7 +810,7 @@ def _quaternion(xyzw):
 
 
 def _euler_order(nibble):
-    """RotOrder enum (setMatFromAngle 0x95FF60): 0 ZYX, 1 ZXY, 2 YZX, 3 YXZ, 4 XZY, 5 XYZ."""
+    """Blender Euler order of a RotOrder value (sim.ROT_ORDERS: 0 XYZ, 1 XZY, 2 YXZ, 3 YZX, 4 ZXY, 5 ZYX)."""
     return ROT_ORDERS[nibble] if 0 <= nibble < len(ROT_ORDERS) else "XYZ"
 
 

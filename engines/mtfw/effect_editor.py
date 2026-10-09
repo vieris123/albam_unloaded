@@ -13,7 +13,7 @@ from .efl import schema
 from .efl.field_help import lookup as field_help
 from .efl.edit import as_list, keyframe_value_type, to_prop, upgrade_props
 from .efl.model import SLOTS
-from .efl.sim import ROT_ORDERS
+from .efl.sim import ROT_ORDER_NAMES, ROT_ORDERS
 from . import effect_filter
 from .effect_export import all_record_objects, effect_root, ordered_record_objects, record_object
 
@@ -23,9 +23,12 @@ _FLOAT_BASES = ("f32", "rangef", "vec3", "vec4", "easecurve")
 _ELEMENT_LABELS = {"rangef": ("", "+rand"), "rangeu16": ("", "+rand"), "vec3": ("X", "Y", "Z"),
                    "vec4": ("X", "Y", "Z", "W"), "point": ("X", "Y"), "easecurve": ("A", "B")}
 _ROW_LABELS = ("X", "Y", "Z", "W", "5", "6", "7", "8")
+# RotOrder dropdowns: the order the axes are applied in (Blender's Euler order), and the game's name for it
+_ORDER_LABELS = tuple(f"{order} (game {name})" for order, name in zip(ROT_ORDERS, ROT_ORDER_NAMES))
+
 READ_ONLY = {
     ("gen", "Pos"): "move the record's Empty",
-    ("gen", "Quat"): "rotate the record's Empty",
+    ("gen", "Quat"): "rotate the record's Empty (RelationType 2 on a bone: its _rot companion)",
     ("gen", "ParentNo"): "parent the record's Empty to a bone",
 }
 TIER_ICONS = {"dx9": "CHECKMARK", "se": "INFO", "prior": "QUESTION", "unknown": "QUESTION"}
@@ -42,11 +45,11 @@ _ENUM_LABELS = {
     "RangeDirType": ("None", "Diffuse", "Converge", "Unit"),
     "LineType": ("FOLLOW", "FIX", "FIX_END", "CHAIN", "LENGTH", "CLOTH"),
     "ClothType": ("CHAIN", "CURVE", "ZIGZAG"),
-    "RotOrder": ROT_ORDERS, "Order": ROT_ORDERS, "CullingRotOrder": ROT_ORDERS,
+    "RotOrder": _ORDER_LABELS, "Order": _ORDER_LABELS, "CullingRotOrder": _ORDER_LABELS,
     "RotAxisType": _AXES, "AxisType": _AXES, "Axis": _AXES, "DirAxisType": _AXES, "CullingRotAxisType": _AXES,
     "ChainRotAxisType": _AXES, "ChainBlendRotAxisType": _AXES, "LineRotAxisType": _AXES, "CurveRotAxisType": _AXES,
-    "CurveDirAxisType": _AXES, "ChainRotOrder": ROT_ORDERS, "ChainBlendRotOrder": ROT_ORDERS,
-    "LineRotOrder": ROT_ORDERS, "FixRotOrder": ROT_ORDERS, "CurveRotOrder": ROT_ORDERS,
+    "CurveDirAxisType": _AXES, "ChainRotOrder": _ORDER_LABELS, "ChainBlendRotOrder": _ORDER_LABELS,
+    "LineRotOrder": _ORDER_LABELS, "FixRotOrder": _ORDER_LABELS, "CurveRotOrder": _ORDER_LABELS,
     "CurveType": ("Two Hermite halves", "Sine", "Sine", "Sine", "Sine", "Sine", "Sine", "Sine", "Sine", "Sine",
                   "Sine", "Sine", "Sine", "Sine", "Sine", "Sine"),
     "CollType": ("KILL", "MOVE_STOP", "COLL_STOP"),
@@ -80,8 +83,8 @@ _FLAG_LABELS = {
         (0x1, "Sort Each Particle"), (0x2, "Fixed Sort Depth"), (0x100, "Sort at Owner"), (0x40, "Keep Behind Camera"),
         (0x80000000, "Sort Bias Toward Camera"), (0x4, "Soft Edges"), (0x10, "Refraction"), (0x20, "Full Resolution"),
         (0x80, "No Depth Test"), (0x1000, "No Fog"), (0x400000, "Face Culling"), (0x400, "Parallax Volume"),
-        (0x800, "Depth Volume"), (0x200, "World Scale"), (0x40000, "Scale After Rotation"), (0x100000, "Local Rotation"),
-        (0x200000, "Align Once at Spawn"), (0x10000, "Pivot at PatCenter"), (0x20000, "Extended Line Position"),
+        (0x800, "Depth Volume"), (0x200, "World Scale"), (0x40000, "Scale After Rotation"), (0x100000, "Ignore Generator Rotation"),
+        (0x200000, "Keep Spawn Rotation"), (0x10000, "Pivot at PatCenter"), (0x20000, "Extended Line Position"),
         (0x80000, "Fade Edges")),
     "LightAttribute": ((0x2, "SH"), (0x8, "Per-Pixel"), (0x10, "Simple")),   # rEffectList::LIGHT_ATTR
     "CullingFlag": ((0x1, "Distance / Angle Fade"), (0x2, "Occlusion Test"), (0x4, "Per Particle"),
@@ -482,7 +485,8 @@ def _on_record_index(state, context):
     if ob is None or ob.name not in context.view_layer.objects:
         return
     for other in context.selected_objects:
-        other.select_set(False)
+        if other is not None:   # a rebuild may have just removed it
+            other.select_set(False)
     context.view_layer.objects.active = ob
     ob.select_set(True)
     if state.target != ob:
@@ -722,7 +726,8 @@ class ALBAM_OT_EflSelectRecord(bpy.types.Operator):
             return {"CANCELLED"}
         if ob.name in context.view_layer.objects:
             for other in context.selected_objects:
-                other.select_set(False)
+                if other is not None:   # a rebuild may have just removed it
+                    other.select_set(False)
             context.view_layer.objects.active = ob
             ob.select_set(True)
         load_record(_state(context), ob)
@@ -753,7 +758,8 @@ class ALBAM_OT_EflSelectLinked(bpy.types.Operator):
         if ob is None or ob.name not in context.view_layer.objects:
             return {"CANCELLED"}
         for other in context.selected_objects:
-            other.select_set(False)
+            if other is not None:   # a rebuild may have just removed it
+                other.select_set(False)
         ob.hide_set(False)
         context.view_layer.objects.active = ob
         ob.select_set(True)

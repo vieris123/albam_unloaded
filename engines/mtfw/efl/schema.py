@@ -244,7 +244,9 @@ GENERATOR = Struct("EFL_GENERATOR", 0x1E0, "dx9", [
 ], [
     B("Order", "AxisFlags", 0, 4, "prior"),
     B("AxisType", "AxisFlags", 4, 4, "prior"),
-    B("RelationType", "AxisFlags", 8, 4, "prior"),
+    B("RelationType", "AxisFlags", 8, 4, "dx9", "Generator+0x110 (initChildGenerator 0x96BC3F) -> setQuatParentOfs "
+      "0x9687B0: 2 = parent position (Pos turned by the joint), own Quat in world axes; 3 = ignore the parent; "
+      "else full parenting. Files: 0 (32,074), 2 (2,609), 1 (20)"),
 ])
 
 # --- particle param (slot 1) -- plan 3.4/3.5; chain = COMMON [+ DRAW [+ PRIM]] + tail ------------
@@ -266,8 +268,8 @@ PTCL_COMMON = [
       "OT_UNIT sort at the unit, 0x40 NO_CLIP keep negative depths, sign bit = OtDepthBias toward the camera "
       "(setPrimEnv 0x99DB60); 0x4 ATTR_DEPTHBLEND, 0x10 ATTR_REFRACT (SE ALPHA_BLUR), 0x20 ATTR_NOREDUCTION, 0x80 "
       "ATTR_NOZTEST, 0x1000 ATTR_NOFOG, 0xC00000 ATTR_CULLING, 0x400 / 0x800 PARALLAX / DEPTH_VOLUME with "
-      "VolumeBlendRate, 0x200 WMAT_SCALE, 0x40000 MDLSCL_AFTER (scale after rotation), 0x100000 ROT_LOCAL (no turn to "
-      "the motion), 0x200000 ROT_INIT (turn once at spawn) (initGeneratorParam 0x96B560, calcParticleMatrix "
+      "VolumeBlendRate, 0x200 WMAT_SCALE, 0x40000 MDLSCL_AFTER (scale after rotation), 0x100000 ROT_LOCAL (no generator "
+      "rotation: world axes), 0x200000 ROT_INIT (+ ROT_LOCAL; Rot += Euler of the spawn-time generator rotation) (initGeneratorParam 0x96B560, calcParticleMatrix "
       "0x98A77F / 0x98B3FE), 0x10000 PAT_CENTER, 0x20000 EXT_LINE_POS (line renderers), 0x80000 = border vertices get alpha 0 "
       "(buildPrimModelRing 0x9CDB1B; SE calls it EDGE_ALPHA_OFF but in DX9 set means fade); "
       "0x8 INV_VOLUME has no DX9 reader"),
@@ -377,7 +379,8 @@ PTCL_TAILS = {
     2: ("Polygon", 0x1E0, "dx9", [
         F(0x170, "Rot", "rangef[3]", "dx9", "radians; initParticlePolygon 0x9792F0, move sub_98EAA0, quad sub_9B54C0"),
         F(0x188, "RotAdd", "rangef[3]", "dx9", "per frame, without a Rot keyframe"),
-        F(0x1A0, "PolygonFlags", "u32", "dx9", "bitfield word"),
+        F(0x1A0, "PolygonFlags", "u32", "dx9", "bitfield word; bits 12-15 (SE RotResetFlag) have no DX9 reader, 0 in "
+                                               "every file"),
         F(0x1A4, "KeyframeRotParamOffset", "rel32", "dx9", "absolute angles", sub="kf:vec3"),
         F(0x1A8, "KeyframeWidthParamOffset", "rel32", "dx9", "replaces Width, clamped >= 0", sub="kf:f32"),
         F(0x1AC, "KeyframeHeightParamOffset", "rel32", "dx9", "replaces Height, clamped >= 0", sub="kf:f32"),
@@ -391,7 +394,7 @@ PTCL_TAILS = {
         B("RotOrder", "PolygonFlags", 4, 4, "dx9"),
         B("DirAxisType", "PolygonFlags", 8, 4, "dx9", "6 = no velocity alignment"),
         B("PolygonFixType", "PolygonFlags", 16, 4, "dx9", "pivot: 0 centre, 1-8 corners/edges, 9 PatCenter"),
-        B("PolygonBillBoardType", "PolygonFlags", 20, 4, "dx9"),
+        B("PolygonBillBoardType", "PolygonFlags", 20, 4, "dx9", "renderPolygon 0x99E9F6 -> build_view_basis: as ModelBillboardType"),
         B("PolygonDivideNum", "PolygonFlags", 24, 8, "dx9", "split into n + 1 strips (sub_9CCDB0)"),
     ]),
     3: ("Texline", 0x180, "dx9", [
@@ -463,6 +466,8 @@ PTCL_TAILS = {
         B("RotOrder", "PrimFlags", 8, 4, "dx9"),
         B("DirAxisType", "PrimFlags", 12, 4, "dx9"),
         B("ColorPlaceType", "PrimFlags", 16, 4, "dx9"),
+        B("ColorPlaceInpType", "PrimFlags", 20, 4, "dx9", "calc_color_gradient 0x9B52A0 easing (buildPrimModelRing "
+                                                          "0x9CD9BE); SE leaves it unnamed (PPrimModel04172)"),
         B("ModelBillboardType", "PrimFlags", 24, 4, "dx9"),
         B("NormAttenuateFlag", "PrimFlags", 28, 4, "dx9", "bit 29 = one-sided"),
     ]),
@@ -494,7 +499,9 @@ PTCL_TAILS = {
     ], [
         B("RotOrder", "ModelFlags", 0, 4, "dx9"),
         B("DirAxisType", "ModelFlags", 4, 4, "dx9", "6 = no velocity alignment"),
-        B("ModelBillboardType", "ModelFlags", 8, 4, "dx9", "1 = camera-facing"),
+        B("ModelBillboardType", "ModelFlags", 8, 4, "dx9",
+          "renderModel 0x9A2270 -> build_view_basis 0x9A2973: 1 = the camera's rotation (view-inverse, context +0x100), "
+          "2 / 3 / 4 = world X / Y / Z kept, the rest turned to the camera; the matrix is the particle's times it"),
         B("PartsNoMin", "ModelFlags", 12, 10, "dx9", "mesh group drawn: first mesh with this idx_group"),
         B("PartsNoRange", "ModelFlags", 22, 10, "dx9"),
     ]),
@@ -848,22 +855,25 @@ COLLISION = Struct("EFL_PARAM_COLLISION", 0xB0, "dx9", [
     F(0x70, "FinishEffectPath", "str64", "dx9", ".efl"),
 ])
 
-CULLING = Struct("EFL_PARAM_CULLING", 0x30, "se", [
-    F(0x00, "CullingFlags", "u32", "dx9", "DX9 reads >>8 and >>12 as calcDir modes"),
-    F(0x04, "CullingRot", "vec3", "se"),
-    F(0x10, "CullingDistNearStart", "f32", "se"),
-    F(0x14, "CullingDistNearEnd", "f32", "se"),
-    F(0x18, "CullingDistFarStart", "f32", "se"),
-    F(0x1C, "CullingDistFarEnd", "f32", "se"),
-    F(0x20, "CullingAngleStart", "f32", "se"),
-    F(0x24, "CullingAngleEnd", "f32", "se"),
-    F(0x28, "CullingRate", "f32", "se"),
+CULLING = Struct("EFL_PARAM_CULLING", 0x30, "se", [   # uEffectVFR::calc_culling_fade 0x963BD0 (alpha factor)
+    F(0x00, "CullingFlags", "u32", "dx9", "calcDir(CullingRot, order >>12, axis >>8 & 0xF): calcDirWrapper 0x962510 / "
+                                          "init_culling_dir 0x962F40"),
+    F(0x04, "CullingRot", "vec3", "dx9"),
+    F(0x10, "CullingDistNearStart", "f32", "dx9", "cm; d <= NearStart or d >= FarEnd -> 0 (with option 0x2000)"),
+    F(0x14, "CullingDistNearEnd", "f32", "dx9", "(d - NearStart) / (NearEnd - NearStart) below it, 0 with 0x4000"),
+    F(0x18, "CullingDistFarStart", "f32", "dx9", "1 - (d - FarStart) / (FarEnd - FarStart) above it, 0 with 0x8000"),
+    F(0x1C, "CullingDistFarEnd", "f32", "dx9"),
+    F(0x20, "CullingAngleStart", "f32", "dx9", "radians; option 0x800: 1 up to it, then 1 - (a - Start) / Rate"),
+    F(0x24, "CullingAngleEnd", "f32", "dx9", "a = acos(dir . to camera); 0 from it on; without 0x800: 1 - a / End"),
+    F(0x28, "CullingRate", "f32", "dx9"),
     F(0x2C, "OcclusionRadius", "f32", "se"),
 ], [
-    B("CullingFlag", "CullingFlags", 0, 8, "se"),
-    B("CullingRotAxisType", "CullingFlags", 8, 4, "se"),
-    B("CullingRotOrder", "CullingFlags", 12, 4, "se"),
-    B("CullingOptionFlag", "CullingFlags", 16, 16, "se"),
+    B("CullingFlag", "CullingFlags", 0, 8, "dx9", "CULLING_FLAG: 0x4 per particle, 0x80 angle fade, 0x2 occlusion"),
+    B("CullingRotAxisType", "CullingFlags", 8, 4, "dx9"),
+    B("CullingRotOrder", "CullingFlags", 12, 4, "dx9"),
+    B("CullingOptionFlag", "CullingFlags", 16, 16, "dx9",
+      "CULLING_OPTION_FLAG: 0x2000 DIST, 0x4000 NEAR_CLIP, 0x8000 FAR_CLIP, 0x1 BOTH_DIR (max of the two), 0x1000 "
+      "ANGLE_OVERLAP (min), 0x800 angle range (no SE name)"),
 ])
 
 SUB_STRUCTS = {"collision": COLLISION, "culling": CULLING}

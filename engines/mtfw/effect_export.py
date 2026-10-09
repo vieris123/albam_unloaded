@@ -44,13 +44,75 @@ def effect_root(ob):
 
 
 def record_object(ob):
-    """The record (generator) Empty for an object of an effect: itself, or the generator of a particle object."""
+    """The record (generator) Empty for an object of an effect: itself, the generator of a particle object, or the
+    generator a rotation handle belongs to."""
     if ob is None:
         return None
     if "efl_record" in ob:
         return ob
-    generator = ob.get("efl_generator")
+    generator = ob.get("efl_generator") or ob.get(ROT_HANDLE_OF)
     return generator if generator is not None and "efl_record" in generator else None
+
+
+# RelationType 2 (generator AxisFlags bits 8-11, Generator+0x110 from initChildGenerator 0x96BC3F): the generator
+# follows its joint's position (Pos turned by the joint) but its rotation is its own Quat in world axes, not the
+# joint's (uEffectVFR::setQuatParentOfs 0x9687B0). In Blender the generator Empty stays on the bone for its position,
+# and a companion Empty under the effect root (game world axes) holds the rotation; a Copy Rotation constraint gives
+# the generator that rotation, and export reads Quat from the companion.
+ROT_HANDLE_KEY = "efl_rot_handle"        # generator -> companion
+ROT_HANDLE_OF = "efl_rot_handle_of"      # companion -> generator
+ROT_CONSTRAINT = "ALBAM_EFL_WorldRotation"
+AT_JOINT_CONSTRAINT = "ALBAM_EFL_AtJoint"
+RELATION_POSITION_ONLY = 2
+
+
+def relation_type(ob):
+    props = ob.get("efl_gen")
+    return int(props.get("RelationType", 0)) if props is not None else 0
+
+
+def rotation_handle(ob):
+    """The companion Empty holding a RelationType 2 generator's world rotation, or None."""
+    handle = ob.get(ROT_HANDLE_KEY) if ob is not None else None
+    return handle if handle is not None and handle.get(ROT_HANDLE_OF) == ob else None
+
+
+def attach_rotation_handle(ob, root, rotation):
+    """Give a bone-attached RelationType 2 generator its rotation companion; rotation = Quat in the root's frame."""
+    old = rotation_handle(ob)
+    if old is not None:
+        bpy.data.objects.remove(old)
+    handle = bpy.data.objects.new(ob.name + "_rot", None)
+    for collection in ob.users_collection or root.users_collection:
+        collection.objects.link(handle)
+    handle.empty_display_type, handle.empty_display_size = "ARROWS", 0.08
+    handle.parent = root
+    handle.rotation_mode = "QUATERNION"
+    handle.rotation_quaternion = rotation
+    handle["efl_root"] = root
+    handle[ROT_HANDLE_OF] = ob
+    ob[ROT_HANDLE_KEY] = handle
+    at_joint = handle.constraints.new("COPY_LOCATION")   # shown at the joint (following the generator would loop)
+    at_joint.name = AT_JOINT_CONSTRAINT
+    at_joint.target, at_joint.subtarget = ob.parent, ob.parent_bone
+    world_rotation = ob.constraints.get(ROT_CONSTRAINT) or ob.constraints.new("COPY_ROTATION")
+    world_rotation.name = ROT_CONSTRAINT
+    world_rotation.target = handle
+    world_rotation.mix_mode = "REPLACE"
+    world_rotation.target_space = world_rotation.owner_space = "WORLD"
+    ob.rotation_mode = "QUATERNION"
+    ob.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+    return handle
+
+
+def detach_rotation_handle(ob):
+    handle = rotation_handle(ob)
+    if handle is not None:
+        bpy.data.objects.remove(handle)
+    constraint = ob.constraints.get(ROT_CONSTRAINT)
+    if constraint is not None:
+        ob.constraints.remove(constraint)
+    ob.pop(ROT_HANDLE_KEY, None)
 
 
 def all_record_objects(root):
@@ -258,6 +320,11 @@ def _write_generator(ob, root, gen):
 
     location, rotation, scale = (frame.inverted_safe() @ ob.matrix_world).decompose()
     animated = _animated_paths(ob)
+    handle = rotation_handle(ob) if joint is not None else None
+    if handle is not None:   # RelationType 2: Quat is in world (root) axes, held by the companion
+        rotation = (root.matrix_world.inverted_safe() @ handle.matrix_world).to_quaternion()
+        animated = (animated - {"rotation_quaternion", "rotation_euler", "rotation_axis_angle"}) | \
+            (_animated_paths(handle) & {"rotation_quaternion", "rotation_euler", "rotation_axis_angle"})
     if "location" not in animated:
         old = gen.get("Pos")
         new = [c / SCALE for c in location]
@@ -325,7 +392,8 @@ def apply_to_scene(context, root, rebuild=False):
     if active_index is not None:
         target = next((o for o in all_record_objects(new_root) if int(o["efl_record"]) == active_index), new_root)
     for ob in context.view_layer.objects:
-        ob.select_set(False)
+        if ob is not None:   # inside an operator the list can still hold the objects the rebuild removed
+            ob.select_set(False)
     if target.name in context.view_layer.objects:
         context.view_layer.objects.active = target
         target.select_set(True)
@@ -427,6 +495,13 @@ def _copy_record_object(context, source, root, parent):
         if joint >= 0:
             ob["efl_unresolved_joint"] = joint
     ob.matrix_basis = source.matrix_basis.copy()
+    ob.pop(ROT_HANDLE_KEY, None)
+    for constraint in list(ob.constraints):
+        ob.constraints.remove(constraint)
+    source_handle = rotation_handle(source)
+    if source_handle is not None and ob.parent_type == "BONE" and ob.parent is not None:
+        rotation = (effect_root(source).matrix_world.inverted_safe() @ source_handle.matrix_world).to_quaternion()
+        attach_rotation_handle(ob, root, rotation)
     return ob
 
 
@@ -477,6 +552,7 @@ class ALBAM_OT_EflRemoveRecord(bpy.types.Operator):
             self.report({"ERROR"}, "An effect needs at least one record")
             return {"CANCELLED"}
         name = ob.name
+        detach_rotation_handle(ob)
         for child in [o for o in bpy.data.objects if o.get("efl_generator") == ob]:
             bpy.data.objects.remove(child)
         bpy.data.objects.remove(ob)
