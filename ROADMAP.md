@@ -52,10 +52,10 @@ in the DX9 code before trusting one.
   on 1) and **`RangeOptionFlags` 0x1** (SE EACH_FRAME, 121 records).
 - [ ] **`ChainOptionFlag`** (SE: 0x1 NO_MAT_DIR, 0x2 NO_MAT_BDIR, 0x20 MUL_MAT_BDIR). The preview treats 0x1 / 0x2 as
   world-fixed pulls.
-- [ ] **Collision `CollFlag`.** Only bit 0 (FIN_ANIM_STOP) is named. SE adds FIN_ROT_STOP, FIN_KEEP_HOLD_OFF,
-  PATH_CANCEL, SPHERE_CORRECT and ROT_ATTENUATE.
-- [ ] **Life `KeepFlags`** (still an unverified guess: hold bit plus a frame count in bits 16-23) and **generator
-  `AxisFlags` `Order` / `AxisType`** (also unverified).
+- [ ] **Collision `CollFlag`.** In moveParticlePosCollision (0x99A210) bit 0 returns move result 4 (FIN_ANIM_STOP),
+  bit 1 returns 8 (SE FIN_ROT_STOP?) and bit 2 returns 2, which releases a life hold (FIN_KEEP_HOLD_OFF, confirmed
+  2026-10-10). What results 4 and 8 do hasn't been traced; SE also names PATH_CANCEL, SPHERE_CORRECT, ROT_ATTENUATE.
+- [ ] **Generator `AxisFlags` `Order` / `AxisType`** (unverified).
 - [ ] **`ParticleOptionFlag` 0x20000** (SE EXT_LINE_POS, 1,807 particles): only the line renderers read it
   (renderPolyline / Texline / Line); what it changes is unknown.
 - [ ] **`PassBits`** (PrimMaterialFlags bits 12-15): which views set the matching mode bits 8-11, and the per-particle
@@ -75,6 +75,10 @@ The game behaviour is known; Blender doesn't show it yet.
   camera; value 3 makes it one-sided.
 - [ ] **World Scale** (`ParticleOptionFlag` 0x200 WMAT_SCALE): particle size follows the generator's scale
   (updateWorldMatrix 0x96E835).
+- [ ] **Life hold releases other than the end of the range.** Held particles (`HoldUntilEffectEnds`, 1,506) stay
+  until the end of the simulated range or `HoldFrameLimit`; a path move's end with PathOptionFlag 4 (34 of them) and
+  collisions with CollFlag 4 also release them in the game. An "effect ends at frame" preview option would let the
+  user see the fade-out where the owning move ends.
 - [ ] **PolygonStrip (sword trail) direction alignment**: the trail goes through the same matrix code as Polygon
   (sub_988B00), but trails are built separately in the preview.
 - [ ] **Face the viewport.** Camera facing and the culling fade use the scene camera and update on frame changes
@@ -116,15 +120,18 @@ The game behaviour is known; Blender doesn't show it yet.
     objects, groups with kind / flags editable, and the attack / defend entries alongside.
 - [ ] **Editable `.mod` model settings beyond the light group** (`model_info`: middist, lowdist, strip type).
 
-- [ ] **SDL / PLA: add new property tracks from Blender.** Today values, keys, positions, duplicates and deletions
-  are editable; a property the source file doesn't have can't be added (it needs its MtPropertyType and track
-  type). An "Add Property" operator with the types the files use per class would close it.
+- [x] **SDL / PLA: add new property tracks from Blender.** Done 2026-10-10 through Edit as XML / Apply XML
+  (`xml_edit.py`): new units, property tracks and classes are typed in dmc4_xml's XML. A form-style "Add Property"
+  operator (the types the files use per class) could still make it friendlier.
+- [ ] **Edit as XML for `.phs` chains (and other XFS files).** The vendored `dmc4xml.xfsxml` converts XFS both ways;
+  `xml_edit.py` only handles `.sdl` / `.pla` so far.
 - [ ] **Sound effects (not scoped yet, for a later session).** LMT event table 2 plays sounds: slot bit k ->
   `events_params_02[k]`, the same scheme as the hitbox groups of table 1. Per the user, the sound effect data follows
   the XFS format (dmc4xml's XFS codec reads it), so the work starts there.
-- [ ] **XFS files (`.cam` rDevilCamera and the rest) in Albam.** dmc4_xml reads them; its XFS writer isn't byte-exact
-  yet (it zeroes each property's attr / getter / setter fields and writes header minor version 3, the files have
-  10), so fix that upstream before vendoring XFS. A camera-area import was prototyped (scratch only).
+- [ ] **XFS files (`.cam` rDevilCamera and the rest) in Albam.** The XFS codec is byte-exact on all 297 DX9 XFS files
+  and vendored (`dmc4xml/xfs.py`, `xfsxml.py`; the layout table's attr / getter / setter fields and the header version
+  are kept since 2026-10-10); `.phs` chains already use it. Still missing: a Blender import for the other classes,
+  starting with `.cam` (a camera-area import was prototyped, scratch only).
 
 ## Inherited bugs (from upstream Albam)
 

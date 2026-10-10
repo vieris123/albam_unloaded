@@ -561,19 +561,31 @@ def _particle_struct(ptype):
     return Struct(f"EFL_PARTICLE_{name}", size, tier, fields, bits)
 
 
-# --- life param (slot 2): always 0x10 in the corpus; names from the IDB (EFL_LIFE_FRAME) -----------
+# --- life param (slot 2): always 0x10 in the corpus; SE rEffectList::EFL_LIFE_FRAME -----------------
+# DX9: spawn uEffectVFR::initParticleLifeFrame 0x9729B0 (each range s + rand % (r + 1); work +0 appear, +2 keep,
+# +4 vanish, +6 counter, +8 hold limit, +0xA phase 0 appear / 1 keep / 2 vanish / 3 dead, +0xB bit 0 held), per frame
+# uEffectVFR::moveParticleLifeFrame 0x998C30 (life types 1 / 2; 3 / 4 use the keyframe pair 0x972B70 / 0x998E20).
+# The hold: Generator::restart 0x9DF230 copies bit 0 into Generator mFlags 0x40000; while it's set the Keep phase
+# doesn't count down. Released by uEffectVFR::doFinish / doKeepHoldOff (called by checkEnd when the effect's owner
+# ends it, e.g. the motion that spawned it ends), a path move's PathOptionFlag 4 at the path end, a collision with
+# CollFlag 4 (moveParticlePosCollision 0x99A210), or the hold limit running out; then KeepFrame, then VanishFrame.
 
-LIFE = Struct("EFL_LIFE_FRAME", 0x10, "corpus", [
-    F(0x00, "AppearFrame", "rangeu16", "prior"),
-    F(0x04, "KeepFrame", "rangeu16", "prior"),
-    F(0x08, "VanishFrame", "rangeu16", "prior"),
-    F(0x0C, "KeepFlags", "u32", "prior", "bitfield word"),
+LIFE = Struct("EFL_LIFE_FRAME", 0x10, "dx9", [
+    F(0x00, "AppearFrame", "rangeu16", "dx9", "fade-in frames; alpha = counter / appear"),
+    F(0x04, "KeepFrame", "rangeu16", "dx9", "full-alpha frames (after a hold: the frames left once released)"),
+    F(0x08, "VanishFrame", "rangeu16", "dx9", "fade-out frames; alpha = counter / vanish, then the particle dies"),
+    F(0x0C, "KeepOptions", "u32", "dx9", "bitfield word"),
 ], [
-    B("KeepHoldFlag", "KeepFlags", 0, 1, "prior"),
-    B("KeyframeKeepFrameParamOffset", "KeepFlags", 1, 15, "prior"),
-    B("KeepHoldFrame", "KeepFlags", 16, 16, "prior"),
+    B("HoldUntilEffectEnds", "KeepOptions", 0, 1, "dx9",
+      "SE KeepHoldFlag -> Generator mFlags 0x40000 (Generator::restart 0x9DF230); the Keep phase waits for a release "
+      "(doFinish / doKeepHoldOff, PathOptionFlag 4, CollFlag 4); 1,506 particles in 236 files"),
+    B("KeyframeKeepFrameParamOffset", "KeepOptions", 1, 15, "dx9",
+      "u32 keyframe for KeepFrame, read at spawn (initParticleLifeFrame); never set in the files"),
+    B("HoldFrameLimit", "KeepOptions", 16, 16, "dx9",
+      "SE KeepHoldFrame: counted down while held; reaching 0 ends the Keep phase at once; 0 = no limit "
+      "(1,433 of the 1,506 holds)"),
 ])
-LIFE_TYPES = {1: "Frame", 2: "Type2"}
+LIFE_TYPES = {1: "FrameAlpha", 2: "FrameColor", 3: "KeyframeAlpha", 4: "KeyframeColor"}   # SE rEffectList::LIFE_TYPE
 
 # --- move param (slot 3) -- Vibed/RE/particle_move_param.md "On-disk move param" -------------------
 

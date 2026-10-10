@@ -812,24 +812,29 @@ HELP = {
         "Fade-in time in frames: the particle's alpha ramps from 0 to full over this many frames after it spawns. 0 ="
         ' appears at full opacity.'
     ),
-    'life:KeepFlags': (
-        'Packed word holding KeepHoldFlag, KeyframeKeepFrameParamOffset and KeepHoldFrame. This split is an old guess'
-        " that hasn't been checked against the game; edit the bit-fields or keep the game's value."
+    'life:KeepOptions': (
+        'Packed word holding Hold Until Effect Ends, the KeepFrame keyframe offset and Hold Frame Limit. Edit those '
+        'instead.'
     ),
     'life:KeepFrame': (
-        'Frames the particle stays fully visible after fading in. Total lifetime is Appear + Keep + Vanish frames.'
+        'Frames the particle stays fully visible after fading in. Total lifetime is Appear + Keep + Vanish frames. '
+        'With Hold Until Effect Ends, these are the frames it stays once the hold is released.'
     ),
-    'life:KeepHoldFlag': (
-        'Probably keeps the particle in its Keep (fully visible) phase until something releases it, such as reaching '
-        "the end of a path with PathOptionFlag 4, instead of counting KeepFrame down. Unverified; keep the game's "
-        'value.'
+    'life:HoldUntilEffectEnds': (
+        "Keeps the particle fully visible (in its Keep phase) for as long as the effect runs, instead of counting "
+        "KeepFrame down. It's released when the effect is ended by whatever spawned it (for example the attack "
+        'animation finishing), when a path move reaches its end with PathOptionFlag 4, when it collides with CollFlag '
+        '4, or when Hold Frame Limit runs out; then it stays KeepFrame more frames and fades out over VanishFrame. '
+        'Used for glows and trails that last exactly as long as a move. The preview has no owner to end the effect, '
+        'so held particles stay until the end of the simulated range.'
     ),
-    'life:KeepHoldFrame': (
-        "Not understood yet; probably a frame count used with KeepHoldFlag. Keep the game's value."
+    'life:HoldFrameLimit': (
+        'With Hold Until Effect Ends: the longest the hold may last, in frames. When it runs out the Keep phase ends '
+        'at once and the particle fades out. 0 = no limit (hold until released).'
     ),
     'life:KeyframeKeepFrameParamOffset': (
-        'Probably an offset to a keyframe curve for KeepFrame. Life blocks in the game files never carry keyframe '
-        'data, so leave it 0.'
+        'Offset to a keyframe curve for KeepFrame, read when the particle spawns. Life blocks in the game files never '
+        'carry keyframe data, so leave it 0.'
     ),
     'life:VanishFrame': (
         'Fade-out time in frames: after the Keep phase the alpha ramps down to 0 over this many frames, then the '

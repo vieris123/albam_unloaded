@@ -66,15 +66,33 @@ def _value_key(entry, names_seen):
 
 # ---- import ------------------------------------------------------------------------------------------------------
 
+def own_collection(root_ob, context, collection=None):
+    """Link root_ob and everything under it into its own collection (named like the root, under the active
+    collection), or into `collection` (a rebuild keeps the old one)."""
+    if collection is None:
+        collection = bpy.data.collections.new(root_ob.name)
+        context.collection.children.link(collection)
+    for ob in [root_ob] + list(root_ob.children_recursive):
+        if ob.name not in collection.objects:
+            collection.objects.link(ob)
+    return collection
+
+
 @blender_registry.register_import_function(app_id="dmc4", extension="pla", file_category="PLACEMENT")
 def load_pla(file_item, context):
     data = file_item.get_bytes()
+    build_pla_objects(data, file_item.display_name.split(".")[0], file_item, context)
+    return None     # linked into its own collection
+
+
+def build_pla_objects(data, stem, asset, context, collection=None):
+    """.pla bytes -> the root Empty `PLA_<stem>` and its track Empties, linked into their own collection (or
+    `collection`) and added to the export list. `asset` gives app_id / relative_path / extension."""
     try:
         pla = pla_codec.read(data)
     except pla_codec.PlaError as err:
         raise AlbamCheckFailure("Can't read this placement file", details=str(err),
                                 solution="Only DX9 DMC4 .pla files (version 17) are supported.")
-    stem = file_item.display_name.split(".")[0]
     tracks = pla.tracks
     kids = _children_of(tracks)
 
@@ -131,12 +149,13 @@ def load_pla(file_item, context):
     for ob, key, target in pending_refs:
         if target in objects and target != 0:
             ob[key] = objects[target]
+    own_collection(root_ob, context, collection)
     _place(root_ob)
 
     root_ob.albam_asset.original_bytes = data
-    root_ob.albam_asset.app_id = file_item.app_id
-    root_ob.albam_asset.relative_path = file_item.relative_path
-    root_ob.albam_asset.extension = file_item.extension
+    root_ob.albam_asset.app_id = asset.app_id
+    root_ob.albam_asset.relative_path = asset.relative_path
+    root_ob.albam_asset.extension = asset.extension
     exportable = context.scene.albam.exportable.file_list.add()
     exportable.bl_object = root_ob
     context.scene.albam.exportable.file_list.update()

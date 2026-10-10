@@ -32,7 +32,7 @@ from dmc4xml.dti import dti_id as _dti_id, dti_name as _dti_name
 from albam.exceptions import AlbamCheckFailure
 from albam.registry import blender_registry
 from albam.vfs import VirtualFileData
-from .placement import ordered_children
+from .placement import ordered_children, own_collection
 
 TRACK_PROP = "sdl_track"
 LAYOUT_PROP = "sdl_layout"
@@ -59,7 +59,13 @@ def _data_path(key):
 
 @blender_registry.register_import_function(app_id="dmc4", extension="sdl", file_category="SCHEDULE")
 def load_sdl(file_item, context):
-    data = file_item.get_bytes()
+    build_sdl_objects(file_item.get_bytes(), file_item.display_name.split(".")[0], file_item, context)
+    return None     # linked into its own collection
+
+
+def build_sdl_objects(data, stem, asset, context, collection=None):
+    """.sdl bytes -> the root Empty `SDL_<stem>` and its track Empties, linked into their own collection (or
+    `collection`) and added to the export list. `asset` gives app_id / relative_path / extension."""
     try:
         sdl = sdl_codec.read(data)
     except sdl_codec.SdlError as err:
@@ -67,7 +73,6 @@ def load_sdl(file_item, context):
                                 solution="Only DX9 DMC4 .sdl files (version 16) are supported; Special Edition "
                                          "files are version 22.")
     tracks = sdl.tracks
-    stem = file_item.display_name.split(".")[0]
     kids = {}
     for i, t in enumerate(tracks[1:], 1):
         kids.setdefault(0 if t.type in UNIT_TYPES else t.parent, []).append(i)
@@ -115,12 +120,13 @@ def load_sdl(file_item, context):
         ob[LAYOUT_PROP] = json.dumps(layout)
 
     build(root_ob, 0)
+    own_collection(root_ob, context, collection)
     for ob in objects.values():
         _drive_transform(ob, objects)
     root_ob.albam_asset.original_bytes = data
-    root_ob.albam_asset.app_id = file_item.app_id
-    root_ob.albam_asset.relative_path = file_item.relative_path
-    root_ob.albam_asset.extension = file_item.extension
+    root_ob.albam_asset.app_id = asset.app_id
+    root_ob.albam_asset.relative_path = asset.relative_path
+    root_ob.albam_asset.extension = asset.extension
     exportable = context.scene.albam.exportable.file_list.add()
     exportable.bl_object = root_ob
     context.scene.albam.exportable.file_list.update()

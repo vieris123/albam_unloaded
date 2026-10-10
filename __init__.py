@@ -46,6 +46,7 @@ def register():
     importlib.import_module("albam.engines.mtfw.effect_ean")
     importlib.import_module("albam.engines.mtfw.placement")
     importlib.import_module("albam.engines.mtfw.scheduler")
+    importlib.import_module("albam.engines.mtfw.xml_edit")
     importlib.import_module("albam.engines.mtfw.cns_chain")
     importlib.import_module("albam.engines.mtfw.col_shapes")
     importlib.import_module("albam.engines.mtfw.cns_chain_preview")

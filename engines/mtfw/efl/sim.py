@@ -17,7 +17,8 @@ Sources (DX9):
     space      moveParticleMoveNone 0x995E60 re-places None particles from the current generator matrix (follow);
                Add/Mul integrate in world space; MoveOptionFlag 8 (ALWAYS_CORRECT) with the generator's 0x4000
                flag adds the generator's translation delta every frame (moveParticleMoveVel 0x99BEA0)
-    life       sub_9729B0: Appear / Keep / Vanish frames, each s + rand % (r + 1); alpha ramps in, holds, ramps out
+    life       initParticleLifeFrame 0x9729B0 / moveParticleLifeFrame 0x998C30: Appear / Keep / Vanish frames, each
+               s + rand % (r + 1); alpha ramps in, holds, ramps out; HoldUntilEffectEnds holds Keep until released
     flipbook   sub_961DB0: pattern += PatSpeed per frame when AnimFlag MOVE; LOOP wraps, FINISH kills, else holds;
                sequence = SeqNoMin + rand % (SeqNoRange + 1); a PatNo keyframe gives the pattern (or the speed when
                DrawFlags_0x41 bit 0 is set); AnimFlag 0x400 / 0x800 flip each particle's U / V with probability
@@ -638,6 +639,7 @@ class _Template:
 
     def __init__(self, record, rng=None, strip_points=None, range_strip=None, ground_y=None, world_axes=None):
         self.record = record
+        self.max_frames = 300   # simulated range (simulate() sets it): held particles last until its end
         self.world_axes = world_axes        # game world -> generator space at import (row-major 3x3), or None
         self.range_strip = range_strip      # generator RangeStripPath .efs parts (cm)
         self.ground_y = ground_y            # ground plane height in generator space (cm) for collision
@@ -702,6 +704,12 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
     life_frames = None
     if life is not None and life.type in (1, 2):
         life_frames = tuple(_ru(rng, life.get(k)) for k in ("AppearFrame", "KeepFrame", "VanishFrame"))
+        if life.get("HoldUntilEffectEnds"):   # the Keep phase waits for the effect to end (moveParticleLifeFrame)
+            appear, _keep, vanish = life_frames
+            limit = life.get("HoldFrameLimit")   # runs out -> straight to Vanish; 0 = no limit
+            # nothing ends the effect in the preview: hold until the end of the simulated range (path-end and
+            # collision releases aren't modelled)
+            life_frames = (appear, limit or max(template.max_frames - birth - appear, 1), vanish)
         if not any(life_frames):
             life_frames = (0, 1, 0)
 
@@ -1634,6 +1642,7 @@ def simulate(record, seed=0, max_frames=300, pat_counts=(1,), strip_points=None,
         return []
     rng = random.Random(seed)
     template = _Template(record, rng, strip_points, range_strip, ground_y, world_axes)
+    template.max_frames = max_frames
     particles = []
     divide = record.gen.get("RangeDivideNum")
     serial = 0

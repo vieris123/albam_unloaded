@@ -146,12 +146,22 @@ def block_props(block):
     return props
 
 
+# fields renamed since older imports stored their props: old name -> new name
+RENAMED_PROPS = {"KeepFlags": "KeepOptions", "KeepHoldFlag": "HoldUntilEffectEnds", "KeepHoldFrame": "HoldFrameLimit"}
+
+
 def upgrade_props(props):
-    """Particle props stored by older imports, in today's field names: CullingFlag was a u16 holding VolumeBlendRate
-    in its high byte, and OtDepthBias was the u32 uknDraw_0x14. Returns props unchanged when nothing is old."""
-    if props is None or ("VolumeBlendRate" in props or "CullingFlag" not in props) and "uknDraw_0x14" not in props:
+    """Props stored by older imports, in today's field names: the particle CullingFlag was a u16 holding
+    VolumeBlendRate in its high byte, OtDepthBias was the u32 uknDraw_0x14, and RENAMED_PROPS were renamed. Returns
+    props unchanged when nothing is old."""
+    if props is None or ("VolumeBlendRate" in props or "CullingFlag" not in props) and "uknDraw_0x14" not in props \
+            and not any(old in props for old in RENAMED_PROPS):
         return props
     out = dict(props)
+    for old, new in RENAMED_PROPS.items():
+        if old in out:
+            value = out.pop(old)
+            out.setdefault(new, value)
     if "VolumeBlendRate" not in out and "CullingFlag" in out:
         word = _scalar(0, out["CullingFlag"])
         out["CullingFlag"], out["VolumeBlendRate"] = word & 0xFF, word >> 8 & 0xFF
