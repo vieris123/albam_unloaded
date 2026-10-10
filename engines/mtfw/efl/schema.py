@@ -149,6 +149,8 @@ class Bits:
     width: int
     tier: str
     note: str = ""
+    sub: str | None = None   # bits holding a self-relative offset (like Field.sub; the life KeepFrame keyframe)
+    rel_base: int = 0
 
 
 @dataclass
@@ -173,6 +175,14 @@ class Struct:
         assert end <= self.size, f"{self.name} fields run past its size"
         for b in self.bits:
             assert b.field in self.by_name, f"{self.name}: bits {b.name} on unknown field {b.field}"
+
+    def offset_fields(self):
+        """Fields and bit-fields holding a self-relative offset (sub=), in declaration order."""
+        return [f for f in self.fields if f.sub] + [b for b in self.bits if b.sub]
+
+    def offset_field(self, name):
+        f = self.by_name.get(name) or self.bits_by_name.get(name)
+        return f if f is not None and f.sub else None
 
     def gaps(self):
         """(start, end) byte ranges inside the struct not covered by a field."""
@@ -215,11 +225,20 @@ GENERATOR = Struct("EFL_GENERATOR", 0x1E0, "dx9", [
     F(0xC0, "ParticleScale", "rangef", "dx9", "-> Gen.mParticleScaleBase"),
     F(0xC8, "RangeType", "u8", "dx9", "spawn shape (sub_999040): 0 point, 1-3 box, 4-6 cylinder X/Y/Z, 7 sphere, 8 hemisphere"),
     F(0xC9, "RangeDirType", "u8", "dx9", "RANGE_DIR_TYPE: 0 none, 1 diffuse, 2 converge, 3 unit"),
-    F(0xCA, "RangeOptionFlags", "u8", "dx9"),
-    F(0xCB, "uknRangeFlag", "u8", "dx9"),
-    F(0xCC, "RangeStripType", "u8", "dx9", "SE name"),
-    F(0xCD, "RangeStripFlag", "u8", "dx9", "SE name"),
-    F(0xCE, "RangeStripPartsNo", "s16", "dx9", "SE name"),
+    F(0xCA, "RangeOptionFlags", "u8", "dx9",
+      "RANGE_OPTION_FLAG; DX9 reads 1 EACH_FRAME only: initGeneratorParam 0x96AFA9 -> Generator mFlags 0x20000 -> "
+      "openParticle 0x9DF333 numbers particles by spawning frame (mSetFrameTotal) instead of by particle "
+      "(mSetParticleTotal); that serial picks the RangeDivideNum slot and the ORDER / REVERSE strip index"),
+    F(0xCB, "RangeDisperseType", "u8", "dx9",
+      "SE RANGE_DISPERSE_TYPE 0 NONE, 1 OLD, 2 SUB: uknGenBehaviorFunc2 0x998F00 shifts each spawn by (previous / "
+      "sub-step generator position - current) x its place in the frame's batch (i / count); 2 also sets mFlags 0x8000"),
+    F(0xCC, "RangeStripType", "u8", "dx9",
+      "sampler (sub_963220): 0 point, 1 linear segment, 2 3-point curve, 3 4-point cubic (sub_ADC1E0), 4 triangle"),
+    F(0xCD, "RangeStripFlag", "u8", "dx9",
+      "rEffectStrip::STRIP_FLAG (sub_99B270 / 99A8A0 / 99AFD0): 1 ORDER, 2 REVERSE, 8 PATH_LOOP, 0x10 CENTER_FIX "
+      "(midpoint / centroid), 0x20 ALL_PARTS (random part; with RangeDivideNum the slots run across all parts), "
+      "0x40 SKINING (points follow the owner model's skinning); 4 NORM_OFF no reader found"),
+    F(0xCE, "RangeStripPartsNo", "s16", "dx9", "the part sampled unless ALL_PARTS"),
     F(0xD0, "RangeStripPath", "str64", "dx9", ".efs, createGeneratorResources"),
     F(0x110, "UknRangeThing", "rangef[4]", "dx9", "[0] = range-dir blend factor, [1..3] = spawn-shape scale (sub_999040)"),
     F(0x130, "RangeDivideNum", "u32", "dx9", "sub_999640 modulus"),
@@ -355,7 +374,8 @@ PTCL_TAILS = {
         F(0x178, "AngleAdd", "rangef", "prior"),
         F(0x180, "AspectRatio", "rangef", "prior"),
         F(0x188, "AspectRatioAdd", "rangef", "prior"),
-        F(0x190, "KeyframeAngleParamOffset", "rel32", "prior", "width unverified", sub="kf:f32"),
+        F(0x190, "KeyframeAngleParamOffset", "rel32", "dx9", "initParticleBillboard 0x977E60 (calcKeyframeF32)",
+          sub="kf:f32"),
     ], []),
     1: ("Polyline", 0x1B0, "corpus", [
         F(0x170, "LineFlags", "u32", "dx9", "initParticlePolyline 0x9786D0 / move sub_98E3E0"),
@@ -473,7 +493,10 @@ PTCL_TAILS = {
     ]),
     4: ("Line", 0x60, "dx9", [
         F(0x50, "LineFlags", "u32", "dx9", "same header as Polyline 0x170; drawn as a 1-pixel line strip"),
-        F(0x54, "member_0x54", "u32", "unknown", "always 0"),
+        F(0x54, "KeyframePlaceColorParamOffset", "rel16", "dx9",
+          "colour B (PlaceColor at 0x58) -> particle +0x64, initParticleLine 0x97ABA8 (calcKeyframeColor; without "
+          "keys calcSrcColor of PlaceColor); never set in the files", sub="kf:color"),
+        F(0x56, "member_0x56", "u16", "unknown", "always 0; no DX9 reader found"),
         F(0x58, "PlaceColor", "color[2]", "dx9"),
     ], LINE_BITS),
     5: ("Model", 0x130, "dx9", [
@@ -580,7 +603,8 @@ LIFE = Struct("EFL_LIFE_FRAME", 0x10, "dx9", [
       "SE KeepHoldFlag -> Generator mFlags 0x40000 (Generator::restart 0x9DF230); the Keep phase waits for a release "
       "(doFinish / doKeepHoldOff, PathOptionFlag 4, CollFlag 4); 1,506 particles in 236 files"),
     B("KeyframeKeepFrameParamOffset", "KeepOptions", 1, 15, "dx9",
-      "u32 keyframe for KeepFrame, read at spawn (initParticleLifeFrame); never set in the files"),
+      "u32 keyframe for KeepFrame, read at spawn (initParticleLifeFrame 0x972A0C: life + bits); never set in the "
+      "files", sub="kf:u32"),
     B("HoldFrameLimit", "KeepOptions", 16, 16, "dx9",
       "SE KeepHoldFrame: counted down while held; reaching 0 ends the Keep phase at once; 0 = no limit "
       "(1,433 of the 1,506 holds)"),
@@ -590,7 +614,10 @@ LIFE_TYPES = {1: "FrameAlpha", 2: "FrameColor", 3: "KeyframeAlpha", 4: "Keyframe
 # --- move param (slot 3) -- Vibed/RE/particle_move_param.md "On-disk move param" -------------------
 
 MOVE_COMMON = [
-    F(0x00, "MoveOptionFlag", "u32", "dx9", "MOVE_OPTION_FLAG: 2 GRAVITY_NO_SCALE, 4 HIGH_ACCURACY, 8 ALWAYS_CORRECT"),
+    F(0x00, "MoveOptionFlag", "u32", "dx9",
+      "MOVE_OPTION_FLAG; DX9 reads only 2 GRAVITY_NO_SCALE (Add / Mul / PathLine), 4 HIGH_ACCURACY (initGeneratorParam, "
+      "sub_967850) and 8 ALWAYS_CORRECT (initParticleMoveAdd / Mul). 1 COLLISION isn't read: collision is on when "
+      "CollParamOffset is set (get_coll_param 0x9DD933, move types 0-2, 4, 6)"),
     F(0x04, "ForceType", "u8", "dx9", "FORCE_TYPE (& 0xF)"),
     F(0x05, "RotAxisOrder", "u8", "dx9", "nibbles: RotAxisType, RotOrder"),
     F(0x06, "CollParamOffset", "rel16", "dx9", "get_coll_param 0x960650", sub="collision"),

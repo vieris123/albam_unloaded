@@ -18,7 +18,10 @@ from .model import Block
 RETYPE_SLOTS = ("ptcl", "move")
 EXTENSION_BITS = ("LineType", "LineOfsNum", "ClothType")
 TEMPLATE_ONLY = (9, 11)      # Filter, Hit: layouts not known beyond a minimum size
-NOT_OFFERED = {"ptcl": (14,), "move": (7,)}   # ClothLine has no ClothType and no corpus records; move 7 unknown
+# ClothLine has no ClothType and no corpus records; LiteBillboard / SizeBillboard (16 / 17) have no corpus records
+# and only their 0x170-byte common part is known, while initParticleSizeBillboard 0x97F4E0 reads keyframe offsets at
+# 0x1D8 / 0x1DC: a block built from the common part would make the game read past it. Move 7 unknown.
+NOT_OFFERED = {"ptcl": (14, 16, 17), "move": (7,)}
 LINE_VARIANTS = [(0, "FOLLOW"), (1, "FIX"), (2, "FIX_END"), (3, "CHAIN"), (4, "LENGTH")]
 CLOTH_VARIANTS = [(0, "CHAIN"), (1, "CURVE"), (2, "ZIGZAG")]
 

@@ -47,9 +47,6 @@ The SE PDB names these, but their DX9 meaning hasn't been checked. Two SE names 
 (ParticleOptionFlag 0x10 is refraction, not ALPHA_BLUR; ModelAnimFlag 0x10 is UV scroll, not REVERSE_RAND), so verify
 in the DX9 code before trusting one.
 
-- [ ] **`MoveOptionFlag` 0x1** (SE `MOVE_OPTION_FLAG_COLLISION`): 199 records.
-- [ ] **Generator `RangeStripFlag`** (SE `STRIP_FLAG`: 0x1 ORDER on 128 records, 0x40 SKINING on 17, 0x20 ALL_PARTS
-  on 1) and **`RangeOptionFlags` 0x1** (SE EACH_FRAME, 121 records).
 - [ ] **`ChainOptionFlag`** (SE: 0x1 NO_MAT_DIR, 0x2 NO_MAT_BDIR, 0x20 MUL_MAT_BDIR). The preview treats 0x1 / 0x2 as
   world-fixed pulls.
 - [ ] **Collision `CollFlag`.** In moveParticlePosCollision (0x99A210) bit 0 returns move result 4 (FIN_ANIM_STOP),
@@ -64,6 +61,13 @@ in the DX9 code before trusting one.
   header 0x88), but the code that compares a light's group with a model's hasn't been found. The tooltips say
   "most likely when they share a bit".
 - [ ] **Culling `OcclusionRadius`**: SE-named, DX9 use not traced.
+- [ ] **LiteBillboard / SizeBillboard layouts** (particle types 16 / 17): the DX9 code has readers
+  (`initParticleLiteBillboard` 0x9DCB70, `initParticleSizeBillboard` 0x97F4E0, which reads keyframe offsets at
+  0x1D8 / 0x1DC), but no file uses them and only their 0x170-byte common part is known. Change Type doesn't offer
+  them until their tails are mapped.
+- [ ] **MassBillboard / LensFlare trailing data**: 61 MassBillboard blocks carry 64 non-zero bytes after the struct
+  and 2 LensFlare blocks 656, reached by no known offset (LensFlare is probably its element table). Read
+  `initParticleMassBillboard` 0x97D860 / `initParticleLensFlare` 0x97D2A0.
 
 ## Preview gaps
 
@@ -79,6 +83,17 @@ The game behaviour is known; Blender doesn't show it yet.
   until the end of the simulated range or `HoldFrameLimit`; a path move's end with PathOptionFlag 4 (34 of them) and
   collisions with CollFlag 4 also release them in the game. An "effect ends at frame" preview option would let the
   user see the fade-out where the owning move ends.
+- [ ] **Line LENGTH keyframes in the preview**: `LineKeyframeLengthParamOffset` (157 Polyline+LENGTH blocks) and
+  `LineKeyframeRotParamOffset` (5) are parsed and editable but the stick ignores them. Line colour B
+  (`PlaceColor` and its keyframe) isn't drawn either.
+- [ ] **Curved spawn strips** (`RangeStripType` 2 / 3: 1 and 18 records): the game fits a 3-point / 4-point cubic
+  through the strip (`calcRangeStripCurve3` / `Curve4`, basis built in `sub_ADC660`, evaluated by `sub_ADC1E0`); the
+  preview samples straight segments. PathStrip moves have the same approximation.
+- [ ] **Skinned spawn strips** (`RangeStripFlag` 0x40 SKINING, 17 records): the strip's points follow the owner
+  model's skinning (`sub_ADA7E0` / `sub_ADA120`, the `.efs` blend indices / weights); the preview keeps the strip on
+  the generator.
+- [ ] **`RangeDisperseType`** (3 records, all 1 OLD): each frame's particles are spread between the generator's
+  previous and current position by their place in the batch (`calcSpawnOffset` 0x998F00).
 - [ ] **PolygonStrip (sword trail) direction alignment**: the trail goes through the same matrix code as Polygon
   (sub_988B00), but trails are built separately in the preview.
 - [ ] **Face the viewport.** Camera facing and the culling fade use the scene camera and update on frame changes
@@ -119,6 +134,13 @@ The game behaviour is known; Blender doesn't show it yet.
   - Plan: codecs for atk / dfd / idx in dmc4xml (byte-exact on the corpus), then Albam: `.col` export from the shape
     objects, groups with kind / flags editable, and the attack / defend entries alongside.
 - [ ] **Editable `.mod` model settings beyond the light group** (`model_info`: middist, lowdist, strip type).
+- [ ] **Particle keyframes as F-curves.** The Keys tab is a custom list because the game's keys carry a random part
+  per key, a timer kind, loop and init-only, which F-curves don't. They could map onto F-curves on custom properties
+  (as the `.sdl` tracks do) with the extras kept per key, so they're edited in the Graph Editor. Lossy mapping;
+  largest of the "normal Blender workflow" items (2026-10-10: live preview, Shift+D / X / Ctrl+V on records, the
+  editor in Object Properties and texture pickers are done).
+- [ ] **Timeline integration for effects.** The start frame and simulated length are import options; they could
+  follow the scene's frame range, with an "effect ends at frame" marker that also releases held particles.
 
 - [x] **SDL / PLA: add new property tracks from Blender.** Done 2026-10-10 through Edit as XML / Apply XML
   (`xml_edit.py`): new units, property tracks and classes are typed in dmc4_xml's XML. A form-style "Add Property"

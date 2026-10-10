@@ -171,6 +171,9 @@ def rebuild_effect(context, root, efl_bytes):
         if exportable[i].bl_object == root:
             exportable.remove(i)
     linked = linked_objects(root)   # edited .efs / .ean survive the rebuild
+    # the eye-icon state lives on the object's collection link, which the rebuild replaces: keep it
+    view_layer = context.view_layer
+    hidden = {key for key, ob in linked.items() if ob.name in view_layer.objects and ob.hide_get(view_layer=view_layer)}
     doomed = {o for o in bpy.data.objects if o.get("efl_root") == root}
     if old_collection is not None:
         doomed |= set(old_collection.all_objects)
@@ -194,6 +197,7 @@ def rebuild_effect(context, root, efl_bytes):
     context.scene.frame_current = int(start)   # the builder starts playback and generator keys here
     try:
         builder = _EffectBuilder(app_id, context, stem, armature, options, parent_collection, masks, linked)
+        builder.linked_hidden = hidden
         new_root = builder.build(efl, relative_path, efl_bytes)
     finally:
         context.scene.frame_current = frame
@@ -208,6 +212,7 @@ class _EffectBuilder:
     def __init__(self, app_id, context, stem, armature, options, parent_collection=None, masks=None, linked=None):
         self.app_id = app_id
         self.linked_existing = dict(linked or {})   # "efs:<path>" / "ean:<path>" -> object kept from a rebuild
+        self.linked_hidden = set()                  # keys of those that were hidden (eye icon) before the rebuild
         self.linked = {}                            # the linked .efs / .ean objects this build uses
         self.root = None
         self.masks = masks or (effect_filter.ALL, effect_filter.ALL)   # spawn filter (effect_filter.py)
@@ -567,6 +572,8 @@ class _EffectBuilder:
         for collection in list(ob.users_collection):
             collection.objects.unlink(ob)
         self.collection.objects.link(ob)
+        if key in self.linked_hidden:   # relinking shows it again
+            ob.hide_set(True)
         return ob
 
     def ground_height(self, record):

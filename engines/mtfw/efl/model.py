@@ -30,7 +30,7 @@ class SubBlock:
 
     def __init__(self, block, field, offset, end):
         self.block = block
-        self.field = field      # schema.Field holding the offset
+        self.field = field      # schema.Field (or schema.Bits) holding the offset
         self.offset = offset    # start, relative to the block
         self.end = end          # next sub-block start or the block end (an upper bound, not a size)
 
@@ -113,10 +113,10 @@ class Block:
     def subblocks(self):
         """Non-zero self-relative offsets of this block, sorted by target, with upper bounds."""
         refs = []
-        for f in self.struct.fields:
-            if not f.sub or f.offset + f.size > len(self.data):
+        for f in self.struct.offset_fields():
+            if not self.has(f.name):
                 continue
-            rel = schema.decode(f.type, self.data, f.offset)
+            rel = self.get(f.name)
             if rel:
                 refs.append((f.rel_base + rel, f))
         refs.sort(key=lambda r: r[0])

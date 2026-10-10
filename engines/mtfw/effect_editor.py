@@ -1,13 +1,21 @@
-"""Effect Editor panel (3D View > Albam [Beta]): schema-driven editing of an imported .efl's records.
+"""Effect Editor panel (3D View > Albam [Beta], and Object Properties): schema-driven editing of an imported .efl's
+records.
 
 The active record's fields are loaded into `scene.albam.efl_editor` (one item per schema field / bit-field, with a
 widget for its type) when a record becomes active. Every edit is written straight into the record object's
-efl_* custom properties, which export (effect_export.py) writes back into the file; Apply replays the preview
-(rebuilding the effect when an edit needs it). Keyframes are edited one at a time (any typed keyframe offset of the record, existing or not).
+efl_* custom properties, which export (effect_export.py) writes back into the file. With Live on (the default) a
+timer applies the edits to the preview a moment later (replaying, or rebuilding the effect when an edit needs it);
+Apply does it on demand. A depsgraph handler lets Blender's own tools work on effect objects: Shift+D / Ctrl+V
+copies of a record Empty become new records, X removes the record, a game texture swapped in an effect material
+writes its path back, and an edited .efs / .ean is applied after Edit Mode. Keyframes are edited one at a time (any
+typed keyframe offset of the record, existing or not).
 """
+import traceback
+
 import bpy
 from bpy.app.handlers import persistent
 
+from albam.exceptions import AlbamCheckFailure
 from albam.registry import blender_registry
 from .efl import schema
 from .efl.field_help import lookup as field_help
@@ -15,7 +23,14 @@ from .efl.edit import as_list, keyframe_value_type, to_prop, upgrade_props
 from .efl.model import SLOTS
 from .efl.sim import ROT_ORDER_NAMES, ROT_ORDERS
 from . import effect_filter
-from .effect_export import all_record_objects, effect_root, ordered_record_objects, record_object
+from .effect_export import (ROT_HANDLE_KEY, ROT_HANDLE_OF, adopt_duplicate, all_record_objects, apply_to_scene,
+                            effect_root, ordered_record_objects, record_object, structure_changed)
+
+# path fields with a Game Files picker: field -> file extension
+PATH_EXTENSIONS = {"BaseMapPath": "tex", "MaskMapPath": "tex", "NormalMapPath": "tex", "TexturePath": "tex",
+                   "LensFlarePath": "tex", "ModelPath": "mod", "AnimPath": "ean", "RangeStripPath": "efs",
+                   "PathStripPath": "efs"}
+TEXTURE_FIELDS = tuple(name for name, ext in PATH_EXTENSIONS.items() if ext == "tex")
 
 MAX_VALUES = 8
 _TUPLE_SIZE = {"rangef": 2, "rangeu16": 2, "vec3": 3, "vec4": 4, "color": 4, "point": 2, "easecurve": 2}
@@ -65,6 +80,8 @@ _ENUM_LABELS = {
     "LightType": ("Point", "Spot"),
     "PathStripType": ("0", "Linear", "Hermite", "Spline"),
     "ReleaseType": ("0", "WORK_SPEED", "PATH_SPEED"),
+    "RangeDisperseType": ("None", "Since last frame (OLD)", "From sub-step (SUB)"),
+    "RangeStripType": ("Point", "Line", "3-point curve", "4-point curve", "Triangle"),
 }
 # EnumProperty items must stay referenced while Blender uses them
 _ENUM_ITEMS = {name: [(str(i), f"{i} {label}", "") for i, label in enumerate(labels)]
@@ -91,6 +108,11 @@ _FLAG_LABELS = {
                     (0x80, "Angle Fade")),   # rEffectList::CULLING_FLAG
     "ModelAnimFlag": ((0x1, "Play Parts"), (0x2, "Loop"), (0x4, "Backwards"), (0x8, "Remove at End"),
                       (0x10, "UV Scroll"), (0x10000, "Use ModelZofs")),   # nEffect::MODEL_ANIM_FLAG; 0x10 per DX9
+    "MoveOptionFlag": ((0x2, "Gravity Ignores Scale"), (0x4, "High Accuracy"),
+                       (0x8, "Always Correct")),   # MOVE_OPTION_FLAG bits DX9 reads (1 COLLISION isn't)
+    "RangeOptionFlags": ((0x1, "Each Frame"),),   # RANGE_OPTION_FLAG_EACH_FRAME
+    "RangeStripFlag": ((0x1, "Order"), (0x2, "Reverse"), (0x8, "Closed Loop"), (0x10, "Centre"),
+                       (0x20, "All Parts"), (0x40, "Skinning")),   # rEffectStrip::STRIP_FLAG
 }
 
 # Particle tab sections: (key, label, tooltip, field and bit-field names). Fields of a Line / Cloth extension go in
@@ -240,6 +262,8 @@ def _show(item, value):
                 setattr(item, target, (r / 255, g / 255, b / 255, a / 255))
     elif item.kind in ("text", "readonly"):
         item.text = str(value) if item.kind == "text" else _summary(value)
+        if item.label in TEXTURE_FIELDS:
+            item.image = _loaded_image(item.text)
 
 
 def _summary(value):
@@ -281,12 +305,32 @@ def _on_item_edit(item, context):
             _show(bit, bit_value)
         if item.slot == "gen" and item.label == "Scale":   # the base scale is the Empty's scale
             ob.scale = item.floats[0], item.floats[2], item.floats[4]
+        if item.label in TEXTURE_FIELDS:   # the image picker follows the typed path
+            item.image = _loaded_image(value)
     finally:
         _loading = False
-    if item.slot == "gen" and item.label in ("GroupFlag", "MaterialFlag"):
-        root = effect_root(ob)
-        if root is not None:
-            effect_filter.apply_filter(root)
+    root = effect_root(ob)
+    if item.slot == "gen" and item.label in ("GroupFlag", "MaterialFlag") and root is not None:
+        effect_filter.apply_filter(root)
+    schedule_live_apply(root)
+
+
+def _loaded_image(path):
+    """The loaded game texture (image tagged efl_texture) at a path, or None."""
+    return next((im for im in bpy.data.images if im.get("efl_texture") == path), None) if path else None
+
+
+def _image_poll(_item, image):
+    return image.get("efl_texture") is not None
+
+
+def _on_image_pick(item, context):
+    """Picking a loaded game texture sets the path field (which writes it and applies)."""
+    if _loading or item.image is None:
+        return
+    path = item.image.get("efl_texture")
+    if path and item.text != path:
+        item.text = path
 
 
 def _enum_items(item, context):
@@ -321,6 +365,10 @@ class AlbamEflFieldItem(bpy.types.PropertyGroup):
     enum_value: bpy.props.EnumProperty(items=_enum_items, description=VALUE_TIP, update=_on_item_edit)
     flags: bpy.props.BoolVectorProperty(size=32, update=_on_item_edit,
                                         description="Tick to set this flag. Hover the field's name for what each does")
+    image: bpy.props.PointerProperty(
+        type=bpy.types.Image, poll=_image_poll, update=_on_image_pick,
+        description="Pick one of the game textures already loaded in this file (the path field follows). Use the "
+                    "search button for any .tex under the Game Files roots")
     # name (PropertyGroup.name) = "<slot>/<field>", label = the field name
     label: bpy.props.StringProperty()
 
@@ -349,7 +397,7 @@ def keyframe_fields(ob):
         if props is None:
             continue
         struct = schema.struct_for_props(slot, int(props["type"]), props)
-        for f in struct.fields:
+        for f in struct.offset_fields():
             vtype = keyframe_value_type(f)
             if vtype:   # every block spans its offset fields (corpus: 68,167 blocks)
                 out.append((slot, f.name, vtype))
@@ -448,6 +496,7 @@ def write_keyframe(state):
     if slot not in ob["efl_kf"]:
         ob["efl_kf"][slot] = {}
     ob["efl_kf"][slot][field] = prop
+    schedule_live_apply(effect_root(ob))
 
 
 def _on_kf_field(state, context):
@@ -520,6 +569,12 @@ def _on_filter_edit(state, context):
 @blender_registry.register_blender_prop_albam(name="efl_editor")
 class AlbamEflEditor(bpy.types.PropertyGroup):
     target: bpy.props.PointerProperty(type=bpy.types.Object)
+    live: bpy.props.BoolProperty(
+        name="Live", default=True,
+        description="Show edits in the preview as you make them: a change the simulation reads replays at once, one "
+                    "that changes what's built from the file (blending, textures, shapes, keyframes, records) "
+                    "rebuilds the effect a moment later. Off: press Apply")
+    live_error: bpy.props.StringProperty()
     tab: bpy.props.EnumProperty(items=TABS, default="ptcl", description="Which part of the record to edit")
     search: bpy.props.StringProperty(name="Search", options={"TEXTEDIT_UPDATE"},
                                      description="Show only the fields whose name contains this text")
@@ -636,7 +691,7 @@ def load_record(state, ob):
                 extension = f.offset >= struct.base_size
                 item.section = ptcl_section(f.name, extension=extension)
                 for b in bits.get(f.name, []):
-                    if b.name in props:
+                    if b.name in props and not b.sub:   # offsets are edited as keyframes (Keys tab)
                         _add_bit(state, slot, b, props[b.name]).section = ptcl_section(b.name, f.name, extension)
             subs = (ob.get("efl_sub") or {}).get(slot) or {}
             for offset_field in subs.keys():
@@ -704,12 +759,275 @@ def sync_records(state, root, active=None):
 
 def refresh_editor(context):
     """Load the active record and the record list (after the effect's objects were rebuilt)."""
+    forget_objects()
     active = context.view_layer.objects.active
     load_record(_state(context), record_object(active))
     sync_records(_state(context), effect_root(active), record_object(active))
 
 
+# -- live preview -----------------------------------------------------------------------------------
+# Edits made in the editor are applied by a short timer (Live). A depsgraph handler watches Blender's own tools:
+# it only reads, and queues work for the same timer (changing data inside the handler is unsafe).
+
+_pending = set()      # names of effect roots waiting for a live apply
+_queue = []           # ("adopt", copy, source) / ("unlink", object) / ("material", material) / ("structure",)
+_LIVE_DELAY = 0.2     # seconds: a burst of edits becomes one apply
+_known_uids = set()   # session_uid of every object the depsgraph handler has seen
+_object_count = -1    # len(bpy.data.objects) at the last scan; -1 forces a scan
+_take_stock = False   # the next scan only records the objects (bpy.data was unreadable when they were loaded)
+
+
+def _schedule_timer():
+    if not bpy.app.timers.is_registered(_live_apply):
+        bpy.app.timers.register(_live_apply, first_interval=_LIVE_DELAY)
+
+
+def schedule_live_apply(root):
+    """With Live on, apply root's edits to its preview shortly (replay, or rebuild when an edit needs it)."""
+    if root is None or not _state().live:
+        return
+    _pending.add(root.name)
+    _schedule_timer()
+
+
+def forget_objects():
+    """Make the next depsgraph update take stock of the objects again (after an import or rebuild)."""
+    global _object_count
+    _object_count = -1
+
+
+def _apply(context, root, state):
+    try:
+        apply_to_scene(context, root)
+        state.live_error = ""
+    except AlbamCheckFailure as err:
+        state.live_error = f"{err.message}: {err.details}"
+    except Exception as err:   # a failed apply mustn't take the timer or the operator down
+        traceback.print_exc()
+        state.live_error = f"{type(err).__name__}: {err}"
+    return state.live_error
+
+
+def _live_apply():
+    """The timer: queued work from the depsgraph handler, then the pending applies."""
+    state = _state()
+    queue, _queue[:] = list(_queue), []
+    for job in queue:
+        try:
+            _run_job(job, state)
+        except Exception:
+            traceback.print_exc()
+    names = list(_pending)
+    _pending.clear()
+    for name in names:
+        root = bpy.data.objects.get(name)
+        if root is not None and root.albam_asset.extension == "efl":
+            _apply(bpy.context, root, state)
+    return None
+
+
+def _run_job(job, state):
+    kind = job[0]
+    if kind == "adopt":
+        copy, source = job[1], job[2]
+        if copy.name in bpy.data.objects and source.name in bpy.data.objects:
+            if adopt_duplicate(copy, source) is not None:
+                schedule_live_apply(effect_root(copy))
+                if state.target == copy:
+                    load_record(state, copy)
+                elif state.records_root is not None:
+                    sync_records(state, state.records_root, state.target)
+    elif kind == "unlink":
+        ob = job[1]
+        if ob.name in bpy.data.objects:
+            for key in ("efl_linked", ROT_HANDLE_OF, "efl_root"):
+                ob.pop(key, None)
+    elif kind == "material":
+        for root in _material_image_changed(job[1]):
+            schedule_live_apply(root)
+    elif kind == "structure" and state.live:
+        for root in bpy.data.objects:
+            if root.albam_asset.extension == "efl" and root.get("efl_data") and structure_changed(root):
+                schedule_live_apply(root)
+
+
+def live_apply_now(context, root):
+    """Operators: apply root's edits right away when Live is on. Returns the error message, or ""."""
+    state = _state(context)
+    if root is None or not state.live:
+        return ""
+    return _apply(context, root, state)
+
+
+def _record_key(ob):
+    index = int(ob["efl_record"])
+    return index if index >= 0 else f"new{ob.get('efl_serial', 0)}"
+
+
+def _scan_objects():
+    """Objects that appeared since the last scan (read-only; the work is queued for the timer): a record Empty
+    copied with Blender's own tools (Shift+D, Ctrl+C / Ctrl+V) becomes a new record; a copy of a linked .efs /
+    .ean, or of a rotation companion, is cut loose from the effect."""
+    originals, linked, new, seen = {}, set(), [], set()
+    referenced = {gen.name for gen in (o.get("efl_generator") for o in bpy.data.objects) if gen is not None}
+    for ob in bpy.data.objects:
+        uid = ob.session_uid
+        seen.add(uid)
+        root = ob.get("efl_root")
+        if uid not in _known_uids:
+            new.append(ob)
+        elif root is not None and "efl_record" in ob:
+            originals[(root.name, _record_key(ob))] = ob
+        elif root is not None and "efl_linked" in ob:
+            linked.add((root.name, str(ob["efl_linked"])))
+    # unknown records sharing a key with no known original (e.g. right after a rebuild): the one the particle
+    # objects point at is the original
+    groups = {}
+    for ob in new:
+        root = ob.get("efl_root")
+        if root is not None and "efl_record" in ob:
+            groups.setdefault((root.name, _record_key(ob)), []).append(ob)
+    for key, obs in groups.items():
+        if key not in originals and len(obs) > 1:
+            originals[key] = next((o for o in obs if o.name in referenced), min(obs, key=lambda o: o.name))
+    for ob in new:
+        root = ob.get("efl_root")
+        if root is None or root.name not in bpy.data.objects:
+            continue
+        if "efl_record" in ob:
+            source = originals.get((root.name, _record_key(ob)))
+            if source is not None and source != ob:
+                _queue.append(("adopt", ob, source))
+        elif "efl_linked" in ob and (root.name, str(ob["efl_linked"])) in linked:
+            _queue.append(("unlink", ob))
+        elif ob.get(ROT_HANDLE_OF) is not None and ob[ROT_HANDLE_OF].get(ROT_HANDLE_KEY) != ob:
+            _queue.append(("unlink", ob))
+    _known_uids.clear()
+    _known_uids.update(seen)
+
+
+def _material_image_changed(material):
+    """A different game texture picked in an effect material's Image Texture node: write its path into the records
+    drawn with that material. Returns the effect roots that changed."""
+    old = material.get("efl_base_map")
+    if old is None or material.node_tree is None:
+        return set()
+    node = next((n for n in material.node_tree.nodes if n.type == "TEX_IMAGE"), None)
+    image = node.image if node is not None else None
+    new = image.get("efl_texture") if image is not None else None
+    if not new or new == old:
+        return set()
+    material["efl_base_map"] = new
+    records = set()
+    for ob in bpy.data.objects:
+        if ob.type != "MESH" or material.name not in ob.data.materials:
+            continue
+        record = record_object(ob) or (ob.parent if ob.parent is not None and "efl_record" in ob.parent else None)
+        if record is not None:
+            records.add(record)
+    changed = set()
+    for record in records:
+        props = record.get("efl_ptcl")
+        if props is not None and props.get("BaseMapPath") == old:
+            props["BaseMapPath"] = new
+            changed.add(effect_root(record))
+            if _state().target == record:
+                load_record(_state(), record)
+    return changed - {None}
+
+
+def _material_of(id_):
+    if isinstance(id_, bpy.types.Material):
+        return id_ if id_.get("efl_base_map") is not None else None
+    if isinstance(id_, bpy.types.ShaderNodeTree):
+        return next((m for m in bpy.data.materials if m.node_tree == id_ and m.get("efl_base_map") is not None),
+                    None)
+    return None
+
+
+@persistent
+def _on_depsgraph(scene, depsgraph):
+    """Blender's own tools on effect objects: duplicates become records, deletions change the structure, a swapped
+    material image writes its path back, an edited strip / flipbook is applied (Live) after leaving Edit Mode.
+    Read-only: the work goes to the timer."""
+    global _object_count, _take_stock
+    count = len(bpy.data.objects)
+    queued = False
+    if _take_stock:   # objects that existed before the add-on could look: known, not copies
+        _take_stock = False
+        _known_uids.update(ob.session_uid for ob in bpy.data.objects)
+        _object_count = count
+    if count != _object_count:
+        removed = 0 <= _object_count and count < _object_count
+        _object_count = count
+        _scan_objects()
+        if removed:
+            _queue.append(("structure",))
+        queued = bool(_queue)
+    if getattr(bpy.context, "mode", "OBJECT") == "OBJECT":
+        for update in depsgraph.updates:
+            id_ = getattr(update.id, "original", update.id)
+            material = _material_of(id_)
+            if material is not None:
+                _queue.append(("material", material))
+                queued = True
+            elif update.is_updated_geometry and isinstance(id_, bpy.types.Object) and "efl_linked" in id_:
+                root = id_.get("efl_root")
+                if root is not None and _state().live:
+                    _pending.add(root.name)
+                    queued = True
+    if queued:
+        _schedule_timer()
+
+
 # -- operators --------------------------------------------------------------------------------------
+
+_path_items_cache = {}   # (extension, rfs revision, root name) -> enum items (kept alive for Blender)
+
+
+def _path_items(self, context):
+    rfs = context.scene.albam.rfs
+    root = effect_root(context.active_object)
+    key = (self.extension, rfs.revision, root.name if root is not None else "")
+    if key not in _path_items_cache:
+        suffix = "." + self.extension
+        paths = set()
+        for f in rfs.file_list:
+            if not f.is_expandable and f.display_name.lower().endswith(suffix):
+                paths.add(str(f.relative_path_windows_no_ext))
+        if root is not None and self.extension in ("efs", "ean"):   # strips / flipbooks made in Blender
+            from .effect import linked_objects
+            paths |= {key_[4:] for key_ in linked_objects(root) if key_.startswith(self.extension + ":")}
+        items = [(path, path, "") for path in sorted(paths)]
+        _path_items_cache.clear()
+        _path_items_cache[key] = items or [("", f"(no .{self.extension} under the Game Files roots)", "")]
+    return _path_items_cache[key]
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_EflPickPath(bpy.types.Operator):
+    """Pick this path from the files under the Game Files roots (type to search)"""
+    bl_idname = "albam.efl_pick_path"
+    bl_label = "Pick a Game File"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_property = "path"
+
+    field: bpy.props.StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    extension: bpy.props.StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    path: bpy.props.EnumProperty(name="File", items=_path_items,
+                                 description="The file, as the game path the record stores (no extension)")
+
+    def invoke(self, context, event):
+        context.window_manager.invoke_search_popup(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        item = _state(context).fields.get(self.field)
+        if item is None or not self.path:
+            return {"CANCELLED"}
+        item.text = self.path   # writes the record and applies (Live)
+        return {"FINISHED"}
+
 
 @blender_registry.register_blender_type
 class ALBAM_OT_EflSelectRecord(bpy.types.Operator):
@@ -746,7 +1064,8 @@ def _linked_changes(root):
 class ALBAM_OT_EflSelectLinked(bpy.types.Operator):
     """Select this .efs strip or .ean flipbook to edit it. A strip is a mesh: edit its points in Edit Mode. A
     flipbook is a mesh whose faces' UVs are the frames: Select Frames in the Image Editor's Albam tab (Flipbook
-    panel), then edit them in the UV editor. Press Apply afterwards to see the edits in the effect's preview"""
+    panel), then edit them in the UV editor. The effect's preview follows when you leave Edit Mode (Live), or
+    when you press Apply"""
     bl_idname = "albam.efl_select_linked"
     bl_label = "Edit Linked File"
     bl_options = {"REGISTER", "UNDO"}
@@ -901,6 +1220,9 @@ class ALBAM_OT_EflRevertRecord(bpy.types.Operator):
                 keyframes[slot], subs[slot] = keyframe_props(block), sub_props(block)
         ob["efl_kf"], ob["efl_sub"] = keyframes, subs
         load_record(_state(context), ob)
+        error = live_apply_now(context, effect_root(ob))
+        if error:
+            self.report({"WARNING"}, error)
         return {"FINISHED"}
 
 
@@ -1059,6 +1381,13 @@ def _draw_field(layout, item, show_notes):
         value = sum(1 << i for i in range(32) if item.flags[i])
         other = value & ~named
         right.label(text=f"= {value:#x}" + (f"  (other bits {other:#x} kept)" if other else ""))
+    elif item.kind == "text" and item.label in PATH_EXTENSIONS:
+        row = right.row(align=True)
+        row.prop(item, "text", text="")
+        pick = row.operator("albam.efl_pick_path", text="", icon="VIEWZOOM")
+        pick.field, pick.extension = item.name, PATH_EXTENSIONS[item.label]
+        if item.label in TEXTURE_FIELDS:
+            right.prop(item, "image", text="")
     elif item.kind in ("hex", "text"):
         right.prop(item, "text", text="")
     elif item.kind == "color":
@@ -1073,25 +1402,32 @@ def _draw_field(layout, item, show_notes):
         layout.label(text=item.note[:120])
 
 
-@blender_registry.register_blender_type
-class ALBAM_PT_EflEditor(bpy.types.Panel):
-    bl_category = "Albam [Beta]"
-    bl_idname = "ALBAM_PT_EflEditor"
-    bl_label = "Effect Editor"
-    bl_region_type = "UI"
-    bl_space_type = "VIEW_3D"
+def _panel_object(context):
+    """The object a panel is drawn for: the Properties editor's (pinnable) object, else the active one."""
+    return getattr(context, "object", None) or context.active_object
+
+
+class _EflEditorDraw:
+    """The Effect Editor, drawn in the 3D View sidebar and in Object Properties."""
 
     @classmethod
     def poll(cls, context):
-        return effect_root(context.active_object) is not None
+        return effect_root(_panel_object(context)) is not None
 
     def draw(self, context):
         layout = self.layout
         state = _state(context)
-        root = effect_root(context.active_object)
+        root = effect_root(_panel_object(context))
         row = layout.row(align=True)
         row.label(text=root.albam_asset.relative_path or root.name, icon="PARTICLES")
-        layout.operator("albam.efl_apply_edits", text="Apply", icon="PLAY")
+        row = layout.row(align=True)
+        row.operator("albam.efl_apply_edits", text="Apply", icon="PLAY")
+        row.prop(state, "live", toggle=True, icon="RECORD_ON" if state.live else "RECORD_OFF")
+        if state.live_error:
+            box = layout.box()
+            box.label(text="The last edit couldn't be applied:", icon="ERROR")
+            for line in state.live_error.split("\n")[:4]:
+                box.label(text=line[:120])
         layout.prop(context.scene.albam.import_options_efl, "darken_strength")
         missing = list(root.get("efl_missing_textures") or [])
         if missing:
@@ -1135,7 +1471,7 @@ class ALBAM_PT_EflEditor(bpy.types.Panel):
         box = layout.box()
         header = box.row()
         header.prop(state, "show_records", icon="TRIA_DOWN" if state.show_records else "TRIA_RIGHT", emboss=False)
-        active = record_object(context.active_object)
+        active = record_object(_panel_object(context))
         if state.show_records:
             if state.records_root != root or any(item.ob is None for item in state.records):
                 box.operator("albam.efl_sync_records", text="List this effect's records", icon="FILE_REFRESH")
@@ -1231,6 +1567,25 @@ class ALBAM_PT_EflEditor(bpy.types.Panel):
             layout.label(text="No keys: the field's plain value is used", icon="INFO")
 
 
+@blender_registry.register_blender_type
+class ALBAM_PT_EflEditor(_EflEditorDraw, bpy.types.Panel):
+    bl_category = "Albam [Beta]"
+    bl_idname = "ALBAM_PT_EflEditor"
+    bl_label = "Effect Editor"
+    bl_region_type = "UI"
+    bl_space_type = "VIEW_3D"
+
+
+@blender_registry.register_blender_type
+class ALBAM_PT_EflEditorObject(_EflEditorDraw, bpy.types.Panel):
+    """The same editor in the Properties editor's Object tab (follows the active or pinned object)."""
+    bl_idname = "ALBAM_PT_EflEditorObject"
+    bl_label = "Effect Editor"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "object"
+
+
 # -- auto-loading the active record -----------------------------------------------------------------
 
 _msgbus_owner = object()
@@ -1260,17 +1615,40 @@ def _subscribe():
 
 @persistent
 def _on_load(_dummy=None):
+    global _take_stock
     _kf_items.clear()
+    _path_items_cache.clear()
+    _pending.clear()
+    _queue.clear()
+    _known_uids.clear()
+    try:
+        objects = bpy.data.objects
+    except AttributeError:   # bpy.data is restricted while add-ons register at startup
+        objects = None
+    if objects is None:
+        _take_stock = True   # the first depsgraph update records them instead
+    else:
+        _known_uids.update(ob.session_uid for ob in objects)
+    forget_objects()   # the first depsgraph update scans: the loaded objects are known, so none is adopted
     _subscribe()
 
 
 def register_editor():
     _subscribe()
-    if _on_load not in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.append(_on_load)
+    _on_load()
+    for handlers, fn in ((bpy.app.handlers.load_post, _on_load),
+                         (bpy.app.handlers.depsgraph_update_post, _on_depsgraph)):
+        if fn not in handlers:
+            handlers.append(fn)
 
 
 def unregister_editor():
     bpy.msgbus.clear_by_owner(_msgbus_owner)
-    if _on_load in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.remove(_on_load)
+    if bpy.app.timers.is_registered(_live_apply):
+        bpy.app.timers.unregister(_live_apply)
+    for handlers, fn in ((bpy.app.handlers.load_post, _on_load),
+                         (bpy.app.handlers.depsgraph_update_post, _on_depsgraph)):
+        for handler in list(handlers):
+            if getattr(handler, "__name__", "") == fn.__name__ and \
+                    getattr(handler, "__module__", "") == fn.__module__:
+                handlers.remove(handler)

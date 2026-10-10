@@ -399,7 +399,8 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
     off), a missing texture is now under the Game Files roots (`found_missing_textures`), or with the operator's
     **Rebuild Everything** option (redo panel). After a rebuild the edited bytes are the new source, so Revert goes
     back to them, not to the game file. Add new build-time inputs to `built_changed`.
-- **Effect Editor** (`effect_editor.py`, sidebar panel "Effect Editor"): the active record (msgbus on the active
+- **Effect Editor** (`effect_editor.py`, sidebar panel "Effect Editor", and the same panel in Object Properties:
+  `_EflEditorDraw` mixin, `ALBAM_PT_EflEditor` / `ALBAM_PT_EflEditorObject`): the active record (msgbus on the active
   object, or Edit Record) is loaded into `scene.albam.efl_editor.fields`, one item per schema field / bit-field
   with a widget for its type (floats, ints, hex u32 words, text paths, BGRA colour pickers, enums for blend /
   shapes / axes / orders / types). Each edit writes the record's custom props right away; words and their
@@ -409,6 +410,27 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
   list (`ALBAM_UL_EflRecords` over `efl_editor.records`, kept in step by `sync_records`) to select, then Duplicate, Copy to (another imported effect; attaches to the same joint if its armature has it), Remove.
   Unverified fields (tiers other than dx9 / se) are hidden unless toggled. The panel can't be drawn headless;
   tests call `ALBAM_PT_EflEditor.draw` with a stub layout.
+  - **Live preview** (`efl_editor.live`, default on; 2026-10-10): every editor edit (`_on_item_edit`,
+    `write_keyframe`) calls `schedule_live_apply(root)`, and a `bpy.app.timers` timer (`_live_apply`, 0.2 s
+    debounce) runs `apply_to_scene` (replay, or rebuild when `built_changed`); errors land in `efl_editor.live_error`
+    (shown in the panel) instead of a popup. Operators use `live_apply_now`. Apply stays for Live off and for
+    transform / pose changes (nothing watches those). Headless tests call `_live_apply()` directly (timers don't
+    run in `-b`).
+  - **Blender's own tools on effect objects** (`_on_depsgraph`, a `depsgraph_update_post` handler that is read-only
+    and queues work for the same timer, `_queue` / `_run_job`): a record Empty copied with Shift+D or Ctrl+C / V is
+    found by `session_uid` (`_scan_objects`, run when `len(bpy.data.objects)` changes or after `forget_objects()`)
+    and `effect_export.adopt_duplicate` makes it a new record of its effect (or of the effect root it was parented
+    to: Copy to), with its own serial, `efl_raw` and rotation companion (`_make_new_record`, shared with the
+    Duplicate / Copy to operators); copies of linked `.efs` / `.ean` objects and of rotation companions are cut loose
+    (`efl_linked` / `efl_root` removed). A deletion (X) queues a `structure_changed` check, so the rebuild drops the
+    record. A game texture (image tagged `efl_texture`) swapped in an effect material's Image Texture node writes its
+    path into the records drawn with it (`_material_image_changed`, matching `material["efl_base_map"]`). A linked
+    strip / flipbook whose geometry updated (after Edit Mode) is applied. Tests drive the handler with a stub
+    depsgraph (`SimpleNamespace(updates=[...])`).
+  - **Path pickers**: path fields in `PATH_EXTENSIONS` (textures, ModelPath, AnimPath, strips) get a search button
+    (`albam.efl_pick_path`: the Game Files entries with that extension as game paths, plus the effect's linked
+    `.efs` / `.ean` objects) and texture fields an image dropdown (`AlbamEflFieldItem.image`, loaded `efl_texture`
+    images only; picking sets the path, typing a path selects the image).
   - **Flag fields** (`_FLAG_LABELS`, kind `flags`): TransMode, ColorFlag, AnimFlag, ModelAnimFlag, ParticleOptionFlag,
     LightAttribute and the particle CullingFlag are one checkbox per named bit; bits without a name keep their value and are shown as
     "other bits ... kept". Only bits with a DX9 reader get a checkbox.
@@ -472,7 +494,10 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
   panel (`ALBAM_PT_EanFlipbook`): sequence list, Select Frames (Edit Mode with that sequence selected), New Sequence
   from Selected, the sequence settings, Generate Grid. `_faces` reads through bmesh, because Edit Mode mesh data is
   empty. Untouched files export byte-identical (all 4,127 in plain Python, 300 sampled through Blender). Linked
-  flipbooks start hidden (`hide_set`); the Effect Editor's Linked files button unhides and selects them.
+  flipbooks start hidden (`hide_set`); the Effect Editor's Linked files button unhides and selects them. The eye-icon
+  state lives on the collection link, so `rebuild_effect` records it before moving the linked objects and
+  `_reuse_linked` restores it (`linked_hidden`); without that every rebuild (e.g. adding a keyframe) showed the
+  flipbook's frame grid.
 - **New `.efs` / `.ean`** (Effect Editor > Linked files: `albam.efs_new`, `albam.ean_new`; Image Editor > Albam >
   New Flipbook: `albam.ean_new_for_image`):
   - A new strip takes its points from a chosen curve or mesh (evaluated, every chain or spline a part, converted
@@ -630,6 +655,13 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
     point's `shape_on` is 1.
   - Model UV scroll (ModelAnimFlag 0x10): `offset += speed` per frame (ScrollU/V or their keyframes), wrapped to
     [-1, 1]; `ALBAM_EFL_Models_v2` adds it to the meshes' `uv1` (V negated).
+  - **Spawn flags** (verified 2026-10-10, schema notes; IDA names `calcRangeStrip*`, `calcSpawnOffset`):
+    `MoveOptionFlag` 0x1 COLLISION has no DX9 reader (collision = `CollParamOffset` set); `RangeOptionFlags` 0x1
+    EACH_FRAME numbers particles by spawning frame (`sim.simulate`: a frame's batch shares one RangeDivideNum slot /
+    ORDER strip index; no game file combines it with either); `uknRangeFlag` is `RangeDisperseType` (renamed,
+    `RENAMED_PROPS`); `RangeStripType` picks the sampler (0 point, 1 line, 2 / 3 curves = linear in the preview, 4
+    triangle, unused); `RangeStripFlag` 0x20 ALL_PARTS with RangeDivideNum spreads the slots across all parts
+    (`strip_point`), 0x40 SKINING isn't previewed. The editor shows them as checkboxes / enums.
   - **Life** (`EFL_LIFE_FRAME`, verified 2026-10-10, schema notes): Appear / Keep / Vanish frames, and `KeepOptions`
     = `HoldUntilEffectEnds` (SE KeepHoldFlag) + KeepFrame keyframe offset + `HoldFrameLimit` (SE KeepHoldFrame;
     renamed, `edit.RENAMED_PROPS` upgrades props stored under the old names). A held particle's Keep phase waits
@@ -682,7 +714,17 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
   (the generator keyframes 0x1D4/0x1D8/0x1DC are now KeyframeRange/Pos/RotParamOffset).
 - **Schema offsets are file offsets.** The DX9 IDB's `EFL_GENERATOR` and `EFL_PARTICLE_*` types were retyped to
   match them on 2026-10-05. The old declarations are in `Vibed/RE/type_backups/`.
-- **Self-relative offsets:** fields with `sub=` in the schema (rel16/rel32) point into the same block. Keyframe
+- **Self-relative offsets:** fields with `sub=` in the schema (rel16/rel32) point into the same block. A bit-field
+  can hold one too (`Bits.sub`; the life `KeyframeKeepFrameParamOffset` = bits 1-15 of `KeepOptions`): go through
+  `Struct.offset_fields()` / `offset_field(name)` rather than `struct.fields` when looking for offsets. Offsets are
+  never props (`block_props` / `apply_props` skip them); the keyframe write-back sets them.
+  - **Keyframe audit (2026-10-10):** every DX9 keyframe read goes through `getKeyframeTimer` / `calcKeyframe*`
+    (~60 callers). Matched against the schema: Line `0x54` was a colour keyframe for its second colour (PlaceColor
+    at 0x58; now `KeyframePlaceColorParamOffset`, no file uses it), Billboard `KeyframeAngleParamOffset` 0x190 is
+    read by `initParticleBillboard` (promoted to dx9). LiteBillboard / SizeBillboard (16 / 17) have readers but no
+    files and only their 0x170 common part is known (SizeBillboard reads keyframe offsets at 0x1D8 / 0x1DC), so
+    Change Type no longer offers them. 16-bit offsets are loaded as `dword & 0xFFFF`, so a scan for them must allow
+    that. Keyframe
   sub-blocks are a header dword (`EFL_KEYFRAME_INDEX`) followed by SE-layout keys, padded to 16 bytes. Key sizes:
   f32/color 12, u32 8, vec3 28.
 - Paths are stored without an extension, like `.mod` texture paths.

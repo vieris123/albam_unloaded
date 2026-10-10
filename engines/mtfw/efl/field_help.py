@@ -75,11 +75,17 @@ HELP = {
         '0 = random spawn positions. N > 0 = particles take N + 1 evenly spaced steps over the shape in spawn order '
         '(along the box axis, around the ring, top to bottom on a sphere), and on the strip.'
     ),
-    'gen:RangeOptionFlags': "Not understood yet; keep the game's value.",
+    'gen:RangeOptionFlags': (
+        'Spawn options (bits). 0x1 Each Frame: particles are numbered by spawning frame instead of one by one, so all'
+        ' the particles of one frame share one RangeDivideNum slot and one strip point (with RangeStripFlag Order or'
+        ' Reverse). Other bits have no reader in the DX9 game.'
+    ),
     'gen:RangeStripFlag': (
         'Strip spawn options (bits): 0x01 walk the strip in spawn order, 0x02 walk it in reverse (neither = random), '
-        '0x08 strip is a closed loop, 0x10 use the segment midpoint instead of a random spot, 0x20 pick a random part'
-        ' (ignores RangeStripPartsNo).'
+        '0x08 strip is a closed loop, 0x10 use the segment midpoint (or triangle centre) instead of a random spot, '
+        '0x20 all parts: pick a random part, or with RangeDivideNum spread the slots across every part in order '
+        '(ignores RangeStripPartsNo), 0x40 skinning: the strip follows the character model\'s skin (not shown in the '
+        'preview, which keeps the strip on the generator).'
     ),
     'gen:RangeStripPartsNo': (
         'Which part (curve) of the .efs strip to spawn on, counting from 0. Ignored when RangeStripFlag 0x20 (random '
@@ -125,7 +131,11 @@ HELP = {
         'Path of a .srq sound request file, without extension. When set, a sound is requested when the generator '
         'starts. Empty = no sound. Never used by DX9 effects.'
     ),
-    'gen:uknRangeFlag': "Not understood yet; keep the game's value.",
+    'gen:RangeDisperseType': (
+        "Spreads each frame's particles along the generator's movement: 0 none; 1 between the previous frame's "
+        'position and the current one; 2 the same from a sub-step position. Particle i of n moves i/n of the way, so'
+        ' a fast-moving generator leaves a trail of puffs instead of a clump. Not shown in the preview.'
+    ),
     'gen:UknRangeThing': (
         '[0] = how strongly RangeDirType bends the direction (0 = keep the Move direction, 1 = fully outward or '
         'inward). [1]-[3] = multipliers on the spawn position along X, Y, Z, for both the shape and the strip; 1 = '
@@ -509,7 +519,7 @@ HELP = {
     'ptcl:member_0x1ac': "Not understood yet; keep the game's value.",
     'ptcl:member_0x38': "Not understood yet; keep the game's value.",
     'ptcl:member_0x3c': "Not understood yet; keep the game's value.",
-    'ptcl:member_0x54': "Not understood yet; it is always 0 in the game's files, so keep it at 0.",
+    'ptcl:member_0x56': "Not understood yet; it is always 0 in the game's files, so keep it at 0.",
     'ptcl:member_chain_0x02': "Not used by the game's rope code; keep the game's value.",
     'ptcl:member_fix_0x64': "Not understood yet; keep the game's values.",
     'ptcl:member_line_0x34': "Not understood yet; keep the game's value.",
@@ -833,8 +843,8 @@ HELP = {
         'at once and the particle fades out. 0 = no limit (hold until released).'
     ),
     'life:KeyframeKeepFrameParamOffset': (
-        'Offset to a keyframe curve for KeepFrame, read when the particle spawns. Life blocks in the game files never '
-        'carry keyframe data, so leave it 0.'
+        'Keyframe for KeepFrame, read once when the particle spawns (it replaces KeepFrame). Edit it in the Keys tab '
+        "(\"KeepFrame (life, u32)\"). No game file uses it."
     ),
     'life:VanishFrame': (
         'Fade-out time in frames: after the Keep phase the alpha ramps down to 0 over this many frames, then the '
@@ -916,7 +926,8 @@ HELP = {
     'move:MoveOptionFlag': (
         "Motion options (bits). 2: gravity ignores the effect's scale. 4: high accuracy, the generator tracks its own"
         " movement every frame. 8: always correct, Add/Mul particles are carried along by the generator's movement "
-        '(needs bit 4 or a generator keyframe) instead of staying where they were emitted.'
+        '(needs bit 4 or a generator keyframe) instead of staying where they were emitted. 1 (collision) is ignored '
+        'by the DX9 game: particles collide whenever the record has collision settings (More tab).'
     ),
     'move:MPathChain0879': "Not understood yet; keep the game's value.",
     'move:MPathChain087a': "Not understood yet; keep the game's value.",

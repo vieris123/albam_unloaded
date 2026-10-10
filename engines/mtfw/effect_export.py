@@ -492,14 +492,59 @@ class ALBAM_OT_EflApplyEdits(bpy.types.Operator):
         return {"FINISHED"}
 
 
-def _copy_record_object(context, source, root, parent):
-    """New record Empty for root, carrying source's edits and its current block data."""
-    src_root = effect_root(source)
+def _source_raw(source):
+    """{slot: (type, bytes)} of a record object's current blocks (its source record, or its own raw blocks for a new
+    record), with a pending Change Type applied."""
     raw = _raw_of(source)
     if raw is None:
-        efl = EffectList.from_bytes(source_bytes(src_root))
+        efl = EffectList.from_bytes(source_bytes(effect_root(source)))
         raw = record_raw(efl.records[int(source["efl_record"])])
     raw.update(_replaced_of(source) or {})
+    return raw
+
+
+def _make_new_record(ob, source, root):
+    """Turn ob (a record Empty copied from source) into a new record of root: its own serial, its source's current
+    block data as efl_raw, and its own rotation companion if it sits on a bone (the copy's constraint still points at
+    the source's)."""
+    ob["efl_record"] = NEW_RECORD
+    ob["efl_root"] = root
+    ob["efl_serial"] = max([int(o.get("efl_serial", 0)) for o in all_record_objects(root) if o != ob] + [0]) + 1
+    ob["efl_raw"] = {slot: {"type": btype, "data": base64.b64encode(data).decode("ascii")}
+                     for slot, (btype, data) in _source_raw(source).items()}
+    for key in ("efl_replaced", "efl_filtered", "efl_filter_hidden"):
+        ob.pop(key, None)
+    ob.pop(ROT_HANDLE_KEY, None)
+    constraint = ob.constraints.get(ROT_CONSTRAINT)
+    if constraint is not None:
+        ob.constraints.remove(constraint)
+    source_handle = rotation_handle(source)
+    if source_handle is not None and ob.parent_type == "BONE" and ob.parent is not None:
+        rotation = (effect_root(source).matrix_world.inverted_safe() @ source_handle.matrix_world).to_quaternion()
+        attach_rotation_handle(ob, root, rotation)
+    return ob
+
+
+def adopt_duplicate(ob, source):
+    """A record Empty the user duplicated with Blender's own tools (Shift+D, Ctrl+C / Ctrl+V) becomes a new record
+    of its effect: parented to another effect's root, it becomes a record of that effect instead (Copy to)."""
+    root = ob.parent if ob.parent is not None and ob.parent.albam_asset.extension == "efl" else effect_root(source)
+    if root is None:
+        return None
+    source_action = source.animation_data.action if source.animation_data is not None else None
+    if source_action is not None and ob.animation_data is not None and ob.animation_data.action == source_action:
+        ob.animation_data.action = source_action.copy()   # generator keyframes of its own
+    _make_new_record(ob, source, root)
+    if root != effect_root(source):   # pasted into another effect: live in its collection
+        for collection in list(ob.users_collection):
+            collection.objects.unlink(ob)
+        for collection in root.users_collection:
+            collection.objects.link(ob)
+    return ob
+
+
+def _copy_record_object(context, source, root, parent):
+    """New record Empty for root, carrying source's edits and its current block data."""
     ob = bpy.data.objects.new(source.name + "+", None)
     for collection in root.users_collection:
         collection.objects.link(ob)
@@ -510,11 +555,6 @@ def _copy_record_object(context, source, root, parent):
             value = source[key]
             ob[key] = value.to_dict() if hasattr(value, "to_dict") else (
                 value.to_list() if hasattr(value, "to_list") else value)
-    ob["efl_record"] = NEW_RECORD
-    ob["efl_root"] = root
-    ob["efl_serial"] = max([int(o.get("efl_serial", 0)) for o in all_record_objects(root)] + [0]) + 1
-    ob["efl_raw"] = {slot: {"type": btype, "data": base64.b64encode(data).decode("ascii")}
-                     for slot, (btype, data) in raw.items()}
     ob.rotation_mode = source.rotation_mode
     joint = -1
     if source.parent is not None and source.parent_type == "BONE" and source.parent.type == "ARMATURE":
@@ -534,19 +574,13 @@ def _copy_record_object(context, source, root, parent):
         if joint >= 0:
             ob["efl_unresolved_joint"] = joint
     ob.matrix_basis = source.matrix_basis.copy()
-    ob.pop(ROT_HANDLE_KEY, None)
-    for constraint in list(ob.constraints):
-        ob.constraints.remove(constraint)
-    source_handle = rotation_handle(source)
-    if source_handle is not None and ob.parent_type == "BONE" and ob.parent is not None:
-        rotation = (effect_root(source).matrix_world.inverted_safe() @ source_handle.matrix_world).to_quaternion()
-        attach_rotation_handle(ob, root, rotation)
-    return ob
+    return _make_new_record(ob, source, root)
 
 
 @blender_registry.register_blender_type
 class ALBAM_OT_EflDuplicateRecord(bpy.types.Operator):
-    """Add a copy of the active record (generator, particle, life and move, with their edits) to its effect"""
+    """Add a copy of the active record (generator, particle, life and move, with their edits) to its effect.
+    Shift+D or Ctrl+C / Ctrl+V on the record's Empty does the same"""
     bl_idname = "albam.efl_duplicate_record"
     bl_label = "Duplicate Record"
     bl_options = {"REGISTER", "UNDO"}
@@ -572,7 +606,7 @@ class ALBAM_OT_EflDuplicateRecord(bpy.types.Operator):
 
 @blender_registry.register_blender_type
 class ALBAM_OT_EflRemoveRecord(bpy.types.Operator):
-    """Remove the active record from its effect"""
+    """Remove the active record from its effect (deleting the record's Empty with X does the same)"""
     bl_idname = "albam.efl_remove_record"
     bl_label = "Remove Record"
     bl_options = {"REGISTER", "UNDO"}

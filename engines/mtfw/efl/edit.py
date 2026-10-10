@@ -142,12 +142,14 @@ def block_props(block):
         if f.name in fields and not f.sub:
             props[f.name] = to_prop(fields[f.name])
     for name, value in block.bits().items():
-        props[name] = to_prop(value)
+        if not block.struct.bits_by_name[name].sub:   # offsets are layout, written by the keyframe write-back
+            props[name] = to_prop(value)
     return props
 
 
 # fields renamed since older imports stored their props: old name -> new name
-RENAMED_PROPS = {"KeepFlags": "KeepOptions", "KeepHoldFlag": "HoldUntilEffectEnds", "KeepHoldFrame": "HoldFrameLimit"}
+RENAMED_PROPS = {"KeepFlags": "KeepOptions", "KeepHoldFlag": "HoldUntilEffectEnds", "KeepHoldFrame": "HoldFrameLimit",
+                 "uknRangeFlag": "RangeDisperseType"}
 
 
 def upgrade_props(props):
@@ -185,8 +187,8 @@ def apply_props(block, props):
                                             lambda f, v: block.set(f.name, v))
     problems += field_problems
     for b in block.struct.bits:
-        if b.name not in bits or b.name not in props or _same(bits[b.name], props[b.name]):
-            continue
+        if b.sub or b.name not in bits or b.name not in props or _same(bits[b.name], props[b.name]):
+            continue   # an offset in props stored by older imports is ignored (layout, see apply_keyframes)
         try:
             new = _scalar(0, props[b.name])
             if not 0 <= new < 1 << b.width:
@@ -271,8 +273,8 @@ def apply_keyframes(block, props):
     subs = {sub.field.name: sub for sub in block.subblocks() if sub.kind == "kf"}
     for name, prop in props.items():
         name = schema.FIELD_ALIASES.get(name, name)   # keyframes stored under an older field name
-        f = block.struct.by_name.get(name)
-        if f is None or not f.sub or not f.sub.startswith("kf") or f.offset + f.size > len(block.data):
+        f = block.struct.offset_field(name)
+        if f is None or not f.sub.startswith("kf") or not block.has(name):
             problems.append(f"{name} isn't a keyframe offset of {block.struct.name}")
             continue
         sub = subs.get(name)
@@ -305,6 +307,8 @@ def apply_keyframes(block, props):
             block.data.extend(data)
             rel = target - f.rel_base
             try:
+                if getattr(f, "width", None) and rel >= 1 << f.width:   # bits: set() would silently mask it
+                    raise struct.error("offset too large")
                 block.set(name, rel)
             except struct.error:
                 del block.data[size_before:]

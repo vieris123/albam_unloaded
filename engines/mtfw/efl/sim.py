@@ -548,8 +548,16 @@ def strip_point(gen, strip_parts, rng, serial):
     if not strip_parts:
         return None
     flags, kind = gen.get("RangeStripFlag"), gen.get("RangeStripType")
-    part_no = rng.randrange(len(strip_parts)) if flags & 0x20 else min(max(gen.get("RangeStripPartsNo"), 0),
-                                                                      len(strip_parts) - 1)
+    divide = gen.get("RangeDivideNum")
+    spread = None
+    if flags & 0x20 and divide and kind != 0:   # ALL_PARTS + RangeDivideNum: the slots run across every part
+        k = serial % divide if flags & 0x01 else (divide - 1 - serial % divide if flags & 0x02 else rng.randrange(divide))
+        x = k * len(strip_parts) / divide
+        part_no, spread = int(x), x - int(x)
+    elif flags & 0x20:   # sub_99B270: a random part
+        part_no = rng.randrange(len(strip_parts))
+    else:
+        part_no = min(max(gen.get("RangeStripPartsNo"), 0), len(strip_parts) - 1)
     pts = strip_parts[part_no]
     if not pts:
         return None
@@ -566,8 +574,10 @@ def strip_point(gen, strip_parts, rng, serial):
         return pts[pick(n)]
     closed = bool(flags & 0x08)
     segs = n if closed else n - 1
-    divide = gen.get("RangeDivideNum")
-    if divide:
+    if spread is not None:
+        x = spread * segs
+        seg, t = min(int(x), segs - 1), x - min(int(x), segs - 1)
+    elif divide:
         k = pick(divide)
         x = k * n / divide if closed else (k * (n - 1) / (divide - 1) if divide > 1 else 0.0)
         seg, t = int(x), x - int(x)
@@ -648,6 +658,7 @@ class _Template:
         self.move_keys = keyframes_of(record.move, {**_MOVE_KEYS, "KeyframeReleaseFrameParamOffset": "release"})
         self.path_ofs = keyframes_of(record.move, {"KeyframeOfsParamOffset": "ofs"}).get("ofs")
         self.range_key = keyframes_of(record.gen, {"KeyframeRangeParamOffset": "range"}).get("range")
+        self.keep_key = keyframes_of(record.life, {"KeyframeKeepFrameParamOffset": "keep"}).get("keep")
         self.line_ext = _line_extension(record.ptcl)
         self.cloth_ext = _cloth_extension(record.ptcl)
         self.line_keys = keyframes_of(record.ptcl, {"KeyframeHeadSizeParamOffset": "head_size",
@@ -704,6 +715,12 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
     life_frames = None
     if life is not None and life.type in (1, 2):
         life_frames = tuple(_ru(rng, life.get(k)) for k in ("AppearFrame", "KeepFrame", "VanishFrame"))
+        if template.keep_key is not None:   # the keyframe replaces KeepFrame, evaluated once at spawn
+            kf = template.keep_key
+            timer = 0 if kf.ref_type in (0, 5, 6, 7) else (max(birth - 1, 0) if kf.ref_type == 1 else birth)
+            keep = kfm.evaluate(kf, timer, kfm.draw_rates(kf, rng))
+            if keep is not None:
+                life_frames = (life_frames[0], max(int(keep), 0), life_frames[2])
         if life.get("HoldUntilEffectEnds"):   # the Keep phase waits for the effect to end (moveParticleLifeFrame)
             appear, _keep, vanish = life_frames
             limit = life.get("HoldFrameLimit")   # runs out -> straight to Vanish; 0 = no limit
@@ -1645,14 +1662,19 @@ def simulate(record, seed=0, max_frames=300, pat_counts=(1,), strip_points=None,
     template.max_frames = max_frames
     particles = []
     divide = record.gen.get("RangeDivideNum")
-    serial = 0
+    # a particle's serial (openParticle 0x9DF333) picks its RangeDivideNum slot and ORDER strip index: the particle
+    # count, or with RangeOptionFlags 1 EACH_FRAME the count of spawning frames (a frame's batch shares one slot)
+    each_frame = bool(record.gen.get("RangeOptionFlags") & 1)
+    serial = frames_done = 0
     for frame, count in emission_schedule(record.gen, rng, max_frames):
         for _ in range(count):
-            t = (serial % (divide + 1)) / divide if divide else rng.random()
+            number = frames_done if each_frame else serial
+            t = (number % (divide + 1)) / divide if divide else rng.random()
             serial += 1
-            particles.append(spawn(template, rng, frame, t, pat_counts or (1,), serial - 1))
+            particles.append(spawn(template, rng, frame, t, pat_counts or (1,), number))
             if len(particles) >= MAX_PARTICLES:
                 return particles
+        frames_done += 1
     return particles
 
 
