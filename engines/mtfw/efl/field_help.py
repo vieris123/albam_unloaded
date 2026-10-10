@@ -16,7 +16,7 @@ HELP = {
     'gen:ScaleMatRelationType': (
         'Like RelationType, but for the matrix the particles take their size from when World Scale (Particle tab) is '
         'on: 2 = follow the parent joint\'s position but keep a world rotation, 3 = ignore the parent. The preview '
-        'does not model World Scale yet.'
+        "sizes World Scale particles by the generator's whole world scale and ignores this field."
     ),
     'gen:AxisType': (
         "No effect on a record's generator: the game reads it only for the effect's unit generator (6 = use its own "
@@ -97,8 +97,10 @@ HELP = {
         'Strip spawn options (bits): 0x01 walk the strip in spawn order, 0x02 walk it in reverse (neither = random), '
         '0x08 strip is a closed loop, 0x10 use the segment midpoint (or triangle centre) instead of a random spot, '
         '0x20 all parts: pick a random part, or with RangeDivideNum spread the slots across every part in order '
-        '(ignores RangeStripPartsNo), 0x40 skinning: the strip follows the character model\'s skin (not shown in the '
-        'preview, which keeps the strip on the generator).'
+        '(ignores RangeStripPartsNo), 0x04 ignore normals: the strip\'s normals don\'t steer the particles\' '
+        'direction (see UknRangeThing [0]), 0x40 skinning: the strip sits on a joint of the character model (the '
+        "generator's joint, or joint 0 for an unattached generator) instead of on the generator, so the generator's "
+        'own position and rotation do not move it (the preview places it there when an armature was picked).'
     ),
     'gen:RangeStripPartsNo': (
         'Which part (curve) of the .efs strip to spawn on, counting from 0. Ignored when RangeStripFlag 0x20 (random '
@@ -109,8 +111,10 @@ HELP = {
         'UknRangeThing [1]-[3]), on top of the RangeType offset. Empty = no strip.'
     ),
     'gen:RangeStripType': (
-        'How a spawn point is picked on the RangeStripPath strip: 0 = on one of its vertices, 1-3 = somewhere along a'
-        ' segment between two vertices.'
+        'How a spawn point is picked on the RangeStripPath strip: 0 = on one of its vertices; somewhere along a '
+        'segment between two vertices: 1 on the straight line, 2 on a curve through the next vertex as well '
+        '(hermite; an open strip\'s last segment stays straight), 3 on a smooth curve through four neighbouring '
+        'vertices. 4 (triangle) is shown as 1; no game file uses it.'
     ),
     'gen:RangeType': (
         'Shape of the spawn area, sized by Range: 0 point (at the generator), 1-3 box (the axis X/Y/Z is the one '
@@ -147,12 +151,13 @@ HELP = {
     'gen:RangeDisperseType': (
         "Spreads each frame's particles along the generator's movement: 0 none; 1 between the previous frame's "
         'position and the current one; 2 the same from a sub-step position. Particle i of n moves i/n of the way, so'
-        ' a fast-moving generator leaves a trail of puffs instead of a clump. Not shown in the preview.'
+        ' a fast-moving generator leaves a trail of puffs instead of a clump. The preview needs the emitter motion '
+        'recorded (playing the timeline does it) to show it.'
     ),
     'gen:UknRangeThing': (
-        '[0] = how strongly RangeDirType bends the direction (0 = keep the Move direction, 1 = fully outward or '
-        'inward). [1]-[3] = multipliers on the spawn position along X, Y, Z, for both the shape and the strip; 1 = '
-        'unchanged.'
+        '[0] = how strongly the direction bends toward a target (0 = keep the Move direction, 1 = fully): outward or '
+        'inward for RangeDirType, or along the strip\'s normal for strip spawns (unless RangeStripFlag 0x04). '
+        '[1]-[3] = multipliers on the spawn position along X, Y, Z, for both the shape and the strip; 1 = unchanged.'
     ),
     'gen:VibOptionFlag': 'Bit 0x1 = stop the rumble when the effect finishes. Never used by DX9 effects.',
     'gen:VibPriority': 'Priority passed with the rumble request. Never used by DX9 effects.',
@@ -336,8 +341,9 @@ HELP = {
         "from, 4 up to this point); point 0 is the head. On PolygonStrip it isn't read by the DX9 game."
     ),
     'ptcl:ColorPlaceType': (
-        'Colour gradient across the mesh rows: 0 none, 1 linear, 2 peak at HoriColorPlaceNo, 3 from that row, 4 up to'
-        ' that row.'
+        'Colour gradient across the mesh rows, from the particle colour (0) to PlaceColor (1): 1 ramps from the first '
+        'row to the last, 2 peaks at row HoriColorPlaceNo (both ends keep the particle colour), 3 ramps from that row '
+        'to the last, 4 ramps from the first row up to it. 0 = no gradient. ColorPlaceInpType eases it.'
     ),
     'ptcl:CullingFlag': (
         'Culling switches. Distance / Angle Fade (0x1) turns on the fade set in the culling block (More tab): the '
@@ -453,7 +459,9 @@ HELP = {
         'Polygon: added to Height every frame; if the height shrinks to 0 or less the particle is removed. PrimModel:'
         ' added to the two Height values every frame. Ignored when the value has a keyframe (unless it is init-only).'
     ),
-    'ptcl:HoriColorPlaceNo': 'The row used as the turning point of the ColorPlaceType gradient.',
+    'ptcl:HoriColorPlaceNo': (
+        'The row (counted from 0, out of HoriDivNum) used as the turning point of the ColorPlaceType gradient.'
+    ),
     'ptcl:HoriDivNum': (
         'Number of rows along the axis: bands between the two rings (Ring), latitude bands (Sphere) or rows (Grid).'
     ),
@@ -586,19 +594,21 @@ HELP = {
         'original effect sets it.'
     ),
     'ptcl:NormAttenuateAngleEnd': (
-        'Where the rim fade (NormAttenuateFlag) ends, as an angle between the surface and the view. Units and '
-        "direction aren't confirmed; adjust it relative to the game's values."
+        'Rim fade (NormAttenuateFlag): the angle in radians between the surface normal and the direction to the '
+        'camera at which the surface is fully transparent. 1.571 = edge-on.'
     ),
     'ptcl:NormAttenuateAngleStart': (
-        'Where the rim fade (NormAttenuateFlag) starts, as an angle between the surface and the view. Units and '
-        "direction aren't confirmed; adjust it relative to the game's values."
+        'Rim fade (NormAttenuateFlag): up to this angle in radians between the surface normal and the direction to '
+        'the camera the surface is fully visible; it fades out from here to NormAttenuateAngleEnd.'
     ),
     'ptcl:NormAttenuateCurve': (
-        "Probably the easing curve of the rim fade between its start and end angle. Keep the game's value."
+        'Shape of the rim fade between its start and end angle: two control values of an ease curve from 0 to 1 '
+        '(0, 1 = smooth; 1, 1 = stays solid until close to the end angle; 0, 0 = fades early).'
     ),
     'ptcl:NormAttenuateFlag': (
-        "Rim fade: any non-zero value fades the mesh's alpha by the angle between its surface and the view, over the "
-        'NormAttenuateAngle range. Including the value 2 bit makes it one-sided.'
+        "Rim fade (Ring, TexRing, Sphere, TexSphere): any non-zero value fades the mesh's alpha by the angle between "
+        'its surface and the view, over the NormAttenuateAngle range, so the shape thins out toward its silhouette. '
+        "With the 2 bit (value 3) it is one-sided: the side facing away from the camera fades out completely."
     ),
     'ptcl:ParticleOptionFlag': (
         'Drawing options. Draw order: Sort Each Particle sorts every particle by its own depth (otherwise the whole '
@@ -652,16 +662,16 @@ HELP = {
     ),
     'ptcl:PlaceColor': (
         'Second colour for the gradient along a line or sword trail: the head uses the particle colour and the '
-        'gradient blends toward this one (see ColorPlaceType). Each particle picks a random colour between the two '
-        'entries. On PolygonStrip it is the tail colour when ColorPlaceType is not 0.'
+        'gradient blends toward this one (see ColorPlaceType). The two entries are picked from like Color0 / Color1 '
+        '(by ColorFlag). On PolygonStrip it is the tail colour when ColorPlaceType is not 0.'
     ),
     'ptcl:PlaceColor1': (
-        'Probably the first colour of the ColorPlaceType gradient across the mesh rows. Has no effect when '
-        'ColorPlaceType is 0.'
+        'Colour the ColorPlaceType gradient across the mesh rows blends toward (from the particle colour). With '
+        'PlaceColor2 it is picked like Color0 / Color1 (by ColorFlag). Has no effect when ColorPlaceType is 0.'
     ),
     'ptcl:PlaceColor2': (
-        'Probably the second colour of the ColorPlaceType gradient across the mesh rows. Has no effect when '
-        'ColorPlaceType is 0.'
+        'Second entry of the gradient colour pair: ColorFlag mixes PlaceColor1 toward it like Color1. Has no effect '
+        'when ColorPlaceType is 0.'
     ),
     'ptcl:PlaceSize': (
         'Half-width of the Polyline ribbon at the other end of the width gradient, in cm, multiplied by the particle '
@@ -864,8 +874,9 @@ HELP = {
         "KeepFrame down. It's released when the effect is ended by whatever spawned it (for example the attack "
         'animation finishing), when a path move reaches its end with PathOptionFlag 4, when it collides with CollFlag '
         '4, or when Hold Frame Limit runs out; then it stays KeepFrame more frames and fades out over VanishFrame. '
-        'Used for glows and trails that last exactly as long as a move. The preview has no owner to end the effect, '
-        'so held particles stay until the end of the simulated range.'
+        'Used for glows and trails that last exactly as long as a move. In the preview, End Effect (Effect Editor, '
+        'Spawn Filter box) sets when the effect ends; without it held particles stay until the end of the simulated '
+        'range.'
     ),
     'life:HoldFrameLimit': (
         'With Hold Until Effect Ends: the longest the hold may last, in frames. When it runs out the Keep phase ends '
@@ -976,8 +987,8 @@ HELP = {
         'generator starts, so all particles of one emission share it.'
     ),
     'move:PathCurveDivideNum': (
-        'Probably how many pieces each curve segment is split into for hermite/spline paths when the game measures '
-        "and samples the curve. Keep the game's value."
+        'Hermite / spline paths: how many steps each curve segment is split into when the game measures the curve '
+        'to move particles along it at an even speed. More = more even.'
     ),
     'move:PathLength': (
         "PathLine only: the line's length in cm. The particle stops at the end, unless PathOptionFlag says to release"
@@ -998,8 +1009,9 @@ HELP = {
     'move:PathStripPartsNo': 'Which curve (part) of the .efs file to follow, counting from 0.',
     'move:PathStripPath': 'The .efs path curve the particles follow, as a game path without the extension.',
     'move:PathStripType': (
-        'How the .efs curve is interpolated between its points: 1 linear, 2 hermite, 3 spline. The Blender preview '
-        'always uses linear.'
+        'How the .efs curve is interpolated between its points: 1 linear, 2 hermite (a curve through each point and '
+        'the next; an open strip\'s last segment stays straight), 3 spline (a smooth curve through four neighbouring '
+        'points).'
     ),
     'move:PreUpdateLoopNum': (
         'Rope simulation steps run when it spawns, so it starts already settled (e.g. hanging) instead of straight. '

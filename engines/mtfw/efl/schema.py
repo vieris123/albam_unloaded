@@ -233,11 +233,16 @@ GENERATOR = Struct("EFL_GENERATOR", 0x1E0, "dx9", [
       "SE RANGE_DISPERSE_TYPE 0 NONE, 1 OLD, 2 SUB: uknGenBehaviorFunc2 0x998F00 shifts each spawn by (previous / "
       "sub-step generator position - current) x its place in the frame's batch (i / count); 2 also sets mFlags 0x8000"),
     F(0xCC, "RangeStripType", "u8", "dx9",
-      "sampler (sub_963220): 0 point, 1 linear segment, 2 3-point curve, 3 4-point cubic (sub_ADC1E0), 4 triangle"),
+      "sampler (sub_963220): 0 point, 1 linear segment, 2 hermite on seg, seg + 1 with tangents P1 - P0 / P2 - P1 "
+      "(sub_ADBED0; an open strip's last segment is linear), 3 the cubic through a 4-point window at u = offset + t "
+      "(sub_ADC1E0 / sub_8D40F0 Lagrange), 4 triangle; positions and normals alike (efs.curve_point)"),
     F(0xCD, "RangeStripFlag", "u8", "dx9",
       "rEffectStrip::STRIP_FLAG (sub_99B270 / 99A8A0 / 99AFD0): 1 ORDER, 2 REVERSE, 8 PATH_LOOP, 0x10 CENTER_FIX "
       "(midpoint / centroid), 0x20 ALL_PARTS (random part; with RangeDivideNum the slots run across all parts), "
-      "0x40 SKINING (points follow the owner model's skinning); 4 NORM_OFF no reader found"),
+      "0x40 SKINING (DX9 .efs have JointNum 0, so sub_ADA120 / sub_AD9F40 put the strip on one owner joint, ParentNo or "
+      "the owner's joint, in world space without the generator's Pos / Quat); 4 NORM_OFF: without it the sampled "
+      "normal steers the direction (initParticle 0x97121A sets particle flag 0x80, movevel_transform blends calcDir "
+      "toward it by UknRangeThing[0])"),
     F(0xCE, "RangeStripPartsNo", "s16", "dx9", "the part sampled unless ALL_PARTS"),
     F(0xD0, "RangeStripPath", "str64", "dx9", ".efs, createGeneratorResources"),
     F(0x110, "UknRangeThing", "rangef[4]", "dx9", "[0] = range-dir blend factor, [1..3] = spawn-shape scale (sub_999040)"),
@@ -469,9 +474,11 @@ PTCL_TAILS = {
     ]),
     6: ("PrimModel", 0x25C, "dx9", [
         F(0x170, "PrimFlags", "u32", "dx9", "nibble word"),
-        F(0x174, "HoriColorPlaceNo", "u16", "dx9"),
+        F(0x174, "HoriColorPlaceNo", "u16", "dx9", "place_no of calc_color_gradient over rows 0..HoriDivNum (every "
+          "build*PrimModel* builder: row k -> lerp(colour, colour B, gradient(k)))"),
         F(0x176, "PrimFlags2", "u16", "se", "RotResetFlag / ModelBillboardOrder / LookAt; no DX9 reader"),
-        F(0x178, "PlaceColor1", "color", "dx9"),
+        F(0x178, "PlaceColor1", "color", "dx9", "colour B pair, rolled by calcSrcColor with ColorFlag (or the 0x240 "
+          "keyframe) only when ColorPlaceType != 0 (initParticlePrimModel 0x97BE70 -> particle +0xC4)"),
         F(0x17C, "PlaceColor2", "color", "dx9"),
         F(0x180, "RotDivNum", "u16", "dx9"),
         F(0x182, "RotTexDivNum", "u16", "dx9"),
@@ -491,7 +498,10 @@ PTCL_TAILS = {
         F(0x220, "HeightAdd", "rangef[2]", "dx9"),
         F(0x230, "NormAttenuateAngleStart", "f32", "dx9"),
         F(0x234, "NormAttenuateAngleEnd", "f32", "dx9"),
-        F(0x238, "NormAttenuateCurve", "easecurve", "se"),
+        F(0x238, "NormAttenuateCurve", "easecurve", "dx9",
+          "MtEaseCurve::easeIn 0x8EE7E0: cubic Bezier 0, p1, p2, 1 of t = (AngleEnd - acos(n . to-eye)) / (AngleEnd - "
+          "AngleStart); 1 below AngleStart, 0 from AngleEnd; |dot| unless NormAttenuateFlag bit 2 (radians; "
+          "buildPrimModelRingAttenuate 0x9CDF70, the alpha of the two ring edges lerped along each column)"),
         F(0x240, "KeyframePlaceColorParamOffset", "rel32", "dx9", sub="kf:color"),
         F(0x244, "KeyframeRotParamOffset", "rel32", "dx9", sub="kf:vec3"),
         F(0x248, "KeyframeModelScaleParamOffset", "rel32", "dx9", sub="kf:vec3"),
@@ -628,7 +638,8 @@ LIFE = Struct("EFL_LIFE_FRAME", 0x10, "dx9", [
       "SE KeepHoldFrame: counted down while held; reaching 0 ends the Keep phase at once; 0 = no limit "
       "(1,433 of the 1,506 holds)"),
 ])
-LIFE_TYPES = {1: "FrameAlpha", 2: "FrameColor", 3: "KeyframeAlpha", 4: "KeyframeColor"}   # SE rEffectList::LIFE_TYPE
+# SE rEffectList::LIFE_TYPE; the colour types fade the rgb instead of the alpha (sub_980340, colours A and B)
+LIFE_TYPES = {1: "FrameAlpha", 2: "FrameColor", 3: "KeyframeAlpha", 4: "KeyframeColor"}
 
 # --- move param (slot 3) -- Vibed/RE/particle_move_param.md "On-disk move param" -------------------
 
@@ -649,7 +660,8 @@ MOVE_COMMON_BITS = [
 MOVE_BASE = [
     F(0x10, "Rot", "rangef[3]", "dx9"),
     F(0x28, "Speed", "rangef", "dx9"),
-    F(0x30, "Gravity", "rangef", "dx9"),
+    F(0x30, "Gravity", "rangef", "dx9", "fall along the world Y (moveParticleMoveAdd 0x996160), x the generator's world "
+      "Y scale unless MoveOptionFlag 2 (initParticleMoveAdd 0x972F00)"),
     F(0x38, "KeyframeRotParamOffset", "rel16", "dx9", sub="kf:vec3"),
     F(0x3A, "KeyframeSpeedParamOffset", "rel16", "dx9", sub="kf:f32"),
     F(0x3C, "KeyframeFallSpeedParamOffset", "rel16", "dx9", sub="kf:f32"),
@@ -701,10 +713,11 @@ MOVE_TAILS = {
     2: ("Mul", 0x48, [F(0x40, "SpeedCoef", "rangef", "dx9", "speed *= coef")], "base"),
     3: ("PathStrip", 0xC0, [
         F(0x70, "Distance", "rangef", "dx9"),
-        F(0x78, "PathStripType", "u8", "dx9", "STRIP_TYPE: 1 linear, 2 hermite, 3 spline"),
+        F(0x78, "PathStripType", "u8", "dx9", "STRIP_TYPE: 1 linear, 2 hermite, 3 spline (the RangeStrip curves; "
+          "calcParticleMovePathStripPos 0x975440 over the calcPathStripLength 0x9DE470 arc-length table)"),
         F(0x79, "PathStripFlag", "u8", "dx9", "STRIP_FLAG: 0x08 PATH_LOOP, 0x40 SKINING"),
         F(0x7A, "PathStripPartsNo", "u16", "dx9"),
-        F(0x7C, "PathCurveDivideNum", "u32", "dx9"),
+        F(0x7C, "PathCurveDivideNum", "u32", "dx9", "length-table steps per curve segment (calcPathStripLength)"),
         F(0x80, "PathStripPath", "str64", "dx9", ".efs"),
     ], "path"),
     4: ("PathChain", 0x110, [

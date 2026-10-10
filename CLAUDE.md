@@ -622,25 +622,26 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
     shortest rotation taking that axis onto the move direction (None: the spawn direction through the current
     generator; Add / Mul / paths: the frame-to-frame position change). Game world -> Blender is the constant
     `GAME_TO_BLENDER` (as `world_axes`). Polygon uses the same rules (`sub_988B00`, without MDLSCL_AFTER;
-    renderPolygon passes the particle's stored move flags +0xEE and direction), so kind 2 gets `orient` too.
-    PolygonStrip (also sub_988B00) and Polygon camera facing (PolygonBillBoardType 1 / 3, 469 particles) aren't
-    modelled.
-  - **Scale after rotation** (0x40000 MDLSCL_AFTER, 904 Model / PrimModel particles with a non-uniform scale): node
-    groups `ALBAM_EFL_Particles_v5` / `ALBAM_EFL_Models_v3` end with `_after_scale`: position = p_center + (position -
-    p_center) x scale_after (point attributes; (1, 1, 1) otherwise, and ModelScale then goes into scale3). The axes are
-    the points object's: right for Move None (parented to the generator), approximate for world-space particles.
+    renderPolygon passes the particle's stored move flags +0xEE and direction), so kind 2 gets `orient` too, and so
+    does PolygonStrip (15) for its edge axis (`effect_sim._strip_rotation`, see Preview additions 2026-10-10).
+  - **Scale after rotation** (0x40000 MDLSCL_AFTER, 904 Model / PrimModel particles with a non-uniform scale;
+    calcParticleMatrix builds R . S instead of S . R before the generator basis, column form `G . S . R`): node groups
+    `ALBAM_EFL_Particles_v6` / `ALBAM_EFL_Models_v4` end with `_after_scale`: position = p_center + F (scale_after x
+    F^-1 (position - p_center)), F = the Euler point attribute `after_rot` = the frame of G (generator rotation,
+    alignment or none, times the view basis; `_model_rotation`'s second result), (1, 1, 1) / identity otherwise.
   - **Culling fade** (`sim.culling_params` / `culling_fade` = `uEffectVFR::calc_culling_fade` 0x963BD0, info `culling`,
     `effect_sim._Culling`): with the particle's CullingFlag bit 0, alpha x= distance fade (option 0x2000: hidden at
     <= NearStart or >= FarEnd, linear in the near / far bands, 0x4000 / 0x8000 cut instead) x angle fade (block flag
     0x80: a = acos(dir . to camera), 1 - a / AngleEnd, or with 0x800 1 until AngleStart then by Rate; 0x1 also the
     opposite direction, max, or min with 0x1000). dir = calcDir(CullingRot) turned by the generator; measured once at
-    the generator, or per particle with block flag 0x4. Uses `scene.camera` and updates on frame change. Applied to the
-    GN particles, line ribbons and sword trails; Model particles have no per-particle alpha.
+    the generator, or per particle with block flag 0x4. Uses `scene.camera` (or the viewport with Face Viewport) and
+    updates on frame change. Applied to the GN particles (Model particles too), line ribbons and sword trails.
   - Billboards are pixel-sized: `Scale x pattern px (x AspectRatio)` in cm on a 1 cm source quad.
   - **Camera facing.** Billboard particles (type 0) are expanded by the vertex shader along the camera's right / up axes
     (the CPU passes only corner codes, `sub_961250`), so they lie in the screen plane: the preview uses the scene
-    camera's rotation (`cam_rot`), not a look-at toward its position (fixed 2026-10-09). Only the scene camera counts,
-    and the points update on frame changes, not when the viewport is orbited. Polygon / Model / PrimModel have a
+    camera's rotation (`cam_rot`), not a look-at toward its position (fixed 2026-10-09). The scene camera counts, or
+    with the Effect Editor's **Face Viewport** the largest 3D viewport (`effect_sim._camera_matrix`; a 0.1 s timer
+    redraws camera-dependent particles when the view turns; renders use the camera). Polygon / Model / PrimModel have a
     billboard mode (PolygonBillBoardType = PolygonFlags bits 20-23, ModelBillboardType = ModelFlags bits 8-11 /
     PrimFlags bits 24-27) read by renderPolygon / renderModel / renderPrimModel* into `build_view_basis`: 0 none,
     1 the camera's rotation (view-inverse at render context +0x100) multiplied after the particle matrix, 2 / 3 / 4 keep
@@ -648,14 +649,15 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
     Polygon. The basis multiplies the **whole** particle matrix (renderPolygon 0x99F8AD: P . V, P from sub_988B00 with
     the generator), so in column form it is `V . G . R`: G (generator rotation, alignment, or none with ROT_LOCAL)
     still applies, and only an unrotated generator gives a screen-aligned particle. Preview: `orient["billboard"]`,
-    `effect_sim._view_basis` (modes 2-4 build a reflection in the game; one axis is negated so Blender gets a rotation).
+    `effect_sim._view_basis` (modes 2-4 build a reflection in the game: the rotation is used for the instance and the
+    mirrored axis becomes a -1 `scale_after` in the basis frame, so textures mirror like the game's).
     Example: `ec002_00v0` records 5-8 (Polygon, mode 1) were tilted before this (2026-10-09).
   - Polygon `Width`/`Height` are **half-extents** (the quad is 2W x 2H); `PolygonFixType` is the pivot, `PolygonAxis`
     the plane, `DistortRate` scales each corner (`effect._polygon_mesh`).
   - **Per-particle shapes** (Polygon W/H, PrimModel Radius0/1 + Height0/1, growing by their Add fields or keyframed):
     every source vertex is linear in the four shape values, so the source mesh carries basis attributes
     `shape_a..d` + `src_co` (`effect._set_shape_basis`, `primmodel.PrimMesh.basis`) and the node group
-    (`ALBAM_EFL_Particles_v4`, now v5) moves each realized vertex by `rot(scale3 * (sum(basis * shape) - src_co))` where the
+    (`ALBAM_EFL_Particles_v4`, now v6) moves each realized vertex by `rot(scale3 * (sum(basis * shape) - src_co))` where the
     point's `shape_on` is 1.
   - Model UV scroll (ModelAnimFlag 0x10): `offset += speed` per frame (ScrollU/V or their keyframes), wrapped to
     [-1, 1]; `ALBAM_EFL_Models_v2` adds it to the meshes' `uv1` (V negated).
@@ -663,9 +665,10 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
     `MoveOptionFlag` 0x1 COLLISION has no DX9 reader (collision = `CollParamOffset` set); `RangeOptionFlags` 0x1
     EACH_FRAME numbers particles by spawning frame (`sim.simulate`: a frame's batch shares one RangeDivideNum slot /
     ORDER strip index; no game file combines it with either); `uknRangeFlag` is `RangeDisperseType` (renamed,
-    `RENAMED_PROPS`); `RangeStripType` picks the sampler (0 point, 1 line, 2 / 3 curves = linear in the preview, 4
-    triangle, unused); `RangeStripFlag` 0x20 ALL_PARTS with RangeDivideNum spreads the slots across all parts
-    (`strip_point`), 0x40 SKINING isn't previewed. The editor shows them as checkboxes / enums.
+    `RENAMED_PROPS`); `RangeStripType` picks the sampler (0 point, 1 line, 2 hermite, 3 4-point cubic: `efs.curve_point`,
+    4 triangle, unused, drawn as 1); `RangeStripFlag` 0x20 ALL_PARTS with RangeDivideNum spreads the slots across all
+    parts (`strip_point`), 0x04 NORM_OFF and 0x40 SKINING: see Preview additions 2026-10-10. The editor shows them as
+    checkboxes / enums.
   - **Rope pulls** (`ChainOptionFlag`, moveChain 0x994C20, verified 2026-10-10): 1 / 2 = main / blend pull in world
     axes (`Rope.world_pull`, converted with the generator's world axes measured at import, which `effect.py` now
     measures for any record with those bits, not only cloth); 4 / 8 REF_RANGE_DIR / BDIR (518 / 77 rope particles) =
@@ -695,8 +698,10 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
     until the effect's owner ends it (`checkEnd` -> `doFinish` / `doKeepHoldOff`), a path move ends with
     PathOptionFlag 4, a collision with CollFlag 4, or the limit runs out (then Vanish at once); then KeepFrame and
     Vanish. 1,506 particles hold, nearly all with KeepFrame 0-1 and no limit, so they used to flash for a frame in
-    the preview; now they last until the end of the simulated range (`sim.spawn`). Life types are SE
-    `LIFE_TYPE` 1 FrameAlpha, 2 FrameColor (the files), 3 / 4 Keyframe Alpha / Color (DX9 reads them; no file).
+    the preview; now they last until the effect's preview end (End Effect, below) or the end of the simulated range
+    (`sim.spawn`). Life types are SE `LIFE_TYPE` 1 FrameAlpha, 2 FrameColor (the files; 75 records), 3 / 4 Keyframe
+    Alpha / Color (DX9 reads them; no file); the colour types fade the rgb instead of the alpha (sub_980340,
+    `Particle.fade_rgb`).
   - Keyframes: a keyed value is absolute (its `*Add` is ignored); InitOnly keys are evaluated once at spawn and then
     the Add applies (`Particle.keyed_or`). The generator's Range keyframe replaces Range (s and r) at spawn; rope
     keyframes (Length = total, Rot / BlendRot = re-derived pull directions, BlendRate) use the generator timer for
@@ -704,9 +709,9 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
   - Polyline/Line particles (`RIBBON_TYPES`, simulation only) are camera-facing ribbons whose mesh is rebuilt
     in world space every frame (`effect_sim._update_lines`); there is no GN group for them.
   - Particle types and their Blender objects:
-    - Billboard / Polygon / PrimModel: GN instances (`ALBAM_EFL_Particles_v3`).
-    - Model: GN collection instances (`ALBAM_EFL_Models_v1`); the `.mod` is imported once off-scene, in game
-      axes.
+    - Billboard / Polygon / PrimModel: GN instances (`ALBAM_EFL_Particles_v6`).
+    - Model: GN collection instances (`ALBAM_EFL_Models_v4`); the `.mod` is imported once off-scene, in game
+      axes, and copied per blending with effect materials (`_EffectBuilder.model_variant`).
     - Light: a pool of point lights under a holder Empty.
     - Polyline / Texline / Line and the cloth variants (1, 3, 4, 12-14), and PolygonStrip (15): meshes rebuilt
       per frame.
@@ -718,6 +723,53 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
   - Generator keyframes (position/rotation/scale) are baked as F-curves on the generator Empty.
   - RangeStripPath and PathStrip load `.efs` through RFS.
   - Collision uses a ground plane at world z = 0, measured in generator space at import.
+  - **Preview additions 2026-10-10** (all from the DX9 code; schema notes and `efl_import_plan.md`):
+    - **Lines:** Texline / Line (3 / 4, 308 records) were never drawn (the HeadSize check killed them; only Polyline
+      has a width). Colour B of lines, sword trails and PrimModels is rolled from its PlaceColor pair by calcSrcColor
+      (ColorFlag), not a uniform random mix, and follows `KeyframePlaceColorParamOffset` (`sim._place_rgba`).
+      `calc_color_gradient` (`sim._gradient`) now matches the game at the end rows and for easings above 3.
+    - **PrimModel colour gradient** (268 records): every build*PrimModel* builder colours row k of 0..HoriDivNum
+      `lerp(colour, colour B, gradient(k, ColorPlaceType, ColorPlaceInpType, HoriColorPlaceNo))`; colour B =
+      PlaceColor1/2 (only with ColorPlaceType != 0). The source mesh carries `efl_grad` per vertex
+      (`primmodel.PrimMesh.grad`), the GN group mixes `tint` / `alpha` toward the points' `place_tint` / `place_alpha`.
+    - **PrimModel rim fade** (NormAttenuateFlag, 312 records; Ring / TexRing / Sphere / TexSphere only): alpha x
+      Bezier(0, p1, p2, 1) of t = (AngleEnd - acos(n . to-eye)) / (AngleEnd - AngleStart), |dot| unless bit 2
+      (one-sided). Done per pixel in the material (`effect._rim_fade_alpha`, materials keyed by the rim settings);
+      PrimModel meshes are smooth-shaded and wound so their normals point the way the game's do (outward;
+      `primmodel._faces_inward`). Checked with a Cycles render of `ec024_60v0` record 0 (one-sided: the far half
+      fades, edges fade).
+    - **World Scale and the generator's scale:** the game spawns at `mWmat . (mLscale * offset)` (the generator's world
+      scale moves spawn points) but sizes particles from Generator+0x40 / +0x150 = ParticleScale x the effect's scale x
+      (WMAT_SCALE 0x200 ? the generator's world scale : 1). Follow-space points objects now cancel the generator's
+      scale with `matrix_parent_inverse` and scale the positions themselves (`effect_sim._cancel_generator_scale`; 1,006
+      records have a generator Scale != 1 without World Scale), World Scale multiplies sizes by the mean world scale
+      (`_world_scale`).
+    - **End Effect** (Effect Editor, Spawn Filter box; root `efl_end_frame`, a timeline frame): the preview's stand-in
+      for the owner ending the effect (`doFinish`: every generator to state 5, no more spawning, life holds
+      released). Path ends with PathOptionFlag 4 release holds too (`_path_track`; 34 PathStrip records); the hold
+      limit no longer swallows releases.
+    - **Strip curves:** RangeStrip samplers and PathStrip moves follow the game's curves (`efs.curve_point`: linear,
+      hermite with tangents P1 - P0 / P2 - P1 whose open last segment is linear, Lagrange cubic through a 4-point
+      window; `efs.CurvePath` walks PathStrip curves by an arc-length table of PathCurveDivideNum steps, closed paths
+      include the closing segment). Strip spawns bend their direction toward the interpolated `.efs` normal by
+      UknRangeThing[0] unless RangeStripFlag 4 NORM_OFF (initParticle 0x97121A -> movevel_transform); normals ride in
+      info `range_strip_normals`.
+    - **Skinned strips** (RangeStripFlag 0x40, 17 records, all `ee022_02v0`): DX9 `.efs` have JointNum 0, so the game
+      puts the strip on one owner joint (ParentNo, or the owner's joint when -1) in world space without the generator's
+      Pos / Quat; `_EffectBuilder.skinned_strip_frame` transforms the strip into generator space at import (joint 0 of
+      the picked armature for ParentNo -1).
+    - **RangeDisperseType** (3 records): particle i of a frame's n spawns shifted by (previous generator position -
+      current) x i / n in its local offset (`Particle.disperse`, `effect_sim._disperse_shift`, from recorded motion).
+    - **Sword trails** (PolygonStrip): the edge history is world space, each pair built with its own tick's generator
+      matrix and the Polygon particle matrix rules (DirAxisType alignment on 43 trails, ROT_LOCAL / ROT_INIT, scale x
+      ParticleScale; `effect_sim._strip_rotation`). Before, follow-space trails (461) collapsed onto the generator.
+      Trail objects record emitter motion whatever their space.
+    - **Gravity** pulls along world down (moveParticleMoveAdd), measured in generator space at import with the
+      generator's Y scale unless MoveOptionFlag 2 (`_EffectBuilder.world_down`, info `down`, `Particle.down`); it used
+      to pull along the generator's -Y.
+    - **Model particles** are drawn like the game's renderModel (sub_A38780: particle colour, intensity, the record's
+      blending): copies of the model with effect materials on its Diffuse BM textures, tinted and faded per particle
+      through `EdgeAlpha` (Models node group v4).
   - Path moves (3-6) ride the generator until released. Each `ParticleState.anchor` says which generator
     frame places it: None = the current frame.
   - Headless test: import `arctool\uPlayerNero-vanilla\model\game\pl000\pl000.mod`, pick its armature, then import

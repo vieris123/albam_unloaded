@@ -223,7 +223,9 @@ class _EffectBuilder:
         self.images = {}
         self.anims = {}
         self.models = {}
+        self.model_variants = {}   # (ModelPath, blend) -> (collection, groups) drawn with effect materials
         self.efs = {}
+        self.efs_normals = {}   # path -> per part, the strip's unit normals
         self.current_generator = None
         self.materials = {}
         self.missing_textures = set()   # texture paths that couldn't be loaded (shown in the Effect Editor)
@@ -303,7 +305,7 @@ class _EffectBuilder:
             ob["efl_hidden"] = "TransMode has no main-view bit: the game doesn't draw it in the normal view"
         elif ptcl is not None and self.options.build_geometry and self.options.simulate \
                 and ptcl.type == 5 and gen is not None:
-            source = self.model_source(ptcl.get("ModelPath"))
+            source = self.model_variant(ptcl)
             if source is not None:
                 info = self.sim_info(record)
                 info.update(model_groups=source[1], model_zofs=ptcl.get("ModelZofs")
@@ -343,9 +345,18 @@ class _EffectBuilder:
         rot_order = ptcl.get("RotOrder") if ptcl.has("RotOrder") else 5   # PrimFlags / PolygonFlags / ModelFlags
         extra = {}
         efs_parts = self.efs_for(gen.get("RangeStripPath")) if gen.get("RangeStripPath") else None
+        normals = self.efs_normals.get(gen.get("RangeStripPath")) if efs_parts else None
+        skin = self.skinned_strip_frame(gen) if efs_parts and gen.get("RangeStripFlag") & 0x40 else None
+        if skin is not None:   # SKINING: the strip sits on an owner joint, not on the generator
+            efs_parts = [[tuple((skin @ (Vector(q) * SCALE)) / SCALE) for q in part] for part in efs_parts]
+            if normals:
+                turn = skin.to_3x3()
+                normals = [[tuple((turn @ Vector(n)).normalized()) for n in part] for part in normals]
         if efs_parts:
             extra["range_strip"] = [c for part in efs_parts for point in part for c in point]
             extra["range_strip_sizes"] = [len(part) for part in efs_parts]
+            if normals and [len(p) for p in normals] == extra["range_strip_sizes"]:   # steer strip spawns' direction
+                extra["range_strip_normals"] = [c for part in normals for n in part for c in n]
         move = record.move
         if move is not None and move.type == 3 and move.get("PathStripPath"):
             parts = self.efs_for(move.get("PathStripPath"))
@@ -357,6 +368,10 @@ class _EffectBuilder:
             axes = self.world_axes()
             if axes is not None:
                 extra["world_axes"] = axes
+        if move is not None and move.type in (1, 3, 4, 5, 6):   # gravity: Add moves and released path particles
+            down = self.world_down(move)
+            if down is not None:
+                extra["down"] = down
         if move is not None and move.get("CollParamOffset"):
             ground = self.ground_height(record)
             if ground is not None:
@@ -364,15 +379,18 @@ class _EffectBuilder:
         culling = sim_culling_params(ptcl)
         if culling is not None:
             extra["culling"] = culling
+        if ptcl.has("ParticleOptionFlag") and ptcl.get("ParticleOptionFlag") & 0x200:   # WMAT_SCALE
+            extra["world_scale"] = True   # sizes follow the generator's world scale (effect_sim._world_scale)
         if ptcl.type in (1, 3, 4) and ptcl.get("ParticleOptionFlag") & 0x20000:   # renderPolyline / Texline / Line
             extra["ext_line_pos"] = True   # draw only the first run of real segments (sim.ext_line_range)
-        if ptcl.type in (2, 5, 6):   # calcParticleMatrix / Polygon sub_988B00: rotation options, move-direction axis
+        if ptcl.type in (2, 5, 6, 15):   # calcParticleMatrix / sub_988B00 (Polygon, PolygonStrip): rotation options, axis
             option = ptcl.get("ParticleOptionFlag")
             axis = ptcl.get("DirAxisType") if ptcl.has("DirAxisType") else 6
             extra["orient"] = {"local": bool(option & 0x300000), "init": bool(option & 0x200000),
                                "after": ptcl.type != 2 and bool(option & 0x40000),   # Polygon has no MDLSCL_AFTER
                                "billboard": ptcl.get("PolygonBillBoardType" if ptcl.type == 2 else "ModelBillboardType")
                                if ptcl.has("PolygonBillBoardType") or ptcl.has("ModelBillboardType") else 0,
+                               # PolygonStrip: buildPolygonStripEdgeVert 0x98D240 turns its width axis by this matrix
                                "axis": _SIM_AXES.get(axis) if axis < 6 else None}
         return {"kind": ptcl.type, "frames": self.options.sim_frames, "rot_order": rot_order,
                 "space": emission_space(record),
@@ -533,6 +551,39 @@ class _EffectBuilder:
         self.models[model_path] = result
         return result
 
+    def model_variant(self, ptcl):
+        """The effect's model drawn the way the game draws Model particles (renderModel 0x9A20C0 -> sub_A38780: the
+        particle's colour and intensity, the record's blending): copies of the model's meshes whose materials are effect
+        materials on the model's base textures (Diffuse BM), tinted and faded per particle through EdgeAlpha (stored by
+        the Models node group). One copy per model and blending; (collection, idx_group per mesh) or None."""
+        base = self.model_source(ptcl.get("ModelPath"))
+        if base is None:
+            return None
+        blend = (ptcl.get("BlendSrc") + 1, ptcl.get("BlendDst") + 1, ptcl.get("BlendOp") + 1)
+        key = (ptcl.get("ModelPath"), blend)
+        variants = self.model_variants
+        if key in variants:
+            return variants[key]
+        source, groups = base
+        collection = bpy.data.collections.new(f"{source.name}_{blend[0]}{blend[1]}{blend[2]}")
+        collection.use_fake_user = True
+        materials = {}
+        for mesh_ob in sorted(source.objects, key=lambda o: o.name):
+            copy = mesh_ob.copy()
+            copy.data = mesh_ob.data.copy()   # Geometry Nodes instances take the mesh's materials, not the object's
+            collection.objects.link(copy)
+            for index, original in enumerate(copy.data.materials):
+                if original not in materials:
+                    image = _model_base_image(original)
+                    label = PureWindowsPath(ptcl.get("ModelPath")).name
+                    material = _build_material(f"EFL_model_{label}", image, *blend)
+                    material["efl_blend"] = f"src {_D3DBLEND.get(blend[0], blend[0])}, " \
+                                            f"dst {_D3DBLEND.get(blend[1], blend[1])}, op {_D3DBLENDOP.get(blend[2], blend[2])}"
+                    materials[original] = material
+                copy.data.materials[index] = materials[original]
+        variants[key] = (collection, groups)
+        return variants[key]
+
     def efs_for(self, path):
         """Parts of an .efs curve (cm), or None if it isn't under the Game Files roots. The curve also becomes an
         editable `EFS_` object parented to the first generator that uses it; its current points are what the preview
@@ -542,13 +593,16 @@ class _EffectBuilder:
         parts = None
         ob = self._reuse_linked(f"efs:{path}")
         if ob is not None:
-            parts = efs.parse(effect_efs.build_efs_bytes(ob))
+            data = effect_efs.build_efs_bytes(ob)
+            parts = efs.parse(data)
+            self.efs_normals[path] = efs.parse_normals(data)
         else:
             try:
                 vfile = self.context.scene.albam.rfs.get_vfile(self.app_id, path + ".efs")
                 data = vfile.get_bytes()
                 strip = efs.parse_strip(data)
                 parts = efs.parse(data)
+                self.efs_normals[path] = efs.parse_normals(data)
                 ob = effect_efs.create_efs_object(PureWindowsPath(path).name, strip, data, self.collection,
                                                   game_space=True)
                 ob.albam_asset.app_id = self.app_id
@@ -592,6 +646,37 @@ class _EffectBuilder:
             return None
         return -m.translation.z / (up.length * SCALE)
 
+    def skinned_strip_frame(self, gen):
+        """RangeStripFlag 0x40 SKINING (calcRangeStrip* -> sub_ADA120 / sub_AD9F40 with the owner model): the DX9 .efs
+        files have no joints (JointNum 0), so the game puts the whole strip on one joint of the owner model in world
+        space, without the generator's Pos / Quat: joint ParentNo, or the owner's own joint when it is -1 (0 here).
+        Returns that joint frame in the generator's game space at import (Blender units, 4x4), or None without an
+        armature that has the joint."""
+        joint = gen.get("ParentNo")
+        bone = self.joint_bones().get(joint if joint >= 0 else 0)
+        generator = self.current_generator
+        if bone is None or generator is None or self.armature is None:
+            return None
+        self.context.view_layer.update()
+        joint_world = self.armature.matrix_world @ self.armature.pose.bones[bone.name].matrix
+        return generator.matrix_world.inverted() @ joint_world
+
+    def world_down(self, move):
+        """World down in the generator's game space at import (moveParticleMoveAdd 0x996160 subtracts the fall from the
+        world Y), in cm per cm of fall: scaled by the generator's world Y scale like the game's Gravity x mWscale.y
+        (initParticleMoveAdd), unless MoveOptionFlag 2 (gravity ignores the scale)."""
+        generator = self.current_generator
+        if generator is None:
+            return None
+        self.context.view_layer.update()
+        m = generator.matrix_world.to_3x3()
+        if abs(m.determinant()) < 1e-12:
+            return None
+        down = m.inverted() @ Vector((0.0, 0.0, -1.0))   # local units per world unit: 1 / scale
+        if not move.get("MoveOptionFlag") & 2:
+            down = down * generator.matrix_world.to_scale().y
+        return list(down)
+
     def world_axes(self):
         """Game world axes -> the generator's game space at import (row-major 3x3), for world-fixed cloth pulls."""
         generator = self.current_generator
@@ -625,6 +710,11 @@ class _EffectBuilder:
             uv_layer.data[loop_index].uv = (u, 1.0 - v)
         _set_edge_alpha(mesh, prim.alpha)
         _set_shape_basis(mesh, prim.basis)
+        if any(prim.grad):   # colour gradient rows (PrimFlags ColorPlaceType): factor toward colour B
+            grad = mesh.attributes.new(effect_sim.GRADIENT_ATTR, "FLOAT", "POINT")
+            grad.data.foreach_set("value", prim.grad)
+        # smooth normals: the rim fade (NormAttenuateFlag) measures the surface's facing like the game's per-vertex normal
+        mesh.polygons.foreach_set("use_smooth", [True] * len(mesh.polygons))
         mesh.update()
         return mesh
 
@@ -726,20 +816,23 @@ class _EffectBuilder:
         refract = refracts(ptcl)
         # refraction strength = the record's base Intensity (keyframed intensity isn't followed)
         strength = min(max(ptcl.get("Intensity")[0], 0.0), 127.0) if refract and ptcl.has("Intensity") else 0.0
-        key = (base_path, blend, refract, strength)
+        rim = _rim_fade(ptcl)
+        key = (base_path, blend, refract, strength, rim)
         if key in self.materials:
             return self.materials[key]
         image = self.image_for(base_path) if base_path and self.options.load_textures else None
         label = PureWindowsPath(base_path).name if base_path else ptcl.type_name
         if refract:
-            material = _build_refract_material(f"EFL_{label}_refract", image, *blend, intensity=strength)
+            material = _build_refract_material(f"EFL_{label}_refract", image, *blend, intensity=strength, rim=rim)
             if material.get("efl_distortion") and hasattr(self.context.scene.eevee, "use_raytracing"):
                 self.context.scene.eevee.use_raytracing = True   # EEVEE refraction needs it (else world colour)
         else:
-            material = _build_material(f"EFL_{label}", image, *blend)
+            material = _build_material(f"EFL_{label}" + ("_rim" if rim else ""), image, *blend, rim=rim)
         material["efl_blend"] = f"src {_D3DBLEND.get(blend[0], blend[0])}, dst {_D3DBLEND.get(blend[1], blend[1])}, " \
                                 f"op {_D3DBLENDOP.get(blend[2], blend[2])}" + (", refraction" if refract else "")
         material["efl_base_map"] = base_path
+        if rim is not None:
+            material["efl_rim_fade"] = [float(v) for v in rim]   # one-sided, start, end, p1, p2
         self.materials[key] = material
         return material
 
@@ -782,6 +875,16 @@ def _chain_option(record):
     return 0
 
 
+def _model_base_image(material):
+    """The base texture of an imported .mod material (the image feeding Albam's "Diffuse BM" input), or None."""
+    if material is None or not material.use_nodes:
+        return None
+    for link in material.node_tree.links:
+        if link.to_socket.name == "Diffuse BM" and link.from_node.type == "TEX_IMAGE":
+            return link.from_node.image
+    return None
+
+
 UNTEXTURED_PRIM_MODELS = (0, 2, 4)   # Ring, Sphere, Grid: renderPrimModelRing / Sphere / Grid never fetch a texture
 
 
@@ -793,6 +896,73 @@ def _base_map(ptcl):
     if ptcl.type == 6 and ptcl.has("PrimModelType") and ptcl.get("PrimModelType") in UNTEXTURED_PRIM_MODELS:
         return ""
     return ptcl.get("BaseMapPath")
+
+
+RIM_FADE_PRIM_MODELS = (0, 1, 2, 3)   # Ring / TexRing / Sphere / TexSphere have *Attenuate builders; grids don't
+
+
+def _rim_fade(ptcl):
+    """PrimModel rim fade (PrimFlags bits 28-31 = NormAttenuateFlag, renderPrimModelRing 0x9B5D20 ->
+    buildPrimModelRingAttenuate 0x9CDF70): (one-sided, AngleStart, AngleEnd, curve p1, p2), or None."""
+    if ptcl.type != 6 or not ptcl.has("NormAttenuateFlag") or not ptcl.get("NormAttenuateFlag") or             ptcl.get("PrimModelType") not in RIM_FADE_PRIM_MODELS:
+        return None
+    p1, p2 = ptcl.get("NormAttenuateCurve")
+    return (bool(ptcl.get("NormAttenuateFlag") & 2), round(ptcl.get("NormAttenuateAngleStart"), 6),
+            round(ptcl.get("NormAttenuateAngleEnd"), 6), round(p1, 6), round(p2, 6))
+
+
+def _rim_fade_alpha(nodes, links, alpha, rim, x=-650, y=-500):
+    """alpha x the game's rim fade, per pixel: a = acos(n . to-eye) (|.| unless one-sided), 1 up to AngleStart, 0 from
+    AngleEnd, between them the NormAttenuateCurve ease (MtEaseCurve::easeIn 0x8EE7E0, a cubic Bezier 0 -> p1 -> p2 -> 1)
+    of t = (AngleEnd - a) / (AngleEnd - AngleStart). The game computes it per vertex on the two edge rings and lerps it
+    along the surface; n is the outward normal (Backfacing undoes Blender's flip toward the viewer)."""
+    one_sided, start, end, p1, p2 = rim
+
+    def math_node(operation, a, b=None, c=None, dx=0, dy=0):
+        n = nodes.new("ShaderNodeMath")
+        n.operation = operation
+        n.location = (x + dx, y + dy)
+        for i, value in enumerate((a, b, c)):
+            if value is None:
+                continue
+            if isinstance(value, (int, float)):
+                n.inputs[i].default_value = value
+            else:
+                links.new(value, n.inputs[i])
+        return n.outputs[0]
+
+    geometry = nodes.new("ShaderNodeNewGeometry")
+    geometry.location = (x - 800, y)
+    flip = math_node("MULTIPLY_ADD", geometry.outputs["Backfacing"], -2.0, 1.0, -600, -150)
+    normal = nodes.new("ShaderNodeVectorMath")
+    normal.operation = "SCALE"
+    normal.location = (x - 450, y)
+    links.new(geometry.outputs["Normal"], normal.inputs[0])
+    links.new(flip, normal.inputs["Scale"])
+    dot = nodes.new("ShaderNodeVectorMath")
+    dot.operation = "DOT_PRODUCT"
+    dot.location = (x - 300, y)
+    links.new(normal.outputs["Vector"], dot.inputs[0])
+    links.new(geometry.outputs["Incoming"], dot.inputs[1])
+    d = dot.outputs["Value"]
+    if not one_sided:
+        d = math_node("ABSOLUTE", d, dx=-150)
+    d = math_node("MAXIMUM", math_node("MINIMUM", d, 1.0, dx=-100, dy=-100), -1.0, dx=-50, dy=-100)
+    angle = math_node("ARCCOSINE", d)
+    remap = nodes.new("ShaderNodeMapRange")
+    remap.location = (x + 150, y)
+    remap.clamp = True
+    links.new(angle, remap.inputs["Value"])
+    remap.inputs["From Min"].default_value = end
+    remap.inputs["From Max"].default_value = start if end - start > 1e-6 else end - 1e-6
+    t = remap.outputs["Result"]
+    u = math_node("SUBTRACT", 1.0, t, dx=300, dy=-150)
+    tu = math_node("MULTIPLY", t, u, dx=450, dy=-150)
+    a = math_node("MULTIPLY", math_node("MULTIPLY", tu, u, dx=600, dy=-150), 3.0 * p1, dx=750, dy=-150)
+    b = math_node("MULTIPLY", math_node("MULTIPLY", tu, t, dx=600, dy=-300), 3.0 * p2, dx=750, dy=-300)
+    c = math_node("POWER", t, 3.0, dx=750, dy=-450)
+    fade = math_node("ADD", math_node("ADD", a, b, dx=900, dy=-200), c, dx=1050, dy=-200)
+    return math_node("MULTIPLY", alpha, fade, dx=1200, dy=-100)
 
 
 # Polygon pivots (PolygonFixType): ((a0, a1), (b0, b1)) in units of the half-extents W, H
@@ -862,11 +1032,15 @@ def _tint_mesh(mesh, ptcl):
     attr = mesh.color_attributes.get(EDGE_ALPHA_ATTR)
     if attr is None or not ptcl.has("Color0"):
         return
-    r, g, b, a = bgra_to_rgba(ptcl.get("Color0"))
+    color = bgra_to_rgba(ptcl.get("Color0"))
+    place = bgra_to_rgba(ptcl.get("PlaceColor1")) if ptcl.has("PlaceColor1") else color   # PrimModel colour B
+    grad_attr = mesh.attributes.get(effect_sim.GRADIENT_ATTR)
+    grads = [d.value for d in grad_attr.data] if grad_attr is not None else [0.0] * len(attr.data)
     intensity = min(max(ptcl.get("Intensity")[0], 0.0), 127.0) if ptcl.has("Intensity") else 1.0
     if refracts(ptcl):   # intensity only scales the refraction offset
         intensity = 1.0
-    for item in attr.data:
+    for item, t in zip(attr.data, grads):
+        r, g, b, a = (c0 + (c1 - c0) * t for c0, c1 in zip(color, place))
         edge = item.color[3]
         item.color = (r / 255 * intensity, g / 255 * intensity, b / 255 * intensity, edge * a / 255)
 
@@ -916,7 +1090,7 @@ REFRACT_IOR = 1.5
 REFRACT_GAIN = 2.0   # normal tilt per unit of screen offset: deviation ~ tilt x (1 - 1 / IOR), screen ~ 0.7 rad wide
 
 
-def _build_refract_material(name, image, src, dst, op, intensity=0.0):
+def _build_refract_material(name, image, src, dst, op, intensity=0.0, rim=None):
     """Refraction particles (ParticleOptionFlag 0x10, XfPrim PRIM_EX_REFRACT pixel shader): the game draws the screen
     behind them, offset by (BaseMap.rg - 0.5) x Intensity / 100, times the particle colour, with alpha = BaseMap.a x
     particle alpha, through the normal blend equation. Blender materials can't sample the screen, so the offset is left
@@ -961,6 +1135,8 @@ def _build_refract_material(name, image, src, dst, op, intensity=0.0):
         alpha = alpha_node.outputs["Value"]
     else:
         alpha = tint.outputs["Alpha"]
+    if rim is not None:
+        alpha = _rim_fade_alpha(nodes, links, alpha, rim)
     if image is not None and intensity > 0 and (src, dst, op) == (5, 6, 1):
         # alpha blend: lerp(background, refracted x colour, alpha) = mix(Transparent, Refraction(colour), alpha).
         # The bend tilts the normal (facing the camera) along the camera axes by the game's screen offset
@@ -1054,7 +1230,7 @@ _D3DBLEND = {1: "ZERO", 2: "ONE", 3: "SRCCOLOR", 4: "INVSRCCOLOR", 5: "SRCALPHA"
 _D3DBLENDOP = {1: "ADD", 2: "SUBTRACT", 3: "REVSUBTRACT", 4: "MIN", 5: "MAX"}
 
 
-def _build_material(name, image, src, dst, op):
+def _build_material(name, image, src, dst, op, rim=None):
     """result = src_colour * Fs (op) background * Fd, with src colour = texture rgb * EdgeAlpha rgb and
     alpha = texture a * EdgeAlpha a. Built as Emission + Transparent; factors that depend on the background
     (DEST*) fall back to ONE, MIN/MAX to ADD."""
@@ -1104,6 +1280,8 @@ def _build_material(name, image, src, dst, op):
     else:
         color = vmath("MULTIPLY", tint.outputs["Color"], (1.0, 1.0, 1.0), -650, 150)
         alpha = tint.outputs["Alpha"]
+    if rim is not None:   # PrimModel rim fade (NormAttenuateFlag)
+        alpha = _rim_fade_alpha(nodes, links, alpha, rim)
     alpha3 = splat(alpha, -450, -150)
 
     def factor(kind, x, y):

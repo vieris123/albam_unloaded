@@ -6,6 +6,11 @@
 
 Output is in the particle's local space with game axes and units (Y-up, centimetres), before the
 particle matrix (ModelScale, Rot). Only the base value `s` of each range is used.
+
+Colour gradient (every builder): row k of 0..HoriDivNum gets lerp(colour, colour B, calc_color_gradient(k)), colour B
+= PlaceColor1/2 rolled like the colour (initParticlePrimModel 0x97BE70); PrimMesh.grad holds the factor per vertex.
+Faces are wound so their normal points the way the game's rim-fade normal does (buildPrimModelRingAttenuate 0x9CDF70:
+the frustum's outward normal, +axis for a flat ring; spheres: away from the centre).
 """
 from __future__ import annotations
 
@@ -27,6 +32,7 @@ class PrimMesh:
     uvs: list = field(default_factory=list)        # per face corner, same order as faces
     alpha: list = field(default_factory=list)      # per vertex: 0.0 on borders when edge alpha applies
     basis: list = field(default_factory=list)      # per vertex: 4 vectors, vertex = sum(basis[i] * shape[i])
+    grad: list = field(default_factory=list)       # per vertex: colour gradient factor toward colour B (0 = colour)
 
 
 def _place(axis, s, c, h):
@@ -46,13 +52,13 @@ def _tex_range(index, tex_div):
 
 
 def build(prim_type, axis, shape, rot_div, rot_tex_div, rot_start, rot_end,
-          hori_div, hori_tex_div, hori_start, hori_end, edge_alpha=False):
+          hori_div, hori_tex_div, hori_start, hori_end, edge_alpha=False, gradient=None):
     """
     shape = (Radius0, Radius1, Height0, Height1) base values:
         Ring:   two edge lines (r0, h0) and (r1, h1), rows lerped between them
         Sphere: (R, -, H, offset): latitude k*pi/M, ring radius sin*R, height cos*H + offset
         Grid:   (w0, w1, d0, d1): trapezoid between two edges (approximation)
-    The draw ranges are inclusive cell indices, as in the game.
+    The draw ranges are inclusive cell indices, as in the game. gradient(k) = colour B factor of row k.
     """
     n = max(int(rot_div), 1)
     m = max(int(hori_div), 1)
@@ -100,23 +106,59 @@ def build(prim_type, axis, shape, rot_div, rot_tex_div, rot_start, rot_end,
             mesh.basis.append(vectors)
             border = j in (rot_start, rot_end + 1) or k in (hori_start, hori_end + 1)
             mesh.alpha.append(0.0 if edge_alpha and border else 1.0)
+            mesh.grad.append(gradient(k) if gradient is not None else 0.0)
 
     for k in range(hori_start, hori_end + 1):
         v0, v1 = _tex_range(k, hori_tex_div)
         for j in range(rot_start, rot_end + 1):
             u0, u1 = _tex_range(j, rot_tex_div)
-            mesh.faces.append((index[(j, k)], index[(j + 1, k)], index[(j + 1, k + 1)], index[(j, k + 1)]))
-            mesh.uvs.extend(((u0, v0), (u1, v0), (u1, v1), (u0, v1)))
+            face = [index[(j, k)], index[(j + 1, k)], index[(j + 1, k + 1)], index[(j, k + 1)]]
+            uvs = [(u0, v0), (u1, v0), (u1, v1), (u0, v1)]
+            if _faces_inward(mesh, face, family, axis, (j + 0.5 - (n >> 1)) * 2.0 * math.pi / n, (r0, r1, h0, h1)):
+                face.reverse()
+                uvs.reverse()
+            mesh.faces.append(tuple(face))
+            mesh.uvs.extend(uvs)
     assert len(mesh.faces) == cols * rows
     return mesh
 
 
+def _faces_inward(mesh, face, family, axis, phi, shape):
+    """True if the face's winding normal points against the game's rim-fade normal."""
+    pts = [mesh.vertices[i] for i in face]
+    normal = [0.0, 0.0, 0.0]   # Newell
+    for a, b in zip(pts, pts[1:] + pts[:1]):
+        normal[0] += (a[1] - b[1]) * (a[2] + b[2])
+        normal[1] += (a[2] - b[2]) * (a[0] + b[0])
+        normal[2] += (a[0] - b[0]) * (a[1] + b[1])
+    if family == 1:   # sphere: away from the centre
+        centre = _place(axis, 0.0, 0.0, shape[3])
+        mid = [sum(p[c] for p in pts) / 4 - centre[c] for c in range(3)]
+        return sum(n * m for n, m in zip(normal, mid)) < 0
+    if family == 2:   # grids have no rim fade
+        return False
+    r0, r1, h0, h1 = shape
+    dr, dh = abs(r1 - r0), abs(h1 - h0)
+    if dr < 0.01:
+        game = _place(axis, math.sin(phi), math.cos(phi), 0.0)
+    elif dh < 0.01:
+        game = _place(axis, 0.0, 0.0, 1.0)
+    else:
+        a = dr * dr / dh * (-1.0 if r0 > r1 else 1.0) * (-1.0 if h1 > h0 else 1.0)
+        game = _place(axis, math.sin(phi) * dr, math.cos(phi) * dr, a)
+    return sum(n * g for n, g in zip(normal, game)) < 0
+
+
 def build_from_block(block):
     """PrimMesh for an EFL_PARTICLE_PrimModel block (efl.model.Block)."""
+    from .sim import _gradient
     shape = (block.get("Radius")[0][0], block.get("Radius")[1][0],
              block.get("Height")[0][0], block.get("Height")[1][0])
     edge_alpha = bool(block.get("ParticleOptionFlag") & 0x80000)
+    place = (block.get("ColorPlaceType"), block.get("ColorPlaceInpType"), block.get("HoriColorPlaceNo"))
+    last = block.get("HoriDivNum")
+    gradient = (lambda k: _gradient(k, last, *place)) if place[0] else None
     return build(block.get("PrimModelType"), block.get("Axis"), shape,
                  block.get("RotDivNum"), block.get("RotTexDivNum"), block.get("RotDrawStart"), block.get("RotDrawEnd"),
                  block.get("HoriDivNum"), block.get("HoriTexDivNum"), block.get("HoriDrawStart"),
-                 block.get("HoriDrawEnd"), edge_alpha)
+                 block.get("HoriDrawEnd"), edge_alpha, gradient)

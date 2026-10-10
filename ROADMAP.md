@@ -25,6 +25,9 @@ The preview follows the DX9 code for these, but they haven't been compared with 
 - [ ] **Camera-facing particles on a bone.** The billboard basis multiplies the whole particle matrix, generator
   rotation included (renderPolygon 0x99F8AD), so camera-facing quads on a tilted generator tilt with it. Confirm the
   game does this.
+- [ ] **Preview additions of 2026-10-10:** compare a sword trail (`com\ec000_01v0` record 3), a rim-faded PrimModel
+  (`com\ec024_60v0`), a row gradient (`com\ec001_01v2`), a held glow with End Effect set, and a model particle
+  (`ene\ee005_52v0` record 23, fading) with the game.
 
 - [ ] **Exported collision (`.sbc`).** The writer was rewritten on 2026-10-10 (`engines/mtfw/sbc_bvh.py`). Patch
   an edited stage collision (e.g. `st001-a-00`) and a single-group prop (e.g. `ko904-a00`) into the game: walk on
@@ -58,45 +61,25 @@ in the DX9 code before trusting one.
 
 ## Preview gaps
 
-The game behaviour is known; Blender doesn't show it yet.
+The game behaviour is known; Blender only approximates it. The other preview gaps were closed on 2026-10-10 (see
+`CLAUDE.md`, EFL "Preview additions 2026-10-10").
 
-- [ ] **PrimModel colour gradient** (`ColorPlaceType` / `ColorPlaceInpType` in PrimFlags, `calc_color_gradient`
-  0x9B52A0). Lines and trails already use it.
-- [ ] **PrimModel rim fade** (`NormAttenuateFlag`, NormAttenuateAngle*): fade where the surface is edge-on to the
-  camera; value 3 makes it one-sided.
-- [ ] **World Scale** (`ParticleOptionFlag` 0x200 WMAT_SCALE): particle size follows the generator's scale
-  (updateWorldMatrix 0x96E835), through Generator `mParticleScaleWmat`, which follows the parent per
-  `ScaleMatRelationType` (AxisFlags bits 20-23).
-- [ ] **Life hold releases other than the end of the range.** Held particles (`HoldUntilEffectEnds`, 1,506) stay
-  until the end of the simulated range or `HoldFrameLimit`; a path move's end with PathOptionFlag 4 (34 of them) and
-  collisions with CollFlag 4 also release them in the game. An "effect ends at frame" preview option would let the
-  user see the fade-out where the owning move ends.
-- [ ] **Line LENGTH keyframes in the preview**: `LineKeyframeLengthParamOffset` (157 Polyline+LENGTH blocks) and
-  `LineKeyframeRotParamOffset` (5) are parsed and editable but the stick ignores them. Line colour B
-  (`PlaceColor` and its keyframe) isn't drawn either.
-- [ ] **Curved spawn strips** (`RangeStripType` 2 / 3: 1 and 18 records): the game fits a 3-point / 4-point cubic
-  through the strip (`calcRangeStripCurve3` / `Curve4`, basis built in `sub_ADC660`, evaluated by `sub_ADC1E0`); the
-  preview samples straight segments. PathStrip moves have the same approximation.
-- [ ] **Skinned spawn strips** (`RangeStripFlag` 0x40 SKINING, 17 records): the strip's points follow the owner
-  model's skinning (`sub_ADA7E0` / `sub_ADA120`, the `.efs` blend indices / weights); the preview keeps the strip on
-  the generator.
-- [ ] **`RangeDisperseType`** (3 records, all 1 OLD): each frame's particles are spread between the generator's
-  previous and current position by their place in the batch (`calcSpawnOffset` 0x998F00).
-- [ ] **PolygonStrip (sword trail) direction alignment**: the trail goes through the same matrix code as Polygon
-  (sub_988B00), but trails are built separately in the preview.
-- [ ] **Face the viewport.** Camera facing and the culling fade use the scene camera and update on frame changes
-  only, so orbiting the viewport doesn't turn the billboards. An optional mode could follow the viewport (costs
-  performance).
-- [ ] **Approximations to tighten:**
-  - Scale-after-rotation (0x40000) scales along the points object's axes: right for particles that follow the
-    generator, approximate for particles that stay where they were emitted.
-  - Root-attached RelationType 2 generators turn with the armature object in Blender; the game ignores the owner's
-    rotation for them (only matters if the armature object itself is rotated).
-  - Model particles have no per-particle alpha, so they can't fade (culling fade, life fade).
-  - Billboard modes 2-4 are a reflection in the game; the preview uses the matching rotation (same look on a flat
-    quad, texture may be mirrored).
+- [ ] **Measured once at import** (they are right while the generator keeps the orientation it had then): the world
+  down used for gravity, the world axes of world-fixed rope / cloth pulls, the ground plane for collision, and the
+  joint frame of skinned spawn strips (RangeStripFlag 0x40, `ee022_02v0` only). The game re-reads them every frame;
+  doing that would need the simulation to take the generator's motion as an input.
+- [ ] **Root-attached RelationType 2 generators** turn with the armature object in Blender; the game keeps their
+  rotation in world axes. Only matters if the armature object itself is rotated (root motion rotates a bone, which
+  is fine). A fix would put the rotation companions under a world-axes Empty instead of the effect root and change
+  how export reads them.
+- [ ] **Small leftovers:** `ScaleMatRelationType` isn't used (World Scale takes the generator's whole world scale);
+  World Scale uses the mean scale for Model / PrimModel too (the game scales them per axis); a billboard mode 2-4
+  particle that also has Scale After Rotation keeps the rotation instead of the mirror; RangeDisperseType and
+  sword-trail history need recorded emitter motion (playing the timeline, or Record Emitter Motion).
 - [ ] **Renderer-dependent, only roughly possible in Blender:** soft edges (`ParticleOptionFlag` 0x4), the volume
-  shader (`VolumeBlendRate`, 26,626 particles), lighting (`LightGroupFlag`), fog, the game's draw order (including `EntryType`'s draw passes: Screen draws last, Overlap with ordinary transparent objects).
+  shader (`VolumeBlendRate`, 26,626 particles), lighting (`LightGroupFlag`, Model particles are unlit effect materials
+  now), fog, the game's draw order (including `EntryType`'s draw passes: Screen draws last, Overlap with ordinary
+  transparent objects).
 
 ## Larger features
 

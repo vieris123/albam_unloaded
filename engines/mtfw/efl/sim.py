@@ -7,18 +7,23 @@ Sources (DX9):
                SetNum (0xA8, or its keyframe 0x1D0) particles per frame; pause SetFrame frames; BurstNum (0xAC)
                bursts, 0 = forever
     spawn      sub_999040 (RangeType shapes on Range[3]), scaled by UknRangeThing[1..3]; with RangeStripPath, placed
-               on the .efs strip by serial / RangeDivideNum (sub_99B270: vertex for type 0, else segment + t)
+               on the .efs strip by serial / RangeDivideNum (sub_99B270: vertex for type 0, else segment + t on the
+               RangeStripType curve, efs.curve_point), the direction bent toward the strip's normal by UknRangeThing[0]
+               unless NORM_OFF; RangeDisperseType spreads a frame's batch along the generator's motion (effect_sim)
     collision  moveParticlePosCollision 0x99A210, against a ground plane (the stage collision isn't available):
                bounce = reflect * |d| * BounceRate while bounces remain, then CollType 0 kill / 1 stop / 2 continue
     direction  calcDir 0x9DEC60: axis (move RotAxisType) rotated by move Rot (RotOrder), blended toward the spawn
                offset for RangeDirType diffuse/converge by UknRangeThing[0]
-    motion     moveParticleMoveAdd/Mul: pos += vel - (0, fall, 0); Add: speed += Acceleration, fall += Gravity;
-               Mul: speed *= SpeedCoef. Move keyframes (Rot, Speed, FallSpeed) replace those per frame.
+    motion     moveParticleMoveAdd/Mul: pos += vel - (0, fall, 0) in world axes (here: the world down measured in
+               generator space at import, x the generator's Y scale unless MoveOptionFlag 2); Add: speed +=
+               Acceleration, fall += Gravity; Mul: speed *= SpeedCoef. Move keyframes (Rot, Speed, FallSpeed) replace
+               those per frame.
     space      moveParticleMoveNone 0x995E60 re-places None particles from the current generator matrix (follow);
                Add/Mul integrate in world space; MoveOptionFlag 8 (ALWAYS_CORRECT) with the generator's 0x4000
                flag adds the generator's translation delta every frame (moveParticleMoveVel 0x99BEA0)
     life       initParticleLifeFrame 0x9729B0 / moveParticleLifeFrame 0x998C30: Appear / Keep / Vanish frames, each
-               s + rand % (r + 1); alpha ramps in, holds, ramps out; HoldUntilEffectEnds holds Keep until released
+               s + rand % (r + 1); alpha (life types 2 / 4: the colour) ramps in, holds, ramps out;
+               HoldUntilEffectEnds holds Keep until released (the effect's end, a path end, a collision, the limit)
     flipbook   sub_961DB0: pattern += PatSpeed per frame when AnimFlag MOVE; LOOP wraps, FINISH kills, else holds;
                sequence = SeqNoMin + rand % (SeqNoRange + 1); a PatNo keyframe gives the pattern (or the speed when
                DrawFlags_0x41 bit 0 is set); AnimFlag 0x400 / 0x800 flip each particle's U / V with probability
@@ -26,7 +31,8 @@ Sources (DX9):
     paths      move types 3-6 (initParticleMovePath* 0x9739D0.., moveParticleMovePath* 0x996D60..): the particle
                rides a path in generator space (it follows the generator) until its release timer runs out, then
                continues as an Add particle in world space. 5 PathKeyframe: keyframed offset; 6 PathLine:
-               distance along the rotated axis, clamped to PathLength; 3 PathStrip: distance along an .efs curve;
+               distance along the rotated axis, clamped to PathLength; 3 PathStrip: distance along an .efs curve
+               (PathStripType linear / hermite / spline, efs.CurvePath);
                4 PathChain: approximated as PathLine without a clamp (the game uses a trailing rope)
     lines      Polyline (1) / Line (4): LineOfsNum points per particle by LineType (move sub_98E3E0): FOLLOW = the
                particle's last N positions, FIX_END = that trail pulled toward the spawn point (t^2), LENGTH = a
@@ -45,8 +51,9 @@ Sources (DX9):
     model      Model (5): one mesh per particle, the first with idx_group == PartsNoMin + rand % (PartsNoRange+1),
                advanced by AnimSpeed when ModelAnimFlag & 1; ModelScale/Rot (+Add or keyframes) as PrimModel
     light      Light (10): AttenuateStart/End (+Add per frame) x scale; colour x intensity; linear falloff
-    strip      PolygonStrip (15, sword trail): the last LineOfsNum edge pairs P +/- axis*Width (pivot WidthPlaceRate),
-               axis rotated by Rot(+RotAdd) and scaled by the particle scale (buildPolygonStripEdgeVert 0x98D240)
+    strip      PolygonStrip (15, sword trail): the last LineOfsNum edge pairs P +/- M . axis * Width (pivot
+               WidthPlaceRate), a world-space history: each pair built with its tick's particle matrix M (Rot(+RotAdd),
+               scale, generator / alignment, buildPolygonStripEdgeVert 0x98D240; effect_sim._update_strips)
     keyframes  efl/keyframe.py; per-particle random rates drawn at spawn; a keyed value is absolute (its *Add is
                ignored); InitOnly keys are evaluated once at spawn and the *Add field applies after that
     shape      Polygon (2): Width / Height half-extents (+Add, or keyframes clamped >= 0; <= 0 kills when not keyed);
@@ -55,10 +62,11 @@ Sources (DX9):
     range key  generator 0x1D4 keyframe: replaces Range (s and r) at spawn with the generator timer (sub_999640)
     rope keys  EFL_PARAM_CHAIN Length (total), Rot / BlendRot (direction recomputed per frame), BlendRate keyframes;
                PathChain ropes use the generator timer, CHAIN trails the particle timer (moveChain 0x994C20)
-    colour     rgb * Intensity (clamped 0..127) as in the XfPrim vertex shader
+    colour     rgb * Intensity (clamped 0..127) as in the XfPrim vertex shader; colour B (PlaceColor pairs, rolled by
+               calcSrcColor, or keyed) for line / strip / PrimModel-row gradients (calc_color_gradient 0x9B52A0)
 Not modelled: collision with real stage geometry, the game's RNG table, LoopFrameDist/SetFrameDist fractional
 spreading, external wind on ropes and cloth, rope and cloth response to emitter motion (they live in generator space),
-world-fixed rope pulls (ChainOptionFlag 1/2) use the axes measured at import, hermite/spline .efs interpolation (linear here), the keyed spawn path's
+world-fixed rope pulls (ChainOptionFlag 1/2) and gravity use the axes measured at import, the keyed spawn path's
 skipped burst smear, Polygon DivideNum strips (same look), the ZIGZAG ease-in weight (0x100).
 """
 from __future__ import annotations
@@ -69,7 +77,7 @@ import struct
 from dataclasses import dataclass, field
 
 from . import keyframe as kfm
-from .efs import Polyline
+from .efs import CurvePath, curve_point
 from .schema import bgra_to_rgba
 
 ANIM_MOVE, ANIM_LOOP, ANIM_REVERSE, ANIM_FINISH = 1, 2, 4, 8
@@ -155,15 +163,18 @@ def _random_flips(anim_flag, rng):
     return flip & ~anim_flag
 
 
-def _src_color(ptcl, rng):
+def _src_color(ptcl, rng, pair=None):
     """A particle's start colour, BGRA bytes (uEffectVFR::calcSrcColor 0x9801B0): Color0, with each channel whose
     COLOR_FLAG blend bit (R 0x1, G 0x2, B 0x4, A 0x8) is set mixed toward Color1 by one random t, re-rolled after
-    every channel with EACH_RANDOM (0x10). CHOICE (0x20) isn't handled by DX9."""
-    c0 = list(ptcl.get("Color0"))
+    every channel with EACH_RANDOM (0x10). CHOICE (0x20) isn't handled by DX9. pair = another (colour, colour) the
+    game rolls the same way: the PlaceColor pair of lines, strips and PrimModels (their init functions)."""
+    if pair is None:
+        pair = (ptcl.get("Color0"), ptcl.get("Color1") if ptcl.has("Color1") else None)
+    c0 = list(pair[0])
     flag = ptcl.get("ColorFlag") if ptcl.has("ColorFlag") else 0
-    if not flag & 0xF or not ptcl.has("Color1"):
+    if not flag & 0xF or pair[1] is None:
         return c0
-    c1 = list(ptcl.get("Color1"))
+    c1 = list(pair[1])
     out, t = list(c0), rng.random()
     for byte, bit in COLOR_BLEND_BITS:
         if flag & bit:
@@ -200,6 +211,7 @@ _PTCL_KEYS = {
     "KeyframeHeight0ParamOffset": "shape2", "KeyframeHeight1ParamOffset": "shape3",
     "KeyframeWidthParamOffset": "shape0", "KeyframeHeightParamOffset": "shape2",
     "KeyframeScrollUParamOffset": "scroll_u", "KeyframeScrollVParamOffset": "scroll_v",
+    "KeyframePlaceColorParamOffset": "place_color",   # colour B of lines / strips / PrimModel gradients
 }
 _ROPE_KEYS = {"KeyframeLengthParamOffset": "length", "KeyframeChainRotParamOffset": "rot",
               "KeyframeBlendRotParamOffset": "blend_rot", "KeyframeBlendRateParamOffset": "blend_rate"}
@@ -312,9 +324,24 @@ class Particle:
     end: int = None       # birth + lifetime, set by callers that filter by life window
     refract: bool = False  # refraction shader: the colour isn't multiplied by intensity
     flip: int = 0          # AnimFlag 0x100 / 0x200 rolled from the _RAND bits that the record doesn't set itself
+    place_color: tuple = None   # colour B (rgba 0..255): line / strip tail, PrimModel gradient; None = unused
+    fade_rgb: bool = False      # life types 2 / 4 fade the colour instead of the alpha (sub_980340)
+    disperse: float = None      # RangeDisperseType: place in the frame's batch (i / count), or None
+    down: tuple = (0.0, -1.0, 0.0)   # world down in generator space (gravity; moveParticleMoveAdd falls along world Y)
 
     def lifetime(self):
         return sum(self.life) if self.life else NO_LIFE_FRAMES
+
+    def fade_at(self, n):
+        """Life ramp at age n (moveParticleLifeFrame): in over Appear, 1 through Keep, out over Vanish."""
+        if not self.life:
+            return 1.0
+        appear, keep, vanish = self.life
+        if n < appear:
+            return (n + 1) / (appear + 1)
+        if n >= appear + keep:
+            return max(0.0, 1.0 - (n - appear - keep + 1) / (vanish + 1))
+        return 1.0
 
     def keyed(self, name, age):
         """Keyframe value for a property at a particle age, or None if the property isn't keyed."""
@@ -370,9 +397,8 @@ class Particle:
                 k = self.speed * (1 - self.coef ** n) / (1 - self.coef)
             else:
                 k = self.speed * n + self.accel * n * (n - 1) / 2
-            pos = [self.pos[i] + self.dir[i] * k for i in range(3)]
-            pos[1] -= self.gravity * n * (n - 1) / 2
-            return tuple(pos)
+            fall = self.gravity * n * (n - 1) / 2
+            return tuple(self.pos[i] + self.dir[i] * k + self.down[i] * fall for i in range(3))
         if self._path is None:   # step-integrate once, cache the whole lifetime
             path, pos = [self.pos], list(self.pos)
             speed, fall = self.speed, 0.0
@@ -385,7 +411,7 @@ class Particle:
                 keyed_fall = self.keyed("fall", age)
                 if keyed_fall is not None:
                     fall = keyed_fall
-                pos = [pos[0] + d[0] * speed, pos[1] + d[1] * speed - fall, pos[2] + d[2] * speed]
+                pos = [pos[i] + d[i] * speed + self.down[i] * fall for i in range(3)]
                 path.append(tuple(pos))
                 if keyed_speed is None:
                     speed = speed * self.coef if self.coef else speed + self.accel
@@ -415,11 +441,13 @@ class ParticleState:
     pattern: int
     anchor: int = None    # game frame whose generator matrix places pos; None = the current frame
     line: list = None     # Polyline / Line: [(pos, anchor, half width cm, rgba)] head first
-    strip: tuple = None   # PolygonStrip: ([(A, B, anchor)] newest first, head rgba, tail rgba, spline subdivisions)
+    strip: tuple = None   # PolygonStrip: ([StripEdge] newest first, head rgba, tail rgba, spline subdivisions, axis,
+                          # rot order, pivot)
     light: tuple = None   # Light: (start cm, end cm)
     shape: tuple = None   # Polygon (W, 0, H, 0) half-extents / PrimModel (Radius0, Radius1, Height0, Height1), cm
     uv_scroll: tuple = None   # Model: (u, v) offset in UV units
     flip: int = 0         # extra flipbook flips (AnimFlag 0x100 / 0x200) on top of the record's own
+    place_color: tuple = None   # PrimModel gradient colour B, as color (rgba 0..1, rgb x intensity); None = none
 
 
 def _unit(v):
@@ -438,8 +466,10 @@ def _path_track(p):
     grav = fall = 0.0
     pos = None
     for age in range(p.lifetime()):
+        if age >= p.lifetime():   # a path-end release shortened the life
+            break
         if not on_path:   # released: Add motion in the release frame's space
-            pos = (pos[0] + vel[0], pos[1] + vel[1] - fall, pos[2] + vel[2])
+            pos = tuple(pos[i] + vel[i] + p.down[i] * fall for i in range(3))
             vel = tuple(v + a for v, a in zip(vel, acc))
             fall += grav
             track.append((pos, anchor))
@@ -487,6 +517,10 @@ def _path_track(p):
         if offset is not None:
             r = rotate(offset, rot, P["order"]) if any(rot) else offset
             local = tuple(a + b for a, b in zip(P["spawn"], r))
+        if age > 0 and end and opt & 4 and P.get("keep_after") is not None and p.life:
+            appear, keep, vanish = p.life   # KEEP_HOLD_OFF_PATH_END: the end releases a life hold
+            p.life = (appear, min(keep, max(age - appear, 0) + P["keep_after"]), vanish)
+            P["keep_after"] = None
         if age > 0:
             if end and opt & 2:          # KILL_PATH_END
                 break
@@ -568,10 +602,12 @@ def ext_line_range(points):
     return first, last
 
 
-def strip_point(gen, strip_parts, rng, serial):
-    """Spawn point on the generator's .efs strip (RangeStripPath), unscaled cm, or None."""
+def strip_point(gen, strip_parts, rng, serial, strip_normals=None):
+    """(spawn point on the generator's .efs strip (RangeStripPath), unscaled cm, its interpolated unit normal or None),
+    or (None, None). RangeStripType picks the sampler (efs.curve_point: 1 linear, 2 hermite, 3 4-point cubic; 4
+    triangle is sampled as a line, no file uses it)."""
     if not strip_parts:
-        return None
+        return None, None
     flags, kind = gen.get("RangeStripFlag"), gen.get("RangeStripType")
     divide = gen.get("RangeDivideNum")
     spread = None
@@ -585,7 +621,10 @@ def strip_point(gen, strip_parts, rng, serial):
         part_no = min(max(gen.get("RangeStripPartsNo"), 0), len(strip_parts) - 1)
     pts = strip_parts[part_no]
     if not pts:
-        return None
+        return None, None
+    norms = strip_normals[part_no] if strip_normals and part_no < len(strip_normals) else None
+    if norms is not None and len(norms) != len(pts):
+        norms = None
     n = len(pts)
 
     def pick(count):
@@ -596,7 +635,8 @@ def strip_point(gen, strip_parts, rng, serial):
         return rng.randrange(count)
 
     if kind == 0 or n == 1:
-        return pts[pick(n)]
+        i = pick(n)
+        return pts[i], (norms[i] if norms is not None else None)
     closed = bool(flags & 0x08)
     segs = n if closed else n - 1
     if spread is not None:
@@ -611,8 +651,13 @@ def strip_point(gen, strip_parts, rng, serial):
     else:
         seg = pick(segs)
         t = 0.5 if flags & 0x10 else rng.random()
-    a, b = pts[seg], pts[(seg + 1) % n]
-    return tuple(x + (y - x) * t for x, y in zip(a, b))
+    sampler = kind if kind in (2, 3) else 1
+    point = curve_point(pts, sampler, seg, t, closed)
+    normal = None
+    if norms is not None:
+        normal, length = _unit(curve_point(norms, sampler, seg, t, closed))
+        normal = normal if length >= 1.19e-7 else None
+    return point, normal
 
 
 def spawn_offset(gen, rng, t, ranges=None):
@@ -650,7 +695,10 @@ def _shape_point(ranges, kind, rng, t):
     return x, y, z
 
 
-def _direction(gen, move, rng, offset, keys):
+def _direction(gen, move, rng, offset, keys, normal=None):
+    """Spawn direction (calcDir of the move's Rot), blended by UknRangeThing[0] toward a target (movevel_transform
+    0x9750B0, particle flag 0x80): the spawn strip's normal for strip spawns without NORM_OFF (initParticle 0x97121A),
+    else the spawn offset for RangeDirType diffuse / converge."""
     if move is None or not move.has("Rot"):
         return (0.0, 1.0, 0.0), (0.0, 1.0, 0.0), 5
     axis = _AXES.get(move.get("RotAxisType"), (0, 1, 0))
@@ -662,7 +710,10 @@ def _direction(gen, move, rng, offset, keys):
         angles = [_rf(rng, r) for r in move.get("Rot")]
     d = rotate(axis, angles, order)
     dir_type = gen.get("RangeDirType")
-    if dir_type in (1, 2) and any(offset):
+    if normal is not None:
+        f = min(max(_rf(rng, gen.get("UknRangeThing")[0]), 0.0), 1.0)
+        d = _normalize(tuple(a * (1 - f) + b * f for a, b in zip(d, normal)))
+    elif dir_type in (1, 2) and any(offset):
         target = _normalize(offset if dir_type == 1 else tuple(-c for c in offset))
         f = min(max(_rf(rng, gen.get("UknRangeThing")[0]), 0.0), 1.0)
         d = _normalize(tuple(a * (1 - f) + b * f for a, b in zip(d, target)))
@@ -672,12 +723,16 @@ def _direction(gen, move, rng, offset, keys):
 class _Template:
     """Per-record data shared by all its particles (keyframes parsed once)."""
 
-    def __init__(self, record, rng=None, strip_points=None, range_strip=None, ground_y=None, world_axes=None):
+    def __init__(self, record, rng=None, strip_points=None, range_strip=None, ground_y=None, world_axes=None,
+                 range_normals=None):
         self.record = record
         self.max_frames = 300   # simulated range (simulate() sets it): held particles last until its end
+        self.end_frame = None   # game frame the effect is ended at (doFinish), or None: it never ends
         self.world_axes = world_axes        # game world -> generator space at import (row-major 3x3), or None
         self.range_strip = range_strip      # generator RangeStripPath .efs parts (cm)
+        self.range_normals = range_normals  # and their unit normals (game axes), or None
         self.ground_y = ground_y            # ground plane height in generator space (cm) for collision
+        self.down = (0.0, -1.0, 0.0)        # world down in generator space (simulate() sets it)
         self.collision = _collision_params(record.move)
         self.ptcl_keys = keyframes_of(record.ptcl, _PTCL_KEYS)
         self.move_keys = keyframes_of(record.move, {**_MOVE_KEYS, "KeyframeReleaseFrameParamOffset": "release"})
@@ -688,7 +743,13 @@ class _Template:
         self.cloth_ext = _cloth_extension(record.ptcl)
         self.line_keys = keyframes_of(record.ptcl, {"KeyframeHeadSizeParamOffset": "head_size",
                                                     "KeyframePlaceSizeParamOffset": "place_size"})
-        self.strip = Polyline(strip_points) if strip_points else None
+        move = record.move
+        self.strip = None   # PathStrip curve
+        if strip_points:
+            kind = move.get("PathStripType") if move is not None and move.has("PathStripType") else 1
+            divide = move.get("PathCurveDivideNum") if move is not None and move.has("PathCurveDivideNum") else 1
+            closed = bool(move.get("PathStripFlag") & 0x08) if move is not None and move.has("PathStripFlag") else False
+            self.strip = CurvePath(strip_points, kind, divide, closed)
         # Path3DScale / PathLengthScale: rolled once per generator start (initGeneratorParam 0x96B9C3)
         self.path_scale3, self.path_length_scale = (1.0, 1.0, 1.0), 1.0
         move = record.move
@@ -719,11 +780,13 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
         if s is not None:
             ranges = [(a, b - a) for a, b in zip(s, sr)]
     offset = spawn_offset(gen, rng, t, ranges)
-    on_strip = strip_point(gen, template.range_strip, rng, serial)
+    on_strip, strip_normal = strip_point(gen, template.range_strip, rng, serial, template.range_normals)
     if on_strip is not None:
         scale = [_rf(rng, r) for r in gen.get("UknRangeThing")[1:]]
         offset = tuple(o + p * s for o, p, s in zip(offset, on_strip, scale))
-    d, axis, order = _direction(gen, move, rng, offset, keys)
+        if gen.get("RangeStripFlag") & 0x04:   # NORM_OFF: the strip's normal doesn't steer the direction
+            strip_normal = None
+    d, axis, order = _direction(gen, move, rng, offset, keys, strip_normal)
     speed = accel = coef = gravity = 0.0
     path = None
     if move is not None and move.type in PATH_TYPES:
@@ -751,11 +814,15 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
         if life.get("HoldUntilEffectEnds"):   # the Keep phase waits for the effect to end (moveParticleLifeFrame)
             appear, held_keep, vanish = life_frames
             limit = life.get("HoldFrameLimit")   # runs out -> straight to Vanish; 0 = no limit
-            # nothing ends the effect in the preview: hold until the end of the simulated range, or a collision
-            # with CollFlag 4 (_coll_track); a path end's release isn't modelled
-            life_frames = (appear, limit or max(template.max_frames - birth - appear, 1), vanish)
-            if limit:
-                held_keep = None   # the limit ends Keep at once; nothing is left for a release
+            # released by the effect's end (doFinish / doKeepHoldOff: Keep then runs KeepFrame more frames), a path
+            # end with PathOptionFlag 4 (_path_track) or a collision with CollFlag 4 (_coll_track); without an end
+            # the hold lasts until the end of the simulated range
+            hold = limit or max(template.max_frames - birth - appear, 1)
+            end = template.end_frame
+            if end is not None and end - birth - appear < hold:
+                hold = max(end - birth - appear, 0) + held_keep
+            # (a limit that runs out goes straight to Vanish; a release before it shortens the hold: min() there)
+            life_frames = (appear, hold, vanish)
         if not any(life_frames):
             life_frames = (0, 1, 0)
 
@@ -766,6 +833,11 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
     scale_add = _rf(rng, ptcl.get("ScaleAdd")) if has("ScaleAdd") else 0.0
     intensity = _rf(rng, ptcl.get("Intensity")) if has("Intensity") else 1.0
     color = bgra_to_rgba(_src_color(ptcl, rng)) if has("Color0") else (255, 255, 255, 255)
+    place_color = None   # colour B: rolled from its pair like the colour (initParticlePolyline / Line / PolygonStrip /
+    if has("PlaceColor"):   # PrimModel 0x97BE70 call calcSrcColor on it, or take its keyframe)
+        place_color = bgra_to_rgba(_src_color(ptcl, rng, ptcl.get("PlaceColor")))
+    elif has("PlaceColor1") and ptcl.get("ColorPlaceType"):   # PrimModel: only with a gradient
+        place_color = bgra_to_rgba(_src_color(ptcl, rng, (ptcl.get("PlaceColor1"), ptcl.get("PlaceColor2"))))
     aspect = _rf(rng, ptcl.get("AspectRatio")) if has("AspectRatio") else 1.0
     angle = _rf(rng, ptcl.get("Angle")) if has("Angle") else 0.0
     angle_add = _rf(rng, ptcl.get("AngleAdd")) if has("AngleAdd") else 0.0
@@ -823,7 +895,8 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
     particle = Particle(birth, offset, d, speed, accel, coef, gravity, life_frames, scale, scale_add, angle, angle_add,
                     rot, rot_add, model_scale, model_scale_add, color, intensity, aspect, sequence, pattern,
                     pat_speed, pat_count, anim_flag, key_is_speed, axis, order, keys, path, line, strip, light,
-                    shape=shape, scroll=scroll, refract=refracts(ptcl), flip=flip)
+                    shape=shape, scroll=scroll, refract=refracts(ptcl), flip=flip, place_color=place_color,
+                    fade_rgb=life is not None and life.type in (2, 4), down=template.down)
     if line is not None and line.get("rope") is not None:
         line["rope"].birth = birth   # generator-timer rope keys run from the particle's birth frame
     c = template.collision
@@ -840,6 +913,9 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
         if c["CollFlag"] & 4 and held_keep is not None:
             particle.coll["keep_after"] = held_keep
             particle.placement(0)   # the release shortens the life: settle it before anyone asks for the lifetime
+    if path is not None and path["option"] & 4 and held_keep is not None:   # KEEP_HOLD_OFF_PATH_END
+        path["keep_after"] = held_keep
+        particle.placement(0)
     return particle
 
 
@@ -891,7 +967,7 @@ def _coll_track(p):
                 c["hit"] = _age
                 if c.get("keep_after") is not None and p.life:
                     appear, _keep, vanish = p.life
-                    p.life = (appear, max(_age - appear, 0) + c["keep_after"], vanish)
+                    p.life = (appear, min(_keep, max(_age - appear, 0) + c["keep_after"]), vanish)
             elif c["type"] == 1:   # MOVE_STOP
                 new, frozen = (new[0], c["ground"] + c["radius"], new[2]), True
             else:                   # COLL_STOP: keep moving, collision off
@@ -1130,15 +1206,12 @@ def _particle_rope(p, n):
 
 
 def _strip_init(rng, ptcl, keys):
-    pair = [bgra_to_rgba(c) for c in ptcl.get("PlaceColor")]
-    t = rng.random()
     s = {
         "count": max(ptcl.get("LineOfsNum"), 2), "spline_div": max(ptcl.get("SplineDivideNum"), 1),
         "axis": _AXES.get(ptcl.get("RotAxisType"), (1, 0, 0)), "order": ptcl.get("RotOrder"),
         "rot": tuple(_rf(rng, r) for r in ptcl.get("Rot")), "rot_add": tuple(_rf(rng, r) for r in ptcl.get("RotAdd")),
         "width": _rf(rng, ptcl.get("Width")), "width_add": _rf(rng, ptcl.get("WidthAdd")),
         "pivot": ptcl.get("WidthPlaceRate"), "place_tail": ptcl.get("ColorPlaceType") != 0,
-        "place_color": tuple(a + (b - a) * t for a, b in zip(*pair)),
     }
     return s
 
@@ -1149,7 +1222,7 @@ def _strip_edges(p, n, scale_at, rgba, intensity):
     width_now = width_now if width_now is not None else S["width"] + S["width_add"] * n
     if width_now <= 0:
         return None
-    edges = []
+    edges = []   # newest first: one edge pair per move tick, built with that tick's matrix (buildPolygonStripEdgeVert)
     for k in range(S["count"]):
         age = max(n - k, 0)
         pos, anchor = p.placement(age)
@@ -1159,16 +1232,22 @@ def _strip_edges(p, n, scale_at, rgba, intensity):
         rot = rot if rot is not None else tuple(r + a * age for r, a in zip(S["rot"], S["rot_add"]))
         width = p.keyed("strip_width", age)
         width = width if width is not None else S["width"] + S["width_add"] * age
-        a = rotate(tuple(c * scale_at(age) for c in S["axis"]), rot, S["order"])
-        r = S["pivot"]
-        edges.append((tuple(c + x * width * (1 - r) for c, x in zip(pos, a)),
-                      tuple(c - x * width * r for c, x in zip(pos, a)),
-                      None if anchor is None else p.birth + anchor))
-    tail = rgba
-    if S["place_tail"]:
-        pc = S["place_color"]
-        tail = (pc[0] / 255 * intensity, pc[1] / 255 * intensity, pc[2] / 255 * intensity, pc[3] / 255)
-    return edges, rgba, tail, S["spline_div"]
+        edges.append(StripEdge(pos, anchor, age, tuple(rot), width, scale_at(age)))
+    tail = _place_rgba(p, n, intensity, rgba) if S["place_tail"] else rgba
+    return edges, rgba, tail, S["spline_div"], S["axis"], S["order"], S["pivot"]
+
+
+@dataclass
+class StripEdge:
+    """One PolygonStrip history entry: the particle at age `age` (pos in the generator space of anchor age, None =
+    of that tick), its Rot, width and scale. The edge is pos +/- M . axis x width (1 - pivot / pivot), M = the
+    Polygon particle matrix of that tick (sub_988B00: generator rotation, DirAxisType alignment, ROT_LOCAL / INIT)."""
+    pos: tuple
+    anchor: int
+    age: int
+    rot: tuple
+    width: float
+    scale: float
 
 
 def _line_extension(ptcl):
@@ -1216,15 +1295,12 @@ def _line_extension(ptcl):
 def _line_init(template, rng, ptcl, keys, serial=0, move_dir=None):
     ext = template.line_ext or {}
     line_type = ptcl.get("LineType")
-    pair = [bgra_to_rgba(c) for c in ptcl.get("PlaceColor")]
-    t = rng.random()
-    place_color = tuple(a + (b - a) * t for a, b in zip(*pair))
     line = {
         "type": line_type, "count": max(ptcl.get("LineOfsNum"), 2),
         "color_place": (ptcl.get("ColorPlaceType"), ptcl.get("ColorPlaceInpType"), ptcl.get("ColorPlaceNo")),
-        "place_color": place_color,
         "size_place": ((ptcl.get("SizePlaceType"), ptcl.get("SizePlaceInpType"), ptcl.get("SizePlaceNo"))
                        if ptcl.has("SizePlaceFlags") else (0, 0, 0)),
+        "sized": ptcl.has("HeadSize"),   # Polyline ribbons; Texline / Line are 1-pixel strips
         "head": _rf(rng, ptcl.get("HeadSize")) if ptcl.has("HeadSize") else 0.0,
         "head_add": _rf(rng, ptcl.get("HeadSizeAdd")) if ptcl.has("HeadSizeAdd") else 0.0,
         "place": _rf(rng, ptcl.get("PlaceSize")) if ptcl.has("PlaceSize") else 0.0,
@@ -1255,27 +1331,57 @@ def _line_init(template, rng, ptcl, keys, serial=0, move_dir=None):
 
 
 def _gradient(i, last, place_type, inp_type, place_no):
-    """calc_color_gradient 0x9B52A0: blend factor toward the 'place' value for point i."""
-    if place_type == 0 or last <= 0:
-        return 0.0
-    p = min(max(place_no, 0), last)
+    """calc_color_gradient 0x9B52A0: blend factor toward the 'place' value for point i of 0..last (line points; a
+    PrimModel's rows, last = HoriDivNum). Type 1 ramps 0 -> 1, 2 peaks at place_no and is 0 at both ends, 3 ramps from
+    place_no, 4 ramps up to it; the end values skip the easing; any other type, or an easing above 3, gives 0."""
+    p = place_no
     if place_type == 1:
+        if i == 0:
+            return 0.0
+        if i == last:
+            return 1.0
         t = i / last
     elif place_type == 2:
-        t = (i / p if p else 1.0) if i < p else ((last - i) / (last - p) if last > p else 1.0) if i > p else 1.0
+        if i == 0 or i == last:
+            return 0.0
+        if i == p:
+            return 1.0
+        t = i / p if i < p else (last - i) / (last - p)
     elif place_type == 3:
-        t = 0.0 if i <= p else (i - p) / (last - p)
+        if i <= p:
+            return 0.0
+        if i == last:
+            return 1.0
+        t = (i - p) / (last - p)
     elif place_type == 4:
-        t = i / p if i < p and p else 1.0
+        if i >= p:
+            return 1.0
+        if i == 0:
+            return 0.0
+        t = i / p
     else:
-        t = i / last
+        return 0.0
+    if inp_type == 0:
+        return t
     if inp_type == 1:
         return math.sin(math.pi * t / 2)
     if inp_type == 2:
         return 1.0 - math.cos(math.pi * t / 2)
     if inp_type == 3:
         return (1.0 - math.cos(math.pi * t)) / 2
-    return t
+    return 0.0
+
+
+def _place_rgba(p, n, intensity, rgba):
+    """Colour B at age n as rgba 0..1 (rgb x intensity), faded like the colour by the life (sub_980340 runs on both);
+    rgba (colour A, already faded) if the particle has none."""
+    keyed = p.keyed("place_color", n)
+    c = bgra_to_rgba(keyed) if keyed is not None else p.place_color
+    if c is None:
+        return rgba
+    fade = p.fade_at(n)
+    k = intensity * (fade if p.fade_rgb else 1.0) / 255
+    return c[0] * k, c[1] * k, c[2] * k, c[3] / 255
 
 
 def _line_keyed(p, name, age):
@@ -1309,10 +1415,9 @@ def _line_points(p, n, pos, anchor, scale, rgba, intensity):
     head = head if head is not None else L["head"] + L["head_add"] * n
     place = _line_keyed(p, "place_size", n)
     place = place if place is not None else L["place"] + L["place_add"] * n
-    if head <= 0 and L["size_place"][0] == 0:
+    if L["sized"] and head <= 0 and L["size_place"][0] == 0:
         return None
-    place_rgba = (L["place_color"][0] / 255 * intensity, L["place_color"][1] / 255 * intensity,
-                  L["place_color"][2] / 255 * intensity, L["place_color"][3] / 255)
+    place_rgba = _place_rgba(p, n, intensity, rgba)
     if L["type"] == 4 and "axis" in L:     # LENGTH: rigid stick
         length = _line_keyed(p, "length_key", n)
         length = length if length is not None else L["length"] + L["length_add"] * n
@@ -1747,27 +1852,41 @@ def _path_init(template, move, rng, spawn_point, keys, axis, order):
 
 
 def simulate(record, seed=0, max_frames=300, pat_counts=(1,), strip_points=None, range_strip=None, ground_y=None,
-             world_axes=None):
+             world_axes=None, end_frame=None, range_normals=None, down=None):
     """All particles a record emits in max_frames game frames; pat_counts = patterns per flipbook sequence;
     strip_points = the .efs curve (cm) for PathStrip moves; world_axes = game world -> generator space (row-major
-    3x3) for world-fixed cloth pulls."""
+    3x3) for world-fixed cloth pulls; end_frame = the game frame the effect is ended at (uEffectVFR::doFinish: the
+    generators stop spawning (state 5) and life holds are released), None = never; down = world down in generator
+    space (cm of fall per cm, with the generator's scale as the game applies it: effect.py measures it at import),
+    None = the generator's -Y."""
     if record.gen is None:
         return []
     rng = random.Random(seed)
-    template = _Template(record, rng, strip_points, range_strip, ground_y, world_axes)
+    template = _Template(record, rng, strip_points, range_strip, ground_y, world_axes, range_normals)
     template.max_frames = max_frames
+    template.end_frame = end_frame
+    if down is not None:
+        template.down = tuple(down)
     particles = []
     divide = record.gen.get("RangeDivideNum")
     # a particle's serial (openParticle 0x9DF333) picks its RangeDivideNum slot and ORDER strip index: the particle
     # count, or with RangeOptionFlags 1 EACH_FRAME the count of spawning frames (a frame's batch shares one slot)
     each_frame = bool(record.gen.get("RangeOptionFlags") & 1)
+    # RangeDisperseType 1 OLD / 2 SUB (calcSpawnOffset 0x998F00): the spawn offset moves by (previous generator
+    # position - current) x i / count, spreading a frame's batch along the generator's motion; the previous position
+    # is only known in Blender, so effect_sim applies it
+    disperse = record.gen.get("RangeDisperseType") in (1, 2)
     serial = frames_done = 0
     for frame, count in emission_schedule(record.gen, rng, max_frames):
-        for _ in range(count):
+        if end_frame is not None and frame >= end_frame:
+            break
+        for i in range(count):
             number = frames_done if each_frame else serial
             t = (number % (divide + 1)) / divide if divide else rng.random()
             serial += 1
             particles.append(spawn(template, rng, frame, t, pat_counts or (1,), number))
+            if disperse:
+                particles[-1].disperse = i / count
             if len(particles) >= MAX_PARTICLES:
                 return particles
         frames_done += 1
@@ -1837,13 +1956,8 @@ def state_at(p, frame):
     n = frame - p.birth
     if n < 0 or n >= p.lifetime():
         return None
-    alpha = 1.0
-    if p.life:
-        appear, keep, vanish = p.life
-        if n < appear:
-            alpha = (n + 1) / (appear + 1)
-        elif n >= appear + keep:
-            alpha = max(0.0, 1.0 - (n - appear - keep + 1) / (vanish + 1))
+    fade = p.fade_at(n)
+    alpha = 1.0 if p.fade_rgb else fade   # life types 2 / 4 (FrameColor) scale the rgb instead (sub_980340)
     scale = p.keyed_or("scale", n, p.scale, p.scale_add)
     if scale <= 0:
         return None
@@ -1866,7 +1980,9 @@ def state_at(p, frame):
     rot = tuple(p.keyed_or("rot", n, tuple(p.rot), tuple(p.rot_add)))
     model_scale = tuple(max(c, 0.0) for c in p.keyed_or("model_scale", n, tuple(p.model_scale),
                                                             tuple(p.model_scale_add)))
-    rgba = (color[0] / 255 * intensity, color[1] / 255 * intensity, color[2] / 255 * intensity, color[3] / 255)
+    k = intensity * (fade if p.fade_rgb else 1.0) / 255
+    rgba = (color[0] * k, color[1] * k, color[2] * k, color[3] / 255)
+    place = _place_rgba(p, n, intensity, None) if p.place_color is not None and p.shape is not None and         p.shape["kind"] == "prim" else None
     pos, anchor_age = p.placement(n)
     if pos is None:
         return None
@@ -1897,4 +2013,5 @@ def state_at(p, frame):
         if strip is None:
             return None
     return ParticleState(pos, alpha, scale, min(max(p.aspect, 0.0), 15.9375), angle, rot, model_scale,
-                         rgba, p.sequence, int(pattern), anchor, line, strip, light, shape, uv_scroll, p.flip)
+                         rgba, p.sequence, int(pattern), anchor, line, strip, light, shape, uv_scroll, p.flip,
+                         place)

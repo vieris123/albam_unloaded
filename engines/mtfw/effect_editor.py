@@ -22,7 +22,7 @@ from .efl.field_help import lookup as field_help
 from .efl.edit import as_list, keyframe_value_type, to_prop, upgrade_props
 from .efl.model import SLOTS
 from .efl.sim import ROT_ORDER_NAMES, ROT_ORDERS
-from . import effect_filter
+from . import effect_filter, effect_sim
 from .effect_export import (ROT_HANDLE_KEY, ROT_HANDLE_OF, adopt_duplicate, all_record_objects, apply_to_scene,
                             effect_root, ordered_record_objects, record_object, structure_changed)
 
@@ -118,7 +118,8 @@ _FLAG_LABELS = {
     "ChainOptionFlag": ((0x1, "Main Pull in World Axes"), (0x2, "Blend Pull in World Axes"),
                         (0x4, "Main Pull Follows Movement"), (0x8, "Blend Pull Follows Movement"),
                         (0x10, "External Force"), (0x20, "Turn Blend with Main")),   # CHAIN_OPTION_FLAG
-    "RangeStripFlag": ((0x1, "Order"), (0x2, "Reverse"), (0x8, "Closed Loop"), (0x10, "Centre"),
+    "RangeStripFlag": ((0x1, "Order"), (0x2, "Reverse"), (0x4, "Ignore Normals"), (0x8, "Closed Loop"),
+                       (0x10, "Centre"),
                        (0x20, "All Parts"), (0x40, "Skinning")),   # rEffectStrip::STRIP_FLAG
 }
 
@@ -565,6 +566,15 @@ TABS = [("gen", "Generator", "Generator block: where, when and how many particle
         ("more", "More", "The record's collision and culling settings")]
 
 
+def _on_end_edit(state, context):
+    """End Effect: store it on the effect and replay its particles."""
+    if _loading or state.records_root is None:
+        return
+    root = state.records_root
+    root[effect_sim.END_KEY] = state.end_frame if state.end_at else -1
+    effect_sim.refresh_root(root, context.scene)
+
+
 def _on_filter_edit(state, context):
     """Spawn filter widgets: store the masks on the effect and re-filter its records."""
     if _loading or state.records_root is None:
@@ -582,6 +592,12 @@ class AlbamEflEditor(bpy.types.PropertyGroup):
                     "that changes what's built from the file (blending, textures, shapes, keyframes, records) "
                     "rebuilds the effect a moment later. Off: press Apply")
     live_error: bpy.props.StringProperty()
+    face_viewport: bpy.props.BoolProperty(
+        name="Face Viewport", default=False,
+        update=lambda state, context: effect_sim.set_face_viewport(state.face_viewport),
+        description="Turn camera-facing particles (billboards, ribbons) and the culling fade toward the 3D viewport "
+                    "while you orbit it, instead of toward the scene camera. Costs some speed while the view moves; "
+                    "renders always use the scene camera")
     tab: bpy.props.EnumProperty(items=TABS, default="ptcl", description="Which part of the record to edit")
     search: bpy.props.StringProperty(name="Search", options={"TEXTEDIT_UPDATE"},
                                      description="Show only the fields whose name contains this text")
@@ -596,6 +612,16 @@ class AlbamEflEditor(bpy.types.PropertyGroup):
     group_all: effect_filter.group_all_prop(_on_filter_edit)
     group_bits: effect_filter.group_bits_prop(_on_filter_edit)
     surface: effect_filter.surface_prop(_on_filter_edit)
+    end_at: bpy.props.BoolProperty(
+        name="End Effect", update=_on_end_edit,
+        description="Preview only: end the effect at a frame, as the game does when the move or animation that spawned "
+                    "it ends. Its emitters stop spawning, and particles held by Hold Until Effect Ends (Life tab) "
+                    "fade out after their KeepFrame. Off: the effect never ends and held particles stay to the end "
+                    "of the simulated range")
+    end_frame: bpy.props.IntProperty(
+        name="At Frame", update=_on_end_edit,
+        description="Timeline frame at which the preview ends the effect (not saved in the .efl: the game ends "
+                    "effects from the code that spawned them)")
     records_root: bpy.props.PointerProperty(type=bpy.types.Object)
     records: bpy.props.CollectionProperty(type=AlbamEflRecordItem)
     records_index: bpy.props.IntProperty(update=_on_record_index,
@@ -749,6 +775,9 @@ def sync_records(state, root, active=None):
             return
         state.group_all, state.group_bits, state.surface = effect_filter.options_from_masks(
             *effect_filter.get_masks(root))
+        end = root.get(effect_sim.END_KEY, -1)
+        state.end_at = end is not None and end >= 0
+        state.end_frame = end if state.end_at else int(root.get("efl_start_frame", 1)) + 60
         try:
             obs = ordered_record_objects(root)
         except Exception:   # duplicated records: still list them
@@ -1437,6 +1466,8 @@ class _EflEditorDraw:
         row = layout.row(align=True)
         row.operator("albam.efl_apply_edits", text="Apply", icon="PLAY")
         row.prop(state, "live", toggle=True, icon="RECORD_ON" if state.live else "RECORD_OFF")
+        row.prop(state, "face_viewport", toggle=True, icon="VIEW_CAMERA")
+        layout.operator("albam.efl_record_motion", icon="REC")
         if state.live_error:
             box = layout.box()
             box.label(text="The last edit couldn't be applied:", icon="ERROR")
@@ -1481,6 +1512,11 @@ class _EflEditorDraw:
                     box.label(text="No record passes: the game shows nothing", icon="ERROR")
                 else:
                     box.label(text=f"Showing {shown} of {total} records", icon="HIDE_OFF")
+                row = box.row(align=True)
+                row.prop(state, "end_at")
+                sub = row.row(align=True)
+                sub.enabled = state.end_at
+                sub.prop(state, "end_frame")
 
         box = layout.box()
         header = box.row()

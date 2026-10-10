@@ -11,7 +11,7 @@ version:
          u16 reserved (triangles, for STRIP_TYPE_MODEL; no file has any).
 STRIP_TYPE (SE enum): 0 VERTEX, 1 PATH_LINEAR, 2 PATH_HERMITE, 3 PATH_SPLINE, 4 MODEL. STRIP_FLAG: 0x1 ORDER,
 0x2 REVERSE, 0x4 NORM_OFF, 0x8 PATH_LOOP, 0x10 CENTER_FIX, 0x20 ALL_PARTS, 0x40 SKINING.
-Only positions are used here.
+curve_point / CurvePath evaluate the game's linear, hermite and 4-point spline curves (positions and normals).
 """
 from __future__ import annotations
 
@@ -126,8 +126,99 @@ def parse(data):
     return out
 
 
+def parse_normals(data):
+    """Per part, the unit normals of its points (game axes), parallel to parse()."""
+    return [[v.norm for v in part.vertices] for part in parse_strip(data).parts]
+
+
+STRIP_LINEAR, STRIP_HERMITE, STRIP_SPLINE = 1, 2, 3
+# cubic through 4 points at u = 0, 1, 2, 3 (sub_8D40F0): coefficients of (1, u, u^2, u^3) per point
+_LAGRANGE = ((1.0, -11.0 / 6.0, 1.0, -1.0 / 6.0), (0.0, 3.0, -2.5, 0.5), (0.0, -1.5, 2.0, -0.5),
+             (0.0, 1.0 / 3.0, -0.5, 1.0 / 6.0))
+
+
+def curve_point(pts, kind, seg, t, closed=False):
+    """Point on segment seg (pts[seg] -> pts[seg + 1]) at t, as the game's strip samplers compute it (the RangeStrip
+    samplers calcRangeStripLine / Curve3 / Curve4 0x99AAB0..; PathStrip calcParticleMovePathStripPos 0x975440):
+    1 linear (sub_ADBD40); 2 hermite through seg, seg + 1 with tangents pts[seg + 1] - pts[seg] and
+    pts[seg + 2] - pts[seg + 1] (sub_ADBED0; an open strip's last segment is linear); 3 the cubic through a window of
+    4 points, evaluated at the segment's place in it (sub_ADC1E0: open strips use [seg - o .. seg - o + 3] with o = 0
+    on the first segment, 2 on the last, else 1; closed ones wrap with o = 1). Works on normals the same way."""
+    n = len(pts)
+    a, b = pts[seg % n], pts[(seg + 1) % n]
+    if kind == STRIP_HERMITE and n >= 3 and (closed or seg + 2 < n):
+        c = pts[(seg + 2) % n]
+        t2, t3 = t * t, t * t * t
+        h00, h10, h01, h11 = 2 * t3 - 3 * t2 + 1, t3 - 2 * t2 + t, 3 * t2 - 2 * t3, t3 - t2
+        return tuple(h00 * p0 + h10 * (p1 - p0) + h01 * p1 + h11 * (p2 - p1) for p0, p1, p2 in zip(a, b, c))
+    if kind == STRIP_SPLINE and n >= 4:
+        if closed:
+            offset = 1
+        else:
+            offset = 0 if seg == 0 else (2 if seg == n - 2 else 1)
+        window = [pts[(seg - offset + k) % n] for k in range(4)]
+        u = offset + t
+        powers = (1.0, u, u * u, u * u * u)
+        return tuple(sum(p[axis] * sum(c * w for c, w in zip(coef, powers)) for p, coef in zip(window, _LAGRANGE))
+                     for axis in range(3))
+    return tuple(x + (y - x) * t for x, y in zip(a, b))
+
+
+class CurvePath:
+    """Arc-length lookup on a PathStrip curve (calcPathStripLength 0x9DE470: a length table with PathCurveDivideNum
+    steps per segment; sub_AE5100 turns a distance into a fractional step, which is evaluated on the curve).
+    Linear paths are exact; closed (PATH_LOOP) paths include the segment back to the first point."""
+
+    def __init__(self, points, kind=STRIP_LINEAR, divide=1, closed=False):
+        self.points = list(points)
+        self.kind, self.closed = kind, closed
+        n = len(self.points)
+        segments = n if closed and n > 1 else max(n - 1, 0)
+        steps = 1 if kind not in (STRIP_HERMITE, STRIP_SPLINE) else max(int(divide), 1)
+        self.params, self.lengths = [0.0], [0.0]
+        prev = self.points[0] if self.points else (0.0, 0.0, 0.0)
+        for seg in range(segments):
+            for j in range(1, steps + 1):
+                u = seg + j / steps
+                point = self.point(u)
+                self.params.append(u)
+                self.lengths.append(self.lengths[-1] + math.dist(prev, point))
+                prev = point
+
+    def point(self, u):
+        seg = min(int(u), max(len(self.points) - (1 if self.closed else 2), 0))
+        return curve_point(self.points, self.kind, seg, u - seg, self.closed)
+
+    @property
+    def length(self):
+        return self.lengths[-1]
+
+    def at(self, d, loop=False):
+        """(point, path_end) at arc length d."""
+        if not self.points:
+            return (0.0, 0.0, 0.0), True
+        total = self.length
+        end = False
+        if total <= 0:
+            return self.points[0], True
+        if loop:
+            d %= total
+        elif d <= 0 or d >= total:
+            end, d = True, min(max(d, 0.0), total)
+        lo, hi = 0, len(self.lengths) - 1
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if self.lengths[mid] <= d:
+                lo = mid
+            else:
+                hi = mid
+        step = self.lengths[hi] - self.lengths[lo]
+        f = (d - self.lengths[lo]) / step if step > 0 else 0.0
+        return self.point(self.params[lo] + (self.params[hi] - self.params[lo]) * f), end
+
+
 class Polyline:
-    """Arc-length lookup on a list of points (linear segments; the game also has hermite/spline modes)."""
+    """Arc-length lookup on a list of points (linear segments; CurvePath follows the game's curve modes)."""
 
     def __init__(self, points):
         self.points = list(points)
