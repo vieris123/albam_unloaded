@@ -63,6 +63,8 @@ _ENUM_LABELS = {
     "RotOrder": _ORDER_LABELS, "Order": _ORDER_LABELS, "CullingRotOrder": _ORDER_LABELS,
     "RotAxisType": _AXES, "AxisType": _AXES, "Axis": _AXES, "DirAxisType": _AXES, "CullingRotAxisType": _AXES,
     "ChainRotAxisType": _AXES, "ChainBlendRotAxisType": _AXES, "LineRotAxisType": _AXES, "CurveRotAxisType": _AXES,
+    "LineDirAxisType": _AXES, "FixDirAxisType": _AXES, "FixRotAxisType": _AXES, "ScaleMatAxisType": _AXES,
+    "ScaleMatOrder": _ORDER_LABELS,
     "CurveDirAxisType": _AXES, "ChainRotOrder": _ORDER_LABELS, "ChainBlendRotOrder": _ORDER_LABELS,
     "LineRotOrder": _ORDER_LABELS, "FixRotOrder": _ORDER_LABELS, "CurveRotOrder": _ORDER_LABELS,
     "CurveType": ("Two Hermite halves", "Sine", "Sine", "Sine", "Sine", "Sine", "Sine", "Sine", "Sine", "Sine",
@@ -81,6 +83,7 @@ _ENUM_LABELS = {
     "PathStripType": ("0", "Linear", "Hermite", "Spline"),
     "ReleaseType": ("0", "WORK_SPEED", "PATH_SPEED"),
     "RangeDisperseType": ("None", "Since last frame (OLD)", "From sub-step (SUB)"),
+    "EntryType": ("World (effects)", "Screen (last)", "Reduction (after effects)", "Overlap (with transparent)"),
     "RangeStripType": ("Point", "Line", "3-point curve", "4-point curve", "Triangle"),
 }
 # EnumProperty items must stay referenced while Blender uses them
@@ -101,7 +104,7 @@ _FLAG_LABELS = {
         (0x80000000, "Sort Bias Toward Camera"), (0x4, "Soft Edges"), (0x10, "Refraction"), (0x20, "Full Resolution"),
         (0x80, "No Depth Test"), (0x1000, "No Fog"), (0x400000, "Face Culling"), (0x400, "Parallax Volume"),
         (0x800, "Depth Volume"), (0x200, "World Scale"), (0x40000, "Scale After Rotation"), (0x100000, "Ignore Generator Rotation"),
-        (0x200000, "Keep Spawn Rotation"), (0x10000, "Pivot at PatCenter"), (0x20000, "Extended Line Position"),
+        (0x200000, "Keep Spawn Rotation"), (0x10000, "Pivot at PatCenter"), (0x20000, "Trim Collapsed Line Ends"),
         (0x80000, "Fade Edges")),
     "LightAttribute": ((0x2, "SH"), (0x8, "Per-Pixel"), (0x10, "Simple")),   # rEffectList::LIGHT_ATTR
     "CullingFlag": ((0x1, "Distance / Angle Fade"), (0x2, "Occlusion Test"), (0x4, "Per Particle"),
@@ -111,6 +114,10 @@ _FLAG_LABELS = {
     "MoveOptionFlag": ((0x2, "Gravity Ignores Scale"), (0x4, "High Accuracy"),
                        (0x8, "Always Correct")),   # MOVE_OPTION_FLAG bits DX9 reads (1 COLLISION isn't)
     "RangeOptionFlags": ((0x1, "Each Frame"),),   # RANGE_OPTION_FLAG_EACH_FRAME
+    "CollFlag": ((0x1, "Stop Flipbook"), (0x2, "Stop Spin"), (0x4, "Release Hold")),   # COLL_FLAG (final hit)
+    "ChainOptionFlag": ((0x1, "Main Pull in World Axes"), (0x2, "Blend Pull in World Axes"),
+                        (0x4, "Main Pull Follows Movement"), (0x8, "Blend Pull Follows Movement"),
+                        (0x10, "External Force"), (0x20, "Turn Blend with Main")),   # CHAIN_OPTION_FLAG
     "RangeStripFlag": ((0x1, "Order"), (0x2, "Reverse"), (0x8, "Closed Loop"), (0x10, "Centre"),
                        (0x20, "All Parts"), (0x40, "Skinning")),   # rEffectStrip::STRIP_FLAG
 }
@@ -632,7 +639,7 @@ def _add_field(state, slot, f, value):
         item.note = reason or item.note
     elif base == "str64":
         item.kind = "text"
-    elif f.name in _FLAG_LABELS and slot in ("ptcl", "gen", "life", "move") and n is None and \
+    elif f.name in _FLAG_LABELS and slot.split(":")[0] in ("ptcl", "gen", "life", "move") and n is None and \
             base in ("u8", "u16", "u32", "s8", "s16", "s32"):
         item.kind = "flags"
     elif base == "u32":
@@ -812,6 +819,7 @@ def _live_apply():
     """The timer: queued work from the depsgraph handler, then the pending applies."""
     state = _state()
     queue, _queue[:] = list(_queue), []
+    queue.sort(key=lambda job: job[0] != "adopt")   # copies become records before anything counts records
     for job in queue:
         try:
             _run_job(job, state)
@@ -847,7 +855,13 @@ def _run_job(job, state):
             schedule_live_apply(root)
     elif kind == "structure" and state.live:
         for root in bpy.data.objects:
-            if root.albam_asset.extension == "efl" and root.get("efl_data") and structure_changed(root):
+            if root.albam_asset.extension != "efl" or not root.get("efl_data"):
+                continue
+            try:
+                changed = structure_changed(root)
+            except AlbamCheckFailure:   # e.g. a copy not adopted yet; its own job applies the effect
+                continue
+            if changed:
                 schedule_live_apply(root)
 
 

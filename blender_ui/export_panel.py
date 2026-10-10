@@ -1,6 +1,7 @@
 import time
 
 import bpy
+from bpy.app.handlers import persistent
 
 from albam.registry import blender_registry
 from albam.vfs import (
@@ -27,9 +28,72 @@ class AlbamExportSettings(bpy.types.PropertyGroup):
     force_max_num_weights: bpy.props.BoolProperty(default=False)
 
 
+def is_stale(item):
+    """the item's object was deleted: gone, or in no collection any more (X keeps it alive while the list points
+    at it, so a missing object can still look present)"""
+    ob = item.bl_object
+    return ob is None or (isinstance(ob, bpy.types.Object) and not ob.users_collection)
+
+
+# extension -> callback(object) run when an export entry is dropped because its object was deleted
+ON_CULL = {}
+
+
+def cull_exportables(scene):
+    """drop export entries of deleted objects (cull handlers of their extension run first). Returns how many."""
+    items = scene.albam.exportable.file_list
+    dropped = 0
+    for i in reversed(range(len(items))):
+        if not is_stale(items[i]):
+            continue
+        ob = items[i].bl_object
+        callback = ON_CULL.get(ob.albam_asset.extension) if ob is not None else None
+        if callback is not None:
+            try:
+                callback(ob)
+            except Exception as err:        # noqa: BLE001 - never block the cleanup
+                print(f"export list cleanup {ob.name}: {err}")
+        items.remove(i)
+        dropped += 1
+    if dropped:
+        scene.albam.exportable.file_list_selected_index = min(scene.albam.exportable.file_list_selected_index,
+                                                              max(len(items) - 1, 0))
+    return dropped
+
+
+_cull_pending = [False]
+
+
+def _cull_timer():
+    _cull_pending[0] = False
+    for scene in bpy.data.scenes:
+        if hasattr(scene, "albam"):
+            cull_exportables(scene)
+    return None
+
+
+@persistent
+def _on_depsgraph(scene, depsgraph):
+    if not _cull_pending[0] and any(is_stale(item) for item in scene.albam.exportable.file_list):
+        _cull_pending[0] = True
+        bpy.app.timers.register(_cull_timer, first_interval=0.0)
+
+
+def register_handlers():
+    if _on_depsgraph not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph)
+
+
+def unregister_handlers():
+    for handler in list(bpy.app.handlers.depsgraph_update_post):
+        if getattr(handler, "__name__", "") == _on_depsgraph.__name__ and \
+                getattr(handler, "__module__", "") == _on_depsgraph.__module__:
+            bpy.app.handlers.depsgraph_update_post.remove(handler)
+
+
 @blender_registry.register_blender_prop
 class ExportableItem(bpy.types.PropertyGroup):
-    # FIXME: hook to remove from list when object is deleted
+    # dropped by cull_exportables (depsgraph handler) when its object is deleted
     bl_object : bpy.props.PointerProperty(type=bpy.types.ID)
 
     @property
@@ -55,6 +119,11 @@ class ALBAM_UL_ExportableObjects(bpy.types.UIList):
 
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         layout.label(text=item.display_name)
+
+    def filter_items(self, context, data, propname):
+        # deleted objects disappear right away; the depsgraph handler removes their entries
+        items = getattr(data, propname)
+        return [0 if is_stale(item) else self.bitflag_filter_item for item in items], []
 
 
 @blender_registry.register_blender_type
@@ -196,7 +265,7 @@ class ALBAM_OT_Export(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         item = cls.get_selected_item(context)
-        if not item:
+        if not item or is_stale(item):
             return False
         albam_asset = item.bl_object.albam_asset
         if (albam_asset.app_id, albam_asset.extension) not in blender_registry.exportable_extensions:

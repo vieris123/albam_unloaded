@@ -25,7 +25,7 @@ from mathutils import Euler, Matrix, Quaternion, Vector
 from albam.registry import blender_registry
 from .efl import EffectList
 from .efl.ean import ANIM_FLIP_U, ANIM_FLIP_V, flip_affine_row
-from .efl.sim import (CULL_PER_PARTICLE, ROT_ORDERS, SPACE_FOLLOW, SPACE_FOLLOW_TRANSLATION, culling_fade, simulate,
+from .efl.sim import (CULL_PER_PARTICLE, ROT_ORDERS, ext_line_range, SPACE_FOLLOW, SPACE_FOLLOW_TRANSLATION, culling_fade, simulate,
                       state_at)
 
 NODE_GROUP = "ALBAM_EFL_Particles_v5"   # v1: uv_off/uv_scale; v2: affine uv_u/uv_v; v3: + tint; v4: + shape;
@@ -434,8 +434,14 @@ def _update_lines(ob, scene, info):
     for p, s in _alive_states(ob, frame):
         if not s.line:
             continue
+        line = s.line
+        if info.get("ext_line_pos"):   # ParticleOptionFlag 0x20000
+            span = ext_line_range([q for q, *_ in line])
+            if span is None:
+                continue
+            line = line[span[0]:span[1] + 1]
         pts = []
-        for q, anchor, width, rgba in s.line:
+        for q, anchor, width, rgba in line:
             m = gen_now if space == SPACE_FOLLOW or anchor is None else _birth_matrix(ob, scene, anchor, gen_now)
             pts.append((m @ (Vector(q) * SCALE), LINE_HALF_WIDTH * SCALE if hairline else width * SCALE * unit, rgba))
         last = len(pts) - 1

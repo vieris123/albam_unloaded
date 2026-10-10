@@ -212,7 +212,7 @@ GENERATOR = Struct("EFL_GENERATOR", 0x1E0, "dx9", [
     F(0x50, "member_0x50", "vec3", "prior"),
     F(0x5C, "someJointIdx", "s32", "prior"),
     F(0x60, "member_0x60", "vec4", "prior"),
-    F(0x70, "AxisFlags", "u32", "prior", "bitfield word"),
+    F(0x70, "AxisFlags", "u32", "dx9", "bitfield word"),
     F(0x74, "WaitFrame", "rangeu16", "dx9", "initGeneratorParam 0x96B1C0 -> Gen+0xCE"),
     F(0x78, "Scale", "rangef[3]", "dx9", "0x96B339 -> Gen mLscaleBase"),
     F(0x90, "Range", "rangef[3]", "dx9", "spawn-shape extents, uknGenBehaviorFunc2 0x998F5F"),
@@ -261,8 +261,19 @@ GENERATOR = Struct("EFL_GENERATOR", 0x1E0, "dx9", [
     F(0x1D8, "KeyframePosParamOffset", "rel32", "dx9", "mStatus 0x80; position, generator timer (updateWorldMatrix 0x96BE10)", sub="kf:vec3"),
     F(0x1DC, "KeyframeRotParamOffset", "rel32", "dx9", "mStatus 0x100; Euler rotation in AxisFlags order (updateWorldMatrix 0x96BE10)", sub="kf:vec3"),
 ], [
-    B("Order", "AxisFlags", 0, 4, "prior"),
-    B("AxisType", "AxisFlags", 4, 4, "prior"),
+    B("Order", "AxisFlags", 0, 4, "dx9",
+      "rotation order of the generator rotation keyframe (updateWorldMatrix 0x96BE10 -> sub_9600A0(rot, AxisFlags & 0xF))"),
+    B("AxisType", "AxisFlags", 4, 4, "dx9",
+      "read only for the header unit generator (moveUnitGenerator 0x97004E): 6 = its Quat, else identity + axis "
+      "tracking (sub_967950); record generators don't read it"),
+    B("ScaleMatOrder", "AxisFlags", 12, 4, "corpus",
+      "no DX9 reader (4 in every file); the second matrix's counterpart of Order"),
+    B("ScaleMatAxisType", "AxisFlags", 16, 4, "corpus",
+      "no DX9 reader (6 in every file); the second matrix's counterpart of AxisType"),
+    B("ScaleMatRelationType", "AxisFlags", 20, 4, "dx9",
+      "RelationType of Generator mParticleScaleWmat (+0x190), built after the World Scale test (mFlags 0x80000 = "
+      "ParticleOptionFlag 0x200) in updateWorldMatrix 0x96BE10: 3 = ignore the parent (0x96EBDB), 2 = own Quat in "
+      "world axes (0x96F92D); 2 on 110 records"),
     B("RelationType", "AxisFlags", 8, 4, "dx9", "Generator+0x110 (initChildGenerator 0x96BC3F) -> setQuatParentOfs "
       "0x9687B0: 2 = parent position (Pos turned by the joint), own Quat in world axes; 3 = ignore the parent; "
       "else full parenting. Files: 0 (32,074), 2 (2,609), 1 (20)"),
@@ -273,7 +284,10 @@ GENERATOR = Struct("EFL_GENERATOR", 0x1E0, "dx9", [
 PTCL_COMMON = [
     F(0x00, "TransMode", "u8", "dx9", "cTrans::MODE pass mask as on every uModel (not a blend mode): 0x1 WORLD, 0x2 REFLECTION, "
                                        "0x4 SHADOW_RECV, 0x8 SHADOW_CAST, 0x10 ENV, 0x20 MOTIONBLUR; corpus: 1, 0, once 3"),
-    F(0x01, "EntryType", "u8", "se"),
+    F(0x01, "EntryType", "u8", "dx9",
+      "nEffect::ENTRY_TYPE -> draw pass (cTrans::PASS) in initGeneratorParam (switch on ptcl+1 -> Generator+0x1C, "
+      "passed to sPrim::getcPrim by every renderer): 0 WORLD -> 6 EFFECT, 1 SCREEN -> 10 END, 2 REDUCTION -> 7 "
+      "TRANSPARENT_NZ, 3 OVERLAP -> 5 TRANSPARENT, other -> 6; SE 4-6 don't exist in DX9"),
     F(0x02, "CullingFlag", "u8", "dx9",
       "rEffectList::CULLING_FLAG: 0x1 ON (culling draw variant, mTransType 0x11..), 0x2 OCCLUSION (prim ATTR_OCCLUSION, "
       "checked before refraction; initGeneratorParam 0x96B603), 0x4 PARTICLE, 0x80 ANGLE (direction computed once per "
@@ -289,7 +303,7 @@ PTCL_COMMON = [
       "ATTR_NOZTEST, 0x1000 ATTR_NOFOG, 0xC00000 ATTR_CULLING, 0x400 / 0x800 PARALLAX / DEPTH_VOLUME with "
       "VolumeBlendRate, 0x200 WMAT_SCALE, 0x40000 MDLSCL_AFTER (scale after rotation), 0x100000 ROT_LOCAL (no generator "
       "rotation: world axes), 0x200000 ROT_INIT (+ ROT_LOCAL; Rot += Euler of the spawn-time generator rotation) (initGeneratorParam 0x96B560, calcParticleMatrix "
-      "0x98A77F / 0x98B3FE), 0x10000 PAT_CENTER, 0x20000 EXT_LINE_POS (line renderers), 0x80000 = border vertices get alpha 0 "
+      "0x98A77F / 0x98B3FE), 0x10000 PAT_CENTER, 0x20000 EXT_LINE_POS (renderPolyline / Texline / Line -> sub_9B2900 -> sub_B0FEE0: only the first run of segments longer than sqrt(0.1) cm is drawn), 0x80000 = border vertices get alpha 0 "
       "(buildPrimModelRing 0x9CDB1B; SE calls it EDGE_ALPHA_OFF but in DX9 set means fade); "
       "0x8 INV_VOLUME has no DX9 reader"),
     F(0x08, "LightGroupFlag", "u32", "dx9",
@@ -305,7 +319,11 @@ PTCL_COMMON_BITS = [
     B("BlendDst", "PrimMaterialFlags", 4, 4, "dx9", "D3DBLEND - 1 (5 = INVSRCALPHA alpha blend, 1 = ONE additive)"),
     B("BlendOp", "PrimMaterialFlags", 8, 4, "dx9", "D3DBLENDOP - 1 (0 = ADD, 2 = REVSUBTRACT)"),
     B("PassBits", "PrimMaterialFlags", 12, 4, "dx9", "Generator+24 bits 8-11 (initGeneratorParam), ANDed with the view's "
-                                                     "cTrans CONTEXT.mMode bits 8-11 by isGeneratorVisible 0x53D460; not a cTrans::PASS"),
+                                                     "cTrans CONTEXT.mMode bits 8-11 by isGeneratorVisible 0x53D460; not a cTrans::PASS. "
+                                                     "beginSubScene clears mode 0x100 / 0x200 and sets 0x400; mode 0x100 is set by "
+                                                     "uModel::transReflection, sub_A9A730, sub_AC51E0, sub_ACDE00 (reflection-type views); "
+                                                     "nothing sets 0x200; bits 10-13 are a one-hot view kind (sub_8E6830). So 1 = also "
+                                                     "drawn in those views, 2 = no effect"),
 ]
 PTCL_DRAW = [
     F(0x14, "OtDepthBias", "f32", "dx9", "sort position moved this far toward the camera when ParticleOptionFlag's "
@@ -319,7 +337,8 @@ PTCL_DRAW = [
     F(0x3C, "member_0x3c", "s32", "unknown"),
     F(0x40, "ColorFlag", "u8", "dx9", "nEffect::COLOR_FLAG: 1/2/4/8 mix R/G/B/A toward Color1 by a random t, 0x10 re-roll "
                                        "t per channel (calcSrcColor 0x9801B0); 0x20 CHOICE not in DX9"),
-    F(0x41, "DrawFlags_0x41", "u8", "dx9", "bit0 KeyframePatSpeedParamFlag (test dword@0x40 & 0x100)"),
+    F(0x41, "DrawFlags_0x41", "u8", "dx9", "bit0 KeyframePatSpeedParamFlag (test dword@0x40 & 0x100); bits 0x2 / 0x40 "
+      "(2 particles each) have no DX9 reader"),
     F(0x42, "KeyframeColorParamOffset", "rel16", "se", sub="kf:color"),
     F(0x44, "KeyframePatNoParamOffset", "rel16", "dx9", "initParticleBillboard 0x977E71; 12-byte keys (corpus)", sub="kf:f32"),
     F(0x46, "CullingParamOffset", "rel16", "dx9", "SE marks this padding", sub="culling"),
@@ -340,7 +359,7 @@ PTCL_PRIM = [
     F(0x50, "AnimFlag", "u16", "dx9",
       "rEffectAnim::ANIM_FLAG: 1 MOVE, 2 LOOP, 4 REVERSE, 8 FINISH (sub_961DB0), 0x100 / 0x200 flip U / V, 0x1000 "
       "rotate (sub_9632F0), 0x400 / 0x800 flip U / V at random per particle (getAnimFlag 0x980140); REVERSE_RAND "
-      "0x10 not in DX9, 0x8000 KEYFRAME is runtime-only"),
+      "0x10 not in DX9, 0x8000 KEYFRAME is runtime-only, 0x2000 (4 particles) has no DX9 reader (particle copy +0x70)"),
     F(0x52, "SeqNoMin", "u8", "dx9", "initParticleBillboard 0x978090"),
     F(0x53, "SeqNoRange", "u8", "dx9"),
     F(0x54, "PatNoMin", "u16", "dx9"),
@@ -649,7 +668,12 @@ MOVE_PATH = [
 ]
 _CHAIN = 0x80   # EFL_PARAM_CHAIN inside EFL_MOVE_PATH_CHAIN
 MOVE_CHAIN_PARAM = [
-    F(_CHAIN + 0x00, "ChainOptionFlag", "u16", "dx9"),
+    F(_CHAIN + 0x00, "ChainOptionFlag", "u16", "dx9",
+      "rEffectList::CHAIN_OPTION_FLAG, moveChain 0x994C20: 1 NO_MAT_DIR / 2 NO_MAT_BDIR = that pull isn't turned by the "
+      "generator (world axes, scaled per axis); 4 REF_RANGE_DIR / 8 REF_RANGE_BDIR = with the owner's move flag 0x80 "
+      "the pull is the owner particle's movement direction (Move None: spawn direction; Add / Mul, flag 0x100: "
+      "world velocity); 0x10 FORCE_BLEND = external force solvers; 0x20 MUL_MAT_BDIR = blend pull turned by the arc "
+      "ChainRot axis -> main pull; 0x40 STRETCH no reader found; PathChain moves pass flags 0 (no REF_RANGE)"),
     F(_CHAIN + 0x02, "member_chain_0x02", "u16", "unknown", "not read by the chain code"),
     F(_CHAIN + 0x04, "ChainRotAxis", "u8", "dx9", "nibbles: RotAxisType, RotOrder"),
     F(_CHAIN + 0x05, "ChainBlendRotAxis", "u8", "dx9", "nibbles: BlendRotAxisType, BlendRotOrder"),
@@ -737,7 +761,11 @@ _LENGTH_EXT = [
     F(0x48, "LineKeyframeRotParamOffset", "rel32", "dx9", sub="kf:vec3"),
     F(0x4C, "LineKeyframeLengthParamOffset", "rel32", "dx9", sub="kf:f32"),
 ]
-_LENGTH_BITS = [B("LineRotAxisType", "LineRotFlags", 0, 4, "dx9"), B("LineRotOrder", "LineRotFlags", 4, 4, "dx9")]
+_LENGTH_BITS = [B("LineRotAxisType", "LineRotFlags", 0, 4, "dx9"), B("LineRotOrder", "LineRotFlags", 4, 4, "dx9"),
+                B("LineDirAxisType", "LineRotFlags", 8, 4, "dx9",
+                  "6 = off; else the stick follows the particle's movement direction each frame and LineRot is "
+                  "replaced by the arc LineRotAxisType -> movement (sub_993560); also the ROT_INIT axis (sub_981050 -> "
+                  "sub_98C800). Files: 6 on 1,839, 4 on 510, 2 on 132, 0 on 65, other 41")]
 _FIX_EXT = [
     F(0x00, "FixModelScale", "rangef[3]", "dx9", "scales the stored points"),
     F(0x18, "FixModelScaleAdd", "rangef[3]", "dx9", "per frame"),
@@ -746,7 +774,12 @@ _FIX_EXT = [
     F(0x60, "FixFlags", "u32", "dx9"),
     F(0x64, "member_fix_0x64", "u32[3]", "unknown"),
 ]
-_FIX_BITS = [B("FixRotOrder", "FixFlags", 4, 4, "dx9")]
+_FIX_BITS = [B("FixRotAxisType", "FixFlags", 0, 4, "corpus", "no DX9 reader found (FIX init / move read only the "
+                  "order and the DirAxisType nibbles)"),
+             B("FixRotOrder", "FixFlags", 4, 4, "dx9"),
+             B("FixDirAxisType", "FixFlags", 8, 4, "dx9",
+               "axis for ROT_INIT's spawn rotation (sub_980620 -> sub_98C800; 6 = the generator's rotation); 6 in every "
+               "file")]
 _CLOTH_SUB = [
     F(0x00, "ClothSubRange", "rangef[3]", "dx9", "tail point P1 = generator x SubOfs, drawn with sub_999040"),
     F(0x18, "ClothSubRangeType", "u32", "dx9", "RangeType shapes"),
@@ -875,7 +908,10 @@ FIELD_ALIASES = {
 
 COLLISION = Struct("EFL_PARAM_COLLISION", 0xB0, "dx9", [
     F(0x00, "CollType", "u8", "dx9", "COLL_TYPE: 0 KILL, 1 MOVE_STOP, 2 COLL_STOP"),
-    F(0x01, "CollFlag", "u8", "dx9", "bit0 FIN_ANIM_STOP"),
+    F(0x01, "CollFlag", "u8", "dx9",
+      "rEffectList::COLL_FLAG, applied on the final hit (no bounces left; moveParticlePosCollision 0x99A210 -> move "
+      "result): 1 FIN_ANIM_STOP (result 4: flipbook stops, sub_98E000 clears status 0x20), 2 FIN_ROT_STOP (result 8: "
+      "spin stops, angle add +0xA0 = 0), 4 FIN_KEEP_HOLD_OFF (result 2: releases a life hold); 8+ no DX9 reader"),
     F(0x02, "CollCancelFrame", "u8", "dx9"),
     F(0x03, "member_0x3", "u8", "unknown", "no DX9 reader"),
     F(0x04, "CollRadiusAdd", "f32", "dx9", "per-frame growth, clamped at CollRadius s+r"),
@@ -905,7 +941,8 @@ CULLING = Struct("EFL_PARAM_CULLING", 0x30, "se", [   # uEffectVFR::calc_culling
     F(0x20, "CullingAngleStart", "f32", "dx9", "radians; option 0x800: 1 up to it, then 1 - (a - Start) / Rate"),
     F(0x24, "CullingAngleEnd", "f32", "dx9", "a = acos(dir . to camera); 0 from it on; without 0x800: 1 - a / End"),
     F(0x28, "CullingRate", "f32", "dx9"),
-    F(0x2C, "OcclusionRadius", "f32", "se"),
+    F(0x2C, "OcclusionRadius", "f32", "se", "no reader in calc_culling_fade / init_culling_dir; 0 in all 893 culling "
+      "blocks"),
 ], [
     B("CullingFlag", "CullingFlags", 0, 8, "dx9", "CULLING_FLAG: 0x4 per particle, 0x80 angle fade, 0x2 occlusion"),
     B("CullingRotAxisType", "CullingFlags", 8, 4, "dx9"),

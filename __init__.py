@@ -95,6 +95,10 @@ def register():
     register_effect_handlers()
     from albam.engines.mtfw.cns_chain_preview import register_handlers as register_chain_handlers
     register_chain_handlers()
+    from albam.engines.mtfw.col_shapes import register_handlers as register_col_handlers
+    register_col_handlers()
+    from albam.blender_ui.export_panel import register_handlers as register_export_handlers
+    register_export_handlers()
     from albam.engines.mtfw.effect_editor import register_editor
     register_editor()
 
@@ -111,6 +115,10 @@ def unregister():
     unregister_effect_handlers()
     from albam.engines.mtfw.cns_chain_preview import unregister_handlers as unregister_chain_handlers
     unregister_chain_handlers()
+    from albam.engines.mtfw.col_shapes import unregister_handlers as unregister_col_handlers
+    unregister_col_handlers()
+    from albam.blender_ui.export_panel import unregister_handlers as unregister_export_handlers
+    unregister_export_handlers()
     from albam.engines.mtfw.effect_editor import unregister_editor
     unregister_editor()
 

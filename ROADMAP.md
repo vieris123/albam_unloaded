@@ -36,7 +36,8 @@ The preview follows the DX9 code for these, but they haven't been compared with 
 
 - [ ] **Model chains (2026-10-10).** Patch an edited chain (e.g. Nero's coat `pl000_03_00.phs` with another mSpring /
   mGravity) and compare the coat with Albam's motion preview (Nero + coat LMTs, coat attached at body joint 2): swing,
-  how far it clips the legs when dashing (the preview clips mid-segment like the decompiled solver predicts).
+  how far it clips the legs when dashing (the preview clips mid-segment like the decompiled solver predicts). Then
+  a new chain / new `.col` (New Chain from Selected Bones, New Collision Shapes) loaded by the user's own loader.
 - [ ] **A moving floor (2026-10-10).** Edit or add a `uStageSetMoveFloor` piece (e.g. st405's blades: `blade01.sdl` +
   `st405-a-02.sbc`, part ID 0), Patch it in, check the floor moves, carries the player and collides; then a new
   platform following the recipe in `CLAUDE.md` ("Moving collision").
@@ -47,20 +48,6 @@ The SE PDB names these, but their DX9 meaning hasn't been checked. Two SE names 
 (ParticleOptionFlag 0x10 is refraction, not ALPHA_BLUR; ModelAnimFlag 0x10 is UV scroll, not REVERSE_RAND), so verify
 in the DX9 code before trusting one.
 
-- [ ] **`ChainOptionFlag`** (SE: 0x1 NO_MAT_DIR, 0x2 NO_MAT_BDIR, 0x20 MUL_MAT_BDIR). The preview treats 0x1 / 0x2 as
-  world-fixed pulls.
-- [ ] **Collision `CollFlag`.** In moveParticlePosCollision (0x99A210) bit 0 returns move result 4 (FIN_ANIM_STOP),
-  bit 1 returns 8 (SE FIN_ROT_STOP?) and bit 2 returns 2, which releases a life hold (FIN_KEEP_HOLD_OFF, confirmed
-  2026-10-10). What results 4 and 8 do hasn't been traced; SE also names PATH_CANCEL, SPHERE_CORRECT, ROT_ATTENUATE.
-- [ ] **Generator `AxisFlags` `Order` / `AxisType`** (unverified).
-- [ ] **`ParticleOptionFlag` 0x20000** (SE EXT_LINE_POS, 1,807 particles): only the line renderers read it
-  (renderPolyline / Texline / Line); what it changes is unknown.
-- [ ] **`PassBits`** (PrimMaterialFlags bits 12-15): which views set the matching mode bits 8-11, and the per-particle
-  call it triggers at spawn (effect vtable slot 42 in initParticleBillboard).
-- [ ] **`LightGroupFlag` matching rule.** It's the same light-group mask models use (`uModel` +0x130, from the `.mod`
-  header 0x88), but the code that compares a light's group with a model's hasn't been found. The tooltips say
-  "most likely when they share a bit".
-- [ ] **Culling `OcclusionRadius`**: SE-named, DX9 use not traced.
 - [ ] **LiteBillboard / SizeBillboard layouts** (particle types 16 / 17): the DX9 code has readers
   (`initParticleLiteBillboard` 0x9DCB70, `initParticleSizeBillboard` 0x97F4E0, which reads keyframe offsets at
   0x1D8 / 0x1DC), but no file uses them and only their 0x170-byte common part is known. Change Type doesn't offer
@@ -78,7 +65,8 @@ The game behaviour is known; Blender doesn't show it yet.
 - [ ] **PrimModel rim fade** (`NormAttenuateFlag`, NormAttenuateAngle*): fade where the surface is edge-on to the
   camera; value 3 makes it one-sided.
 - [ ] **World Scale** (`ParticleOptionFlag` 0x200 WMAT_SCALE): particle size follows the generator's scale
-  (updateWorldMatrix 0x96E835).
+  (updateWorldMatrix 0x96E835), through Generator `mParticleScaleWmat`, which follows the parent per
+  `ScaleMatRelationType` (AxisFlags bits 20-23).
 - [ ] **Life hold releases other than the end of the range.** Held particles (`HoldUntilEffectEnds`, 1,506) stay
   until the end of the simulated range or `HoldFrameLimit`; a path move's end with PathOptionFlag 4 (34 of them) and
   collisions with CollFlag 4 also release them in the game. An "effect ends at frame" preview option would let the
@@ -108,17 +96,21 @@ The game behaviour is known; Blender doesn't show it yet.
   - Billboard modes 2-4 are a reflection in the game; the preview uses the matching rotation (same look on a flat
     quad, texture may be mirrored).
 - [ ] **Renderer-dependent, only roughly possible in Blender:** soft edges (`ParticleOptionFlag` 0x4), the volume
-  shader (`VolumeBlendRate`, 26,626 particles), lighting (`LightGroupFlag`), fog, the game's draw order.
+  shader (`VolumeBlendRate`, 26,626 particles), lighting (`LightGroupFlag`), fog, the game's draw order (including `EntryType`'s draw passes: Screen draws last, Overlap with ordinary transparent objects).
 
 ## Larger features
 
+- [ ] **Model chains: check per-bone limits in the game.** No shipped chain enables mBoneAdjust; Albam writes and
+  previews it from the decompiled code (grid 2 clamps cleanly, grids 0 / 1 don't measure back inside their limits as
+  decoded). Patch a chain with a limited bone and compare.
 - [ ] **Model chains: Dante's coat attachment.** The preview's Attach to Body uses body joint 2, which is what
   `uPlayerNero::initModel` does for Nero's coat; Dante's (pl006_03, `uPlayerDante::setupDanteModel`?) wasn't traced.
 - [ ] **Hitboxes (saved for later, 2026-10-10).** Four file types keyed to a model's joints, already mined in IDA
   (per the user) and described by 010 templates in `E:\DMC mod stuffs\DMC4 templates`:
-  - `.col` = `rCollisionShape` (shapes): codec done (`dmc4xml/col.py`, byte-exact on 110 DX9 files); Blender import
-    done (2026-10-10, `col_shapes.py`: sphere / capsule objects on the joints, coloured by group flags), export of
-    edited shapes still to do. Hitbox files also use joint -1, placed in the model's own space (a guess: check it
+  - `.col` = `rCollisionShape` (shapes): codec done (`dmc4xml/col.py`, byte-exact on 110 DX9 files); Blender import,
+    export and new files done (2026-10-10, `col_shapes.py`: sphere / capsule objects on the joints, edited with
+    move / scale / Shift+D / X / re-parent, groups' kind and flags in the panel; untouched files export
+    byte-identical). Check an edited / new `.col` in the game. Hitbox files also use joint -1, placed in the model's own space (a guess: check it
     against the game). Which groups are on comes from the LMT's first event table (bit k = group
     events_params_01[k]); the preview shows / hides groups with it. Groups carry
     kind (cCollisionGroup.mKind) and flags (1 attack, 2 hurt, 4 push, 8 grab, 0x20 friendly attack); shapes are
@@ -131,8 +123,8 @@ The game behaviour is known; Blender doesn't show it yet.
     mMaxInterrupt[5], mMaxBlown[5].
   - `.rCollisionIdxData` (13 files): a tab-separated text table (first line = row count), probably linking shape
     groups to attack / defend entries; not decoded yet.
-  - Plan: codecs for atk / dfd / idx in dmc4xml (byte-exact on the corpus), then Albam: `.col` export from the shape
-    objects, groups with kind / flags editable, and the attack / defend entries alongside.
+  - Plan: codecs for atk / dfd / idx in dmc4xml (byte-exact on the corpus), then Albam: the attack / defend entries
+    editable alongside the `.col` groups.
 - [ ] **Editable `.mod` model settings beyond the light group** (`model_info`: middist, lowdist, strip type).
 - [ ] **Particle keyframes as F-curves.** The Keys tab is a custom list because the game's keys carry a random part
   per key, a timer kind, loop and init-only, which F-curves don't. They could map onto F-curves on custom properties
@@ -168,8 +160,8 @@ beyond plain XML editing. Ranked by: spatial data (in a level or on a skeleton, 
 classes and `.sdl` / `.pla`; binary formats need a codec first). Already native: `.mod`, `.tex`, `.lmt`, `.efl` /
 `.efs` / `.ean`, `.sbc`, `.sdl`, `.pla`, `.phs` / `.clt`, `.col` (import).
 
-1. [ ] **Hitboxes:** `.atk` (145), `.dfd` (23), `.idx` (23), plus `.col` export (114). Binary, so not even
-   XML-editable yet; shapes on joints, switched by LMT events. See "Hitboxes" above.
+1. [ ] **Hitboxes:** `.atk` (145), `.dfd` (23), `.idx` (23); `.col` (114) import / export / new is done.
+   Binary, so not even XML-editable yet; shapes on joints, switched by LMT events. See "Hitboxes" above.
 2. [ ] **Camera areas, `.cam` rDevilCamera** (17, XFS): cCameraNormal mCameraPos / mTargetPos / mCameraUp / mFov /
    Fog, area boxes (`mppBox`), area links (cCamAreaConnect). Cameras, boxes and link lines in Blender.
 3. [ ] **Level trigger volumes:** `.evh` rEventHit (18, XFS: cEventHitData Shape, Pos0-3, PosY, Height, facing

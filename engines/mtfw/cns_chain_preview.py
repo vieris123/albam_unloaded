@@ -35,6 +35,7 @@ pl000_03.col), and a coat model (COAT_BODY_JOINT) is attached to the shapes' bod
 missing is listed on the chain (`phs_status`, shown in the Chain panel).
 """
 import json
+import math
 import random
 
 import bpy
@@ -43,14 +44,16 @@ from mathutils import Matrix, Vector
 
 from albam.registry import blender_registry
 from albam.engines.mtfw import col_shapes
-from albam.engines.mtfw.cns_chain import (ARMATURE_PROP, _stem, attach_chain, chain_armature,
-                                          chain_joints, find_chain_armature, _joint_bones)
+from albam.engines.mtfw import cns_chain
+from albam.engines.mtfw.cns_chain import (ARMATURE_PROP, COLLECTION_PROP, JOINTS_PROP, _stem, attach_chain,
+                                          chain_armature, chain_joints, find_chain_armature, _joint_bones)
 
 SCALE = 0.01                        # game cm -> m
 GAME_STEP = 60.0                    # solver steps per second
 RESET_FRAMES = 2                    # move 0x4309C0: the reset state lasts until its timer (+1 per frame) reaches 3
 EPS = 1.1920929e-07
-BASE_PROP = "phs_preview_base"      # Empty: {bone name: 16 floats}, the chain bones' pose without the preview
+BASE_PROP = "_phs_preview_base"     # Empty: {bone name: 16 floats}, the chain bones' pose without the preview
+                                    # (leading _: Blender hides it in Custom Properties; a dict can't have a tooltip)
 NO_JOINT = 255
 
 
@@ -103,6 +106,43 @@ def _orient(primary_axis, primary, hint_axis, hint):
     cols[other].normalize()
     cols[hint_axis] = cols[(hint_axis + 1) % 3].cross(cols[(hint_axis + 2) % 3]).normalized()
     return Matrix((cols[0], cols[1], cols[2])).transposed()
+
+
+def limit_angles(local, limits):
+    """mBoneAdjust (calcJointImpl 0x433376 before the blend, 0x43418D after it): the bone's measured axis (column
+    `grid` of its rotation in the parent's frame) gives two angles (cUtil::calcAngleXY / calcPitch + atan2), each
+    clamped to its Min / Max (degrees); if either was clamped the rotation is rebuilt from the two angles (the game's
+    order: grid 2 X then Y, grid 1 X then Z, grid 0 Y then Z; no roll), the position kept."""
+    grid, lo, hi = limits
+    d = local.to_3x3().normalized().col[grid]
+    if grid == 2:
+        a1, a2, i1, i2 = -math.atan2(d.y, math.hypot(d.x, d.z)), math.atan2(d.x, d.z), 0, 1
+    elif grid == 1:
+        a1, a2, i1, i2 = -math.atan2(d.y, math.hypot(d.x, d.z)), math.atan2(d.y, d.x), 0, 2
+    else:
+        a1, a2, i1, i2 = math.atan2(d.x, d.z), math.atan2(d.y, d.x), 1, 2
+    a1, a2 = math.degrees(a1), math.degrees(a2)
+    clamped = False
+    if lo[i1] > a1:
+        a1, clamped = lo[i1], True
+    if a1 > hi[i1]:
+        a1, clamped = hi[i1], True
+    if lo[i2] > a2:
+        a2, clamped = lo[i2], True
+    if a2 > hi[i2]:
+        a2, clamped = hi[i2], True
+    if not clamped:
+        return local
+    r1, r2 = math.radians(a1), math.radians(a2)
+    if grid == 2:
+        rot = Matrix.Rotation(r2, 3, "Y") @ Matrix.Rotation(r1, 3, "X")
+    elif grid == 1:
+        rot = Matrix.Rotation(r2, 3, "Z") @ Matrix.Rotation(r1, 3, "X")
+    else:
+        rot = Matrix.Rotation(r2, 3, "Z") @ Matrix.Rotation(r1, 3, "Y")
+    out = rot.to_4x4()
+    out.translation = local.translation
+    return out
 
 
 def _blend(sim, anim, w):
@@ -192,7 +232,9 @@ class _Chain:
         self.s = _settings(ob)
         problems = []
         bones = _joint_bones(arm)
-        self.joints = [bones[j].name if j in bones else None for j in chain_joints(ob, problems)]
+        # one entry per slot: None for the -1 between tendrils (the slot after a tendril's tip holds its tail)
+        self.joints = [bones[j].name if j >= 0 and j in bones else None for j in chain_joints(ob, problems)]
+        self.limits = [cns_chain.bone_limits(arm.pose.bones[n]) if n is not None else None for n in self.joints]
         self.rng = random.Random(self.name)
         self.mats = [Matrix.Identity(4) for _ in range(len(self.joints) + 1)]
         self.vel = [Vector() for _ in range(len(self.joints) + 1)]
@@ -251,7 +293,7 @@ class _Chain:
         if self.in_reset:
             self.mats[slot] = joint.copy()
             self.vel[slot] = Vector()
-            if nxt >= len(self.joints):
+            if nxt >= len(self.joints) or self.joints[nxt] is None:     # a tendril's tip: place its tail
                 tail = joint.copy()
                 d = s["dir"]
                 axis = _axis(_rotation(joint), {2: 5}.get(d, d))      # the reset's switch: 2 is -Z, like 5
@@ -305,14 +347,22 @@ class _Chain:
             if built is not None:
                 rot = built
         sim = rot.to_4x4()
-        sim.translation = self.mats[slot].translation if slot > 0 else origin
+        # a tendril's root (slot 0, or right after a -1) keeps its animated position; the others sit on node i
+        sim.translation = self.mats[slot].translation if slot > 0 and self.joints[slot - 1] is not None else origin
+        limits = self.limits[slot]
         if parent_final is None:
-            final = _blend(sim, joint, s["blend"])
+            frame = Matrix.Identity(4)
         else:
             frame = _rotation(parent_final).to_4x4()
             frame.translation = parent_final.translation
-            inv = frame.inverted_safe()
-            final = frame @ _blend(inv @ sim, inv @ joint, s["blend"])
+        inv = frame.inverted_safe()
+        local_sim = inv @ sim
+        if limits is not None:
+            local_sim = limit_angles(local_sim, limits)
+        local = _blend(local_sim, inv @ joint, s["blend"])
+        if limits is not None:
+            local = limit_angles(local, limits)
+        final = frame @ local
         self.mats[slot] = final.copy()
         return final
 
@@ -373,11 +423,11 @@ def _shapes(ob, arm, world_of):
     return out
 
 
-_col_cache = {}     # COL_ Empty name -> (size of its bytes, parsed rCollisionShape)
+_col_cache = {}     # COL_ Empty name -> (frame, parsed rCollisionShape as the objects have it now)
 
 
 def _collision_source(ob):
-    """(parsed .col, the armature its shapes hang on) of a chain, or None"""
+    """(parsed .col as its objects are now, the armature its shapes hang on) of a chain, or None"""
     settings = ob.albam_phs
     root = settings.collision_shapes
     if not settings.collision or root is None:
@@ -385,11 +435,16 @@ def _collision_source(ob):
     arm = root.get(ARMATURE_PROP)
     if not isinstance(arm, bpy.types.Object) or arm.type != "ARMATURE":
         return None
-    data = root.albam_asset.original_bytes
+    frame = bpy.context.scene.frame_current
     cached = _col_cache.get(root.name)
-    if cached is None or cached[0] != len(data):
-        cached = _col_cache[root.name] = (len(data), col_shapes.read_col(root))
-    return cached[1], arm
+    if cached is None or cached[0] != frame:
+        from dmc4xml import col as col_codec
+        try:
+            current = col_codec.read(col_shapes.build_col(root))     # edited shapes included
+        except Exception:                   # noqa: BLE001 - a broken edit: fall back to the file
+            current = col_shapes.read_col(root)
+        cached = _col_cache[root.name] = (frame, current)
+    return (cached[1], arm) if cached[1] is not None else None
 
 
 def default_col_path(ob):
@@ -492,12 +547,17 @@ def preview_chains(scene):
     return out
 
 
+def _limits_key(ob):
+    arm, names = _chain_bone_names(ob)
+    return repr([cns_chain.bone_limits(arm.pose.bones[n]) for n in names]) if arm is not None else ""
+
+
 def _key(arm, chain_obs):
     parts = [arm.name]
     for ob in chain_obs:
         s = ob.albam_phs
         parts.append((ob.name, repr(sorted((k, repr(_settings(ob)[k])) for k in _settings(ob))),
-                      tuple(chain_joints(ob, [])), s.collision,
+                      tuple(chain_joints(ob, [])), _limits_key(ob), s.collision,
                       s.collision_shapes.name if s.collision_shapes else "",
                       repr(s.collision_shapes.get(ARMATURE_PROP)) if s.collision_shapes else ""))
     return repr(parts)
@@ -559,9 +619,66 @@ def _on_load(_dummy=None):
     _col_cache.clear()
 
 
+# ---- Shift+D on a chain Empty makes a new chain ---------------------------------------------------------------------
+
+def adopt_chain_copies(context=None):
+    """A copied PHS_ Empty (its name isn't the one it was made with) becomes a chain of its own: the next free file
+    name next to its model, its own bone collection with the same bones, its own export list entry; settings stay
+    as copied, the preview starts off. Returns the adopted chains."""
+    context = context or bpy.context
+    adopted = []
+    for ob in list(bpy.data.objects):
+        if ob.type != "EMPTY" or ob.albam_asset.extension not in ("phs", "clt") or cns_chain.NAME_PROP not in ob:
+            continue
+        if ob.name == ob[cns_chain.NAME_PROP]:
+            continue
+        joints = chain_joints(ob, [])                       # the source's bone collection, still shared
+        if COLLECTION_PROP in ob:
+            del ob[COLLECTION_PROP]
+        if BASE_PROP in ob:
+            del ob[BASE_PROP]
+        ob.albam_phs.preview = False
+        ob[JOINTS_PROP] = joints
+        model = ob.get("phs_model", "") or ob.albam_asset.relative_path
+        ob.albam_asset.relative_path = cns_chain.next_chain_path(context, model, ob.albam_asset.extension)
+        arm = chain_armature(ob)
+        if arm is not None:
+            attach_chain(ob, arm)
+        exportable = context.scene.albam.exportable.file_list.add()
+        exportable.bl_object = ob
+        ob[cns_chain.NAME_PROP] = ob.name
+        cns_chain.apply_tips(ob)
+        adopted.append(ob)
+    return adopted
+
+
+_adopt_pending = [False]
+
+
+def _adopt_timer():
+    _adopt_pending[0] = False
+    try:
+        adopt_chain_copies()
+    except Exception as err:                # noqa: BLE001 - never break editing
+        print(f"PHS copy: {err}")
+    return None
+
+
+@persistent
+def _on_depsgraph(scene, depsgraph):
+    for update in depsgraph.updates:
+        ob = update.id.original if isinstance(update.id, bpy.types.Object) else None
+        if ob is not None and cns_chain.NAME_PROP in ob and ob.name != ob[cns_chain.NAME_PROP]:
+            if not _adopt_pending[0]:
+                _adopt_pending[0] = True
+                bpy.app.timers.register(_adopt_timer, first_interval=0.0)
+            return
+
+
 def register_handlers():
     for handlers, fn in ((bpy.app.handlers.frame_change_pre, _on_frame_change_pre),
                          (bpy.app.handlers.frame_change_post, _on_frame_change_post),
+                         (bpy.app.handlers.depsgraph_update_post, _on_depsgraph),
                          (bpy.app.handlers.load_post, _on_load)):
         if fn not in handlers:
             handlers.append(fn)
@@ -570,6 +687,7 @@ def register_handlers():
 def unregister_handlers():
     for handlers, fn in ((bpy.app.handlers.frame_change_pre, _on_frame_change_pre),
                          (bpy.app.handlers.frame_change_post, _on_frame_change_post),
+                         (bpy.app.handlers.depsgraph_update_post, _on_depsgraph),
                          (bpy.app.handlers.load_post, _on_load)):
         for handler in list(handlers):
             if getattr(handler, "__name__", "") == fn.__name__ and \
@@ -731,7 +849,8 @@ def wire_scene(context):
                     _runners.pop(arm.name, None)
             if body is not None and arm.parent != body:
                 status.append(f"The coat isn't on the body: use Attach to Body (joint {joint})")
-        ob["phs_status"] = status
+        ob["phs_status"] = "\n".join(status)
+        cns_chain.apply_tips(ob)
 
 
 # ---- operators ------------------------------------------------------------------------------------------------------
@@ -782,7 +901,7 @@ class ALBAM_OT_MtfwAttachToArmature(bpy.types.Operator):
             self.report({"ERROR"}, f"'{self.armature}' isn't an armature in this scene")
             return {"CANCELLED"}
         if col_shapes.is_col_root(target):
-            missing = col_shapes.build_shapes(target, arm, context)
+            missing = col_shapes.attach_shapes(target, arm, context)
             _col_cache.pop(target.name, None)
             _runners.clear()
         else:
@@ -864,6 +983,35 @@ class ALBAM_OT_PhsSimulateRange(bpy.types.Operator):
 
 # ---- panels ---------------------------------------------------------------------------------------------------------
 
+# the chain's settings in the Chain panel, grouped (they're the Empty's custom properties, so each shows its
+# tooltip from cns_chain.HELP; Custom Properties lists them too)
+CHAIN_SETTING_GROUPS = (
+    ("Forces", "FORCE_WIND", (("mGravity", "Gravity"), ("mGravityLocal", "Gravity in Parent's Frame"),
+                              ("mWind", "Wind"), ("mWindLocal", "Wind in Parent's Frame"),
+                              ("mTurbulence", "Turbulence"))),
+    ("Response", "PHYSICS", (("mSpring", "Spring"), ("mDamping", "Damping"), ("mMaxSpeed", "Max Speed"),
+                             ("mBlend", "Blend with Animation"))),
+    ("Shape", "BONE_DATA", (("mDir", "Pointing Axis"), ("mUp", "Up Axis"), ("mTailLength", "Tail Length"),
+                            ("mStretch", "Stretch"), ("mStretchLimit", "Stretch Limit"))),
+    ("Collision & Floor", "MOD_PHYSICS", (("mCollisionSize", "Collision Radius"), ("mFloorLevel", "Floor Height"))),
+    ("Carried by Parent", "CON_CHILDOF", (("mParentMode", "Parent"), ("mPosLocal", "Follow Position"),
+                                          ("mPosLocalY", "Follow Height Only"), ("mRotLocal", "Follow Rotation"))),
+)
+
+
+def _draw_chain_settings(layout, ob):
+    box = layout.box()
+    box.label(text="Settings (hover a field for what it does)", icon="PREFERENCES")
+    for title, icon, fields in CHAIN_SETTING_GROUPS:
+        present = [(k, label) for k, label in fields if k in ob]
+        if not present:
+            continue
+        col = box.column(align=True)
+        col.label(text=title, icon=icon)
+        for key, label in present:
+            col.prop(ob, f'["{key}"]', text=label)
+
+
 @blender_registry.register_blender_type
 class ALBAM_PT_PhsChain(bpy.types.Panel):
     bl_label = "Chain"
@@ -893,6 +1041,16 @@ class ALBAM_PT_PhsChain(bpy.types.Panel):
         missing = list(ob.get("phs_missing_joints", []))
         if missing:
             box.label(text=f"Joints not on the armature: {missing}", icon="ERROR")
+        if arm is not None:
+            bones = _joint_bones(arm)
+            col = box.column(align=True)
+            for k, tendril in enumerate(cns_chain.tendrils(chain_joints(ob, []))):
+                first, last = bones.get(tendril[0]), bones.get(tendril[-1])
+                col.label(text=f"Tendril {k + 1}: {first.name if first else tendril[0]} -> "
+                               f"{last.name if last else tendril[-1]} ({len(tendril)} bone(s))", icon="IPO_LINEAR")
+            box.label(text="Roots / limits: select a bone, Bone Properties > Chain Bone", icon="INFO")
+
+        _draw_chain_settings(layout, ob)
 
         box = layout.box()
         box.prop(settings, "collision")
@@ -918,50 +1076,165 @@ class ALBAM_PT_PhsChain(bpy.types.Panel):
         row.enabled = settings.preview
         row.operator("albam.phs_simulate_range", icon="PLAY")
 
-        for line in ob.get("phs_status", []):
+        status = ob.get("phs_status", "")
+        for line in (status.splitlines() if isinstance(status, str) else list(status)):
             layout.label(text=line, icon="INFO")
 
 
 @blender_registry.register_blender_type
-class ALBAM_PT_ColShapes(bpy.types.Panel):
-    bl_label = "Collision Shapes"
+class ALBAM_OT_PhsNew(bpy.types.Operator):
+    """Make a new chain (.phs) from the selected bones of this armature (parents first, 32 at most), with the game's
+    default settings; edit them in the chain Empty's Custom Properties and preview it. (Shift+D on a chain Empty
+    also makes a new chain, with that chain's settings)"""
+    bl_idname = "albam.phs_new"
+    bl_label = "New Chain from Selected Bones"
+    bl_options = {"REGISTER", "UNDO"}
+
+    path: bpy.props.StringProperty(
+        name="Game Path", description="Where the chain file goes in the game (.phs, or .clt, the game's own "
+                                      "extension); Patch adds it to the archive")
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        return ob is not None and ob.type == "ARMATURE" and ob.mode == "POSE" and \
+            any(b.select for b in ob.data.bones)
+
+    def invoke(self, context, event):
+        arm = context.object
+        self.path = cns_chain.next_chain_path(context, arm.albam_asset.relative_path or arm.name)
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        arm = context.object
+        path = self.path.strip().replace("/", "\\")
+        if not path.lower().endswith((".phs", ".clt")):
+            path += ".phs"
+        if any(o.albam_asset.relative_path.lower() == path.lower() for o in bpy.data.objects
+               if o.albam_asset.extension in ("phs", "clt")):
+            self.report({"ERROR"}, f"{path} is already in the scene")
+            return {"CANCELLED"}
+        try:
+            ob = cns_chain.new_chain(context, arm, [b for b in arm.data.bones if b.select], path)
+        except Exception:                   # noqa: BLE001 - shown in the popup
+            bpy.ops.albam.error_handler_popup("INVOKE_DEFAULT")
+            return {"CANCELLED"}
+        wire_scene(context)
+        joints = [j for j in ob[JOINTS_PROP] if j >= 0]
+        self.report({"INFO"}, f"{ob.name}: {len(joints)} joint(s) in {len(cns_chain.tendrils(ob[JOINTS_PROP]))} "
+                              f"tendril(s), file {path}")
+        return {"FINISHED"}
+
+
+@blender_registry.register_blender_type
+class ALBAM_PT_ArmatureChains(bpy.types.Panel):
+    bl_label = "Model Chains"
     bl_space_type = "PROPERTIES"
     bl_region_type = "WINDOW"
     bl_context = "object"
 
     @classmethod
     def poll(cls, context):
-        return col_shapes.col_root_of(context.object) is not None
+        return context.object is not None and context.object.type == "ARMATURE"
 
     def draw(self, context):
-        root = col_shapes.col_root_of(context.object)
+        arm = context.object
         layout = self.layout
-        if root != context.object:
-            layout.label(text=f"Part of {root.name}", icon="OBJECT_DATA")
-        arm = _shape_armature(root)
-        row = layout.row()
-        row.label(text=f"On {arm.name}" if arm else "Not on an armature", icon="ARMATURE_DATA" if arm else "ERROR")
-        row.operator("albam.attach_to_armature", text="Attach", icon="LINKED")
-        missing = list(root.get("col_missing_joints", []))
-        if missing:
-            layout.label(text=f"Joints not on the armature: {missing}", icon="ERROR")
-        if col_shapes.FOLLOW_PROP in root:
-            layout.prop(root, f'["{col_shapes.FOLLOW_PROP}"]', text="Follow Animation Events")
-            groups = col_shapes.active_groups(root, context.scene.frame_current)
-            if root[col_shapes.FOLLOW_PROP]:
-                layout.label(text="No LMT events on this armature's action: every group shown" if groups is None
-                             else f"On at this frame: groups {sorted(groups)}", icon="TIME")
+        chains = [o for o in _chain_objects(context.scene) if chain_armature(o) == arm]
         col = layout.column(align=True)
-        kinds, flags = list(root.get("col_group_kinds", [])), list(root.get("col_group_flags", []))
-        shapes = {}
-        for entry in json.loads(root.get(col_shapes.SHAPES_PROP, "[]")):
-            shapes[entry[4]] = shapes.get(entry[4], 0) + 1
-        summary = {}                    # (kind, flags) -> [groups, shapes]
-        for i, (kind, flag) in enumerate(zip(kinds, flags)):
-            row = summary.setdefault((kind, flag), [0, 0])
-            row[0] += 1
-            row[1] += shapes.get(i, 0)
-        col.label(text=f"{len(kinds)} group(s), {sum(shapes.values())} shape(s) built", icon="MESH_CAPSULE")
-        for (kind, flag), (groups, count) in sorted(summary.items(), key=lambda kv: -kv[1][0]):
-            col.label(text=f"{groups} x kind {kind}, {col_shapes.flag_text(flag)}: {count} shape(s)")
-        layout.label(text="Import only: edits aren't exported yet", icon="INFO")
+        for o in chains:
+            col.label(text=f"{o.name}: {len(_chain_bone_names(o)[1])} bone(s)  ({o.albam_asset.relative_path})",
+                      icon="LINKED")
+        if not chains:
+            col.label(text="No chains on this armature", icon="INFO")
+        row = layout.row()
+        row.enabled = arm.mode == "POSE"
+        row.operator("albam.phs_new", icon="ADD")
+        if arm.mode != "POSE":
+            layout.label(text="Pose Mode: select the chain's bones", icon="INFO")
+
+
+# ---- deleted chains / collision files: cleanup when their export entry is dropped -----------------------------------
+
+def _on_chain_deleted(ob):
+    """a chain Empty was deleted: put its bones back (preview) and remove its bone collection unless a live chain
+    still uses it"""
+    _clear_base(ob)
+    arm = chain_armature(ob)
+    name = ob.get(COLLECTION_PROP, "")
+    if arm is None or not name:
+        return
+    in_use = any(o != ob and o.users_collection and o.get(COLLECTION_PROP) == name and chain_armature(o) == arm
+                 for o in bpy.data.objects)
+    coll = arm.data.collections.get(name)
+    if coll is not None and not in_use:
+        arm.data.collections.remove(coll)
+    _runners.pop(arm.name, None)
+
+
+def _on_col_deleted(root):
+    """a COL_ root was deleted: its shape objects go too (they're the file's contents)"""
+    for ob in col_shapes.members(root):
+        if ob.users_collection:
+            bpy.data.objects.remove(ob)
+    _col_cache.pop(root.name, None)
+
+
+def _register_cull():
+    from albam.blender_ui.export_panel import ON_CULL
+    ON_CULL["phs"] = ON_CULL["clt"] = _on_chain_deleted
+    ON_CULL["col"] = _on_col_deleted
+
+
+_register_cull()
+
+
+@blender_registry.register_blender_type
+class ALBAM_PT_ChainBone(bpy.types.Panel):
+    bl_label = "Chain Bone"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "bone"
+
+    @staticmethod
+    def _pose_bone(context):
+        ob = context.object
+        bone = context.bone
+        if ob is None or ob.type != "ARMATURE" or bone is None:
+            return None
+        return ob.pose.bones.get(bone.name)
+
+    @classmethod
+    def poll(cls, context):
+        pb = cls._pose_bone(context)
+        return pb is not None and bool(cns_chain._chains_with_bone(pb))
+
+    def draw(self, context):
+        pb = ALBAM_PT_ChainBone._pose_bone(context)
+        layout = self.layout
+        chains = cns_chain._chains_with_bone(pb)
+        joint = int(pb.bone[cns_chain.JOINT_PROP])
+        bones = _joint_bones(pb.id_data)
+        for ob in chains:
+            for k, tendril in enumerate(cns_chain.tendrils(chain_joints(ob, []))):
+                if joint in tendril:
+                    i = tendril.index(joint)
+                    role = "root" if i == 0 else "tip" if i == len(tendril) - 1 else f"bone {i + 1} of {len(tendril)}"
+                    tip = bones.get(tendril[-1])
+                    layout.label(text=f"{ob.name}, tendril {k + 1}: {role} (tip {tip.name if tip else tendril[-1]})",
+                                 icon="LINKED")
+        s = pb.albam_chain
+        layout.prop(s, "root")
+        box = layout.box()
+        box.prop(s, "adjust")
+        col = box.column()
+        col.enabled = s.adjust
+        col.prop(s, "grid", expand=True)
+        used = {"0": "Y and Z", "1": "X and Z", "2": "X and Y"}[s.grid]
+        row = col.row()
+        row.column().prop(s, "limit_min")
+        row.column().prop(s, "limit_max")
+        col.label(text=f"Degrees; this axis uses the {used} limits", icon="INFO")
+        if s.grid != "2":
+            col.label(text="X / Y: the game re-measures these off its limits (its math); Z behaves", icon="ERROR")
+        box.label(text="No game chain turns limits on: check the effect in the game", icon="ERROR")

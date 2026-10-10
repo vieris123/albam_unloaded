@@ -352,7 +352,8 @@ class _EffectBuilder:
             if parts:
                 part = parts[min(max(move.get("PathStripPartsNo"), 0), len(parts) - 1)]
                 extra["strip"] = [c for point in part for c in point]
-        if ptcl.type in CLOTH_TYPES:
+        chain_option = _chain_option(record)
+        if ptcl.type in CLOTH_TYPES or chain_option & 3:   # world-fixed pulls (cloth, ChainOptionFlag NO_MAT_DIR / BDIR)
             axes = self.world_axes()
             if axes is not None:
                 extra["world_axes"] = axes
@@ -363,6 +364,8 @@ class _EffectBuilder:
         culling = sim_culling_params(ptcl)
         if culling is not None:
             extra["culling"] = culling
+        if ptcl.type in (1, 3, 4) and ptcl.get("ParticleOptionFlag") & 0x20000:   # renderPolyline / Texline / Line
+            extra["ext_line_pos"] = True   # draw only the first run of real segments (sim.ext_line_range)
         if ptcl.type in (2, 5, 6):   # calcParticleMatrix / Polygon sub_988B00: rotation options, move-direction axis
             option = ptcl.get("ParticleOptionFlag")
             axis = ptcl.get("DirAxisType") if ptcl.has("DirAxisType") else 6
@@ -770,6 +773,14 @@ class _EffectBuilder:
 
 
 # ---------------------------------------------------------------------------------------------
+
+def _chain_option(record):
+    """ChainOptionFlag of a record's rope (Polyline CHAIN particle or PathChain move), or 0."""
+    for block in (record.ptcl, record.move):
+        if block is not None and block.has("ChainOptionFlag"):
+            return block.get("ChainOptionFlag")
+    return 0
+
 
 UNTEXTURED_PRIM_MODELS = (0, 2, 4)   # Ring, Sphere, Grid: renderPrimModelRing / Sphere / Grid never fetch a texture
 

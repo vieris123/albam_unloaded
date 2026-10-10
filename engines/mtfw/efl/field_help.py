@@ -7,8 +7,21 @@ meaning.
 
 HELP = {
     # -- gen -------------------------------------------------------------------------------------------------
-    'gen:AxisFlags': 'Packed word holding Order, AxisType and RelationType. Edit those fields instead.',
-    'gen:AxisType': "Not understood yet (the name suggests an axis choice); keep the game's value.",
+    'gen:AxisFlags': (
+        'Packed word holding Order, AxisType, RelationType and their counterparts for the World Scale matrix '
+        '(ScaleMat...). Edit those fields instead.'
+    ),
+    'gen:ScaleMatOrder': "No effect in the DX9 game (every game file has 4); keep the game's value.",
+    'gen:ScaleMatAxisType': "No effect in the DX9 game (every game file has 6); keep the game's value.",
+    'gen:ScaleMatRelationType': (
+        'Like RelationType, but for the matrix the particles take their size from when World Scale (Particle tab) is '
+        'on: 2 = follow the parent joint\'s position but keep a world rotation, 3 = ignore the parent. The preview '
+        'does not model World Scale yet.'
+    ),
+    'gen:AxisType': (
+        "No effect on a record's generator: the game reads it only for the effect's unit generator (6 = use its own "
+        "rotation). Keep the game's value."
+    ),
     'gen:BurstNum': (
         'Number of bursts before the generator stops spawning. 0 = repeat forever (until the game ends the effect).'
     ),
@@ -248,9 +261,10 @@ HELP = {
         'sets it.'
     ),
     'ptcl:ChainOptionFlag': (
-        'Rope options (bits). 0x10: external wind can push the rope (ChainForceRate). 0x20: BlendRot is turned along '
-        'with the ChainRot direction. 1 / 2: the ChainRot / BlendRot pulls stay fixed in the world instead of turning'
-        ' with the generator.'
+        'Rope options (bits). 1 / 2: the main / blend pull stays in world axes instead of turning with the generator.'
+        " 4 / 8: the main / blend pull follows the particle's own movement (its spawn direction, or its velocity "
+        'when it moves) instead of ChainRot / BlendRot; particle ropes only. 0x10: external wind can push the rope '
+        '(ChainForceRate). 0x20: BlendRot is turned along with the main pull.'
     ),
     'ptcl:ChainRot': (
         'Angles in radians that turn the ChainRotAxis direction into the main pull direction of the rope. Can be '
@@ -383,12 +397,14 @@ HELP = {
         '0x1 makes the PatNo keyframe set the flipbook speed (frames per frame) instead of the flipbook frame number.'
     ),
     'ptcl:EntryType': (
-        'Probably picks the draw list (render layer) the particle is queued in. Not confirmed in the DX9 game; keep '
-        "the game's value."
+        'Which draw pass the particle is drawn in, so what it draws over. World (the normal effect layer, almost '
+        'every particle); Screen: last of all, over everything including screen filters and refraction; Reduction: '
+        'just after the normal effects; Overlap: together with ordinary transparent objects, before the effects. '
+        'Blender has no such passes, so the preview ignores it.'
     ),
     'ptcl:FixFlags': (
-        "Packed word of the FIX shape options; bits 4-7 are FixRotOrder. The other bits aren't understood yet; keep "
-        'them.'
+        'Packed word of the FIX shape options: FixRotAxisType, FixRotOrder and FixDirAxisType. Edit those fields '
+        'instead.'
     ),
     'ptcl:FixModelScale': 'Scale of the stored FIX points along X, Y, Z. 1 = as stored.',
     'ptcl:FixModelScaleAdd': 'Change of FixModelScale per frame; positive grows the shape, negative shrinks it.',
@@ -463,9 +479,10 @@ HELP = {
         'previewed in Blender.'
     ),
     'ptcl:LightAttribute': (
-        "How the Light particle's light is computed: SH (0x2, spherical harmonics), Per-Pixel (0x8; the game drops it "
-        "when the light can't do per-pixel) or Simple (0x10). Every game file uses Simple. The Blender preview always "
-        'uses a point light.'
+        "How the Light particle's light reaches models: SH (0x2) adds it to their ambient (spherical-harmonics) "
+        'lighting, Per-Pixel (0x8) puts it in the short per-pixel light list, Simple (0x10) in the simple light list '
+        '(point lights only). A light with neither Per-Pixel nor Simple is skipped by the model light pass. Every game '
+        'file uses Simple. The Blender preview always uses a point light.'
     ),
     'ptcl:LightColorW': (
         "Passed to the light as the fourth component of its colour; the game's files use 1 or 2. Probably a "
@@ -473,8 +490,8 @@ HELP = {
     ),
     'ptcl:LightGroupFlag': (
         "Light-group mask, the same kind the game's models use (one bit per group). On a Light particle it is the "
-        'groups its light shines on (0xFFFFFFFF = all, as most files do); a model is most likely lit when its own '
-        'light group shares a bit with it. On other particles it makes them lit by lights of those groups; 0 = unlit (most '
+        'groups its light shines on (0xFFFFFFFF = all, as most files do); a model is lit by it when its own '
+        'light group (Model Settings) shares at least one bit with it. On other particles it makes them lit by lights of those groups; 0 = unlit (most '
         'effects; mainly Model particles use it). The Blender preview draws particles unlit.'
     ),
     'ptcl:LightMaskY': 'Not read by the DX9 game (a Special Edition field); editing it has no effect.',
@@ -502,8 +519,18 @@ HELP = {
     'ptcl:LineRotAxisType': (
         'Bits 0-3 of LineRotFlags: the base axis of the stick before LineRot (0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z).'
     ),
+    'ptcl:LineDirAxisType': (
+        'None (6) = the stick points along LineRot. Any other axis: the stick turns to follow the particle\'s '
+        'movement every frame (its velocity, or its spawn direction when it does not move) and LineRot is not used. '
+        'Most spark and streak lines use +Z (4).'
+    ),
+    'ptcl:FixRotAxisType': "No effect found in the DX9 game; keep the game's value.",
+    'ptcl:FixDirAxisType': (
+        "Only with Keep Spawn Rotation (Particle tab): the axis turned toward the particle's movement for its spawn "
+        'rotation; None (6) uses the generator\'s rotation. Every game file has 6.'
+    ),
     'ptcl:LineRotFlags': (
-        'Packed word: bits 0-3 are LineRotAxisType and bits 4-7 LineRotOrder. Edit those fields instead.'
+        'Packed word: LineRotAxisType (bits 0-3), LineRotOrder (4-7) and LineDirAxisType (8-11). Edit those fields instead.'
     ),
     'ptcl:LineRotOrder': 'Bits 4-7 of LineRotFlags: the rotation order used to apply LineRot (as RotOrder).',
     'ptcl:LineType': (
@@ -583,8 +610,10 @@ HELP = {
         'shader variant (with VolumeBlendRate). Size and rotation: World Scale follows the parent\'s scale, Scale '
         'After Rotation applies ModelScale along the turned axes, Ignore Generator Rotation keeps the particle on world '
         "axes (it doesn't turn with the generator or toward its movement), Keep Spawn Rotation adds the generator's "
-        'rotation at spawn time and then keeps it (Model / PrimModel). Pivot at PatCenter, Extended '
-        'Line Position (lines), Fade Edges (PrimModel border vertices fade to transparent).'
+        'rotation at spawn time and then keeps it (Model / PrimModel). Pivot at PatCenter. Trim Collapsed Line Ends '
+        '(Polyline / Texline / Line): draw only the first stretch of the line whose segments are longer than about '
+        '0.3 cm, so trail points still bunched at the spawn point are not drawn. Fade Edges (PrimModel border '
+        'vertices fade to transparent).'
     ),
     'ptcl:PartsNoMax': (
         'Highest mesh group a keyframe on the part number can select; keyed values are clamped to it.'
@@ -597,9 +626,9 @@ HELP = {
         'How many extra mesh groups above PartsNoMin a particle may pick at random. 0 always draws PartsNoMin.'
     ),
     'ptcl:PassBits': (
-        'Extra view bits next to TransMode: the generator is drawn in a view if the view shares a bit with '
-        'TransMode or with these (1 and 2 = view mode bits 8 and 9, which views clear by default). Which views set '
-        "them isn't known yet; the files use 1 (most), 0 and 2. Keep the game's value."
+        'Extra views to draw in, next to TransMode: the generator is drawn in a view if the view shares a bit with '
+        'TransMode or with these. 1: also the reflection-type views (the ones model reflections are drawn in), '
+        'which is what most effects use. 2: no view sets this bit, so it adds nothing. 0: only the TransMode views.'
     ),
     'ptcl:PatCenter': (
         'A pixel position inside the flipbook frame, from its top-left corner, used as the pivot: for billboards with'
@@ -877,9 +906,10 @@ HELP = {
         'sets it.'
     ),
     'move:ChainOptionFlag': (
-        'Rope options (bits). 0x10: external wind can push the rope (ChainForceRate). 0x20: BlendRot is turned along '
-        'with the ChainRot direction. 1 / 2: the ChainRot / BlendRot pulls stay fixed in the world instead of turning'
-        ' with the generator.'
+        'Rope options (bits). 1 / 2: the main / blend pull stays in world axes instead of turning with the generator.'
+        " 4 / 8: the main / blend pull follows the particle's own movement (its spawn direction, or its velocity "
+        'when it moves) instead of ChainRot / BlendRot; particle ropes only. 0x10: external wind can push the rope '
+        '(ChainForceRate). 0x20: BlendRot is turned along with the main pull.'
     ),
     'move:ChainPosNum': (
         "Number of points (nodes) in the generator's rope that PathChain particles ride. More points give a smoother,"
@@ -1046,8 +1076,9 @@ HELP = {
         ' at once. The game reads this byte and member_0x3 together as one 16-bit number (this is the low byte).'
     ),
     'collision:CollFlag': (
-        "Collision options (bits). Bit 0 (finish: stop animation): probably freezes the particle's flipbook animation"
-        ' when it stops on a surface.'
+        'What happens when the particle collides for the last time (no bounces left). Stop Flipbook freezes its '
+        'animation frame, Stop Spin stops its rotation, Release Hold ends a Hold Until Effect Ends (Life tab): it '
+        'then stays KeepFrame more frames and fades out. Other bits have no effect in the DX9 game.'
     ),
     'collision:CollRadius': (
         'Collision radius in cm: the particle hits when it gets this close to a surface. Unlike other ranges, base is'

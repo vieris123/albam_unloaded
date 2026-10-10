@@ -58,7 +58,7 @@ Sources (DX9):
     colour     rgb * Intensity (clamped 0..127) as in the XfPrim vertex shader
 Not modelled: collision with real stage geometry, the game's RNG table, LoopFrameDist/SetFrameDist fractional
 spreading, external wind on ropes and cloth, rope and cloth response to emitter motion (they live in generator space),
-world-fixed rope pulls (ChainOptionFlag 1/2), hermite/spline .efs interpolation (linear here), the keyed spawn path's
+world-fixed rope pulls (ChainOptionFlag 1/2) use the axes measured at import, hermite/spline .efs interpolation (linear here), the keyed spawn path's
 skipped burst smear, Polygon DivideNum strips (same look), the ZIGZAG ease-in weight (0x100).
 """
 from __future__ import annotations
@@ -543,6 +543,31 @@ def emission_schedule(gen, rng, max_frames):
     return out
 
 
+EXT_LINE_POS = 0x20000           # ParticleOptionFlag: lines draw only their first run of real segments
+_EXT_LINE_MIN_SQ = 0.1           # cm^2: shorter segments count as collapsed (sub_B0FEE0)
+
+
+def ext_line_range(points):
+    """ParticleOptionFlag 0x20000 EXT_LINE_POS (renderPolyline / Texline / Line -> sub_9B2900 -> sub_B0FEE0): skip the
+    leading collapsed segments (squared length <= 0.1 cm^2, e.g. trail points still stacked at the spawn point), then
+    keep points until the next collapsed segment. Returns (first, last) point indices, or None: nothing is drawn."""
+    n = len(points) - 1   # segments
+
+    def long(i):
+        a, b = points[i], points[i + 1]
+        return sum((x - y) * (x - y) for x, y in zip(a, b)) > _EXT_LINE_MIN_SQ
+
+    first = 0
+    while first < n and not long(first):
+        first += 1
+    if first >= n:
+        return None
+    last = first + 1
+    while last < n and long(last):
+        last += 1
+    return first, last
+
+
 def strip_point(gen, strip_parts, rng, serial):
     """Spawn point on the generator's .efs strip (RangeStripPath), unscaled cm, or None."""
     if not strip_parts:
@@ -675,7 +700,8 @@ class _Template:
         if rng is not None and move is not None and move.type == 4 and move.has("ChainPosNum"):
             nodes = max(move.get("ChainPosNum"), 2)
             self.path_rope = GeneratorRope(Rope(_chain_params(move.data, 0x80, rng, nodes), nodes,
-                                                self.path_length_scale, _rope_keys(move, rng), birth=None))
+                                                self.path_length_scale, _rope_keys(move, rng), birth=None,
+                                                world=world_axes))
 
 
 def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
@@ -713,6 +739,7 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
         for name in ("move_rot", "speed", "fall"):
             keys.pop(name, None)
     life_frames = None
+    held_keep = None   # KeepFrame of a held particle (frames left once a release comes)
     if life is not None and life.type in (1, 2):
         life_frames = tuple(_ru(rng, life.get(k)) for k in ("AppearFrame", "KeepFrame", "VanishFrame"))
         if template.keep_key is not None:   # the keyframe replaces KeepFrame, evaluated once at spawn
@@ -722,11 +749,13 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
             if keep is not None:
                 life_frames = (life_frames[0], max(int(keep), 0), life_frames[2])
         if life.get("HoldUntilEffectEnds"):   # the Keep phase waits for the effect to end (moveParticleLifeFrame)
-            appear, _keep, vanish = life_frames
+            appear, held_keep, vanish = life_frames
             limit = life.get("HoldFrameLimit")   # runs out -> straight to Vanish; 0 = no limit
-            # nothing ends the effect in the preview: hold until the end of the simulated range (path-end and
-            # collision releases aren't modelled)
+            # nothing ends the effect in the preview: hold until the end of the simulated range, or a collision
+            # with CollFlag 4 (_coll_track); a path end's release isn't modelled
             life_frames = (appear, limit or max(template.max_frames - birth - appear, 1), vanish)
+            if limit:
+                held_keep = None   # the limit ends Keep at once; nothing is left for a release
         if not any(life_frames):
             life_frames = (0, 1, 0)
 
@@ -765,7 +794,7 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
             anim_flag |= ANIM_MOVE
         elif not anim_flag & ANIM_MOVE:
             pat_speed = 0.0
-    line = _line_init(template, rng, ptcl, keys, serial) if ptcl is not None and ptcl.has("LineFlags") else None
+    line = _line_init(template, rng, ptcl, keys, serial, d) if ptcl is not None and ptcl.has("LineFlags") else None
     shape = scroll = None
     if ptcl is not None and ptcl.type == 6 and ptcl.has("Radius"):
         radius, radius_add = ptcl.get("Radius"), ptcl.get("RadiusAdd")
@@ -806,7 +835,11 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
             "timer": c["CollCancelFrame"] | (c["member_0x3"] << 8),
             "bounces": c["BounceNumBase"] + (rng.randrange(c["BounceNumRange"] + 1) if c["BounceNumRange"] else 0),
             "rate": _rf(rng, c["BounceRate"]),
+            "flags": c["CollFlag"],   # 1 stop the flipbook, 2 stop the spin, 4 release a life hold (on the final hit)
         }
+        if c["CollFlag"] & 4 and held_keep is not None:
+            particle.coll["keep_after"] = held_keep
+            particle.placement(0)   # the release shortens the life: settle it before anyone asks for the lifetime
     return particle
 
 
@@ -832,6 +865,8 @@ def _coll_track(p):
     fall, timer, bounces = 0.0, c["timer"], c["bounces"]
     frozen = colliding = False
     for _age in range(1, p.lifetime()):
+        if _age >= p.lifetime():   # a collision release shortened the life
+            break
         if frozen:
             track.append(pos)
             continue
@@ -852,6 +887,11 @@ def _coll_track(p):
                 new = (new[0], c["ground"] + c["radius"] + 0.1, new[2])
             elif c["type"] == 0:   # KILL
                 break
+            if bounces <= 0 and "hit" not in c:   # moveParticlePosCollision: CollFlag acts on the final hit
+                c["hit"] = _age
+                if c.get("keep_after") is not None and p.life:
+                    appear, _keep, vanish = p.life
+                    p.life = (appear, max(_age - appear, 0) + c["keep_after"], vanish)
             elif c["type"] == 1:   # MOVE_STOP
                 new, frozen = (new[0], c["ground"] + c["radius"], new[2]), True
             else:                   # COLL_STOP: keep moving, collision off
@@ -921,21 +961,27 @@ def _shortest_arc_rotate(a, d, v):
 class Rope:
     """moveChain 0x994C20: nodes relative to the root, in the frame the root moves in."""
 
-    def __init__(self, params, nodes, scale, keys=None, birth=0):
+    def __init__(self, params, nodes, scale, keys=None, birth=0, move_dir=None, world=None):
         """keys: rope keyframes; birth: the owner's birth frame (particle ropes, particle timer) or None for a
-        generator-owned rope (generator timer = the rope's own frame count)."""
+        generator-owned rope (generator timer = the rope's own frame count); move_dir: the owner particle's
+        movement direction at spawn (ChainOptionFlag REF_RANGE_DIR / BDIR; PathChain ropes have none)."""
         self.p, self.n, self.scale = dict(params), nodes, scale
         self.keys, self.birth, self.age = keys or {}, birth, 0
         self.length = params["length"]
+        # ChainOptionFlag 1 NO_MAT_DIR / 2 NO_MAT_BDIR: that pull isn't turned by the generator (world axes; moveChain
+        # only scales it per axis). world = game world -> generator space at import, as for cloth
+        self.world = world
+        self.world_pull = [bool(params["option"] & 1), bool(params["option"] & 2)]
         self._apply_keys(initial=True)
+        self.follow(move_dir)
         segs = nodes - 1
-        unit_dir, _ = _unit(self.p["dir"])
+        unit_dir, _ = _unit(self._pull(0))
         seg = self.length * scale
         self.vel = [(0.0, 0.0, 0.0)] * nodes
         if not self.p["blend_rate"]:
             self.pos = [tuple(c * seg * i for c in unit_dir) for i in range(nodes)]
         else:
-            unit_blend, _ = _unit(self.p["blend_dir"])
+            unit_blend, _ = _unit(self._pull(1))
             pos, acc = [(0.0, 0.0, 0.0)], (0.0, 0.0, 0.0)
             for k in range(segs):
                 wa = self._weight(k / segs)
@@ -977,11 +1023,37 @@ class Rope:
             elif name == "blend_rate":
                 self.p["blend_rate"] = value
 
+    def follow(self, move_dir):
+        """ChainOptionFlag 4 REF_RANGE_DIR / 8 REF_RANGE_BDIR (moveChain 0x994C20, when the owner's move flags have
+        0x80): the main / blend pull is the owner particle's movement direction (Move None: its spawn direction;
+        Add / Mul: its frame-to-frame velocity) instead of ChainRot / BlendRot. 0x20 MUL_MAT_BDIR then turns the
+        blend pull by the arc from the ChainRot axis to the main pull, as for the ChainRot case."""
+        option = self.p["option"]
+        if move_dir is None or not option & 0xC:
+            return
+        unit, length = _unit(move_dir)
+        if length < 1e-8:
+            return
+        if option & 4:
+            self.p["dir"] = unit
+        if option & 8:
+            bdir = unit
+            if option & 0x20:
+                bdir = _shortest_arc_rotate(_AXES.get(self.p["rot_byte"] & 0xF, (0, 1, 0)), self.p["dir"], bdir)
+            self.p["blend_dir"] = bdir
+
+    def _pull(self, which):
+        """The main (0) / blend (1) pull direction in the rope's frame."""
+        d = self.p["dir" if which == 0 else "blend_dir"]
+        if self.world_pull[which] and self.world is not None:
+            d = _to_generator({"world": self.world}, d)
+        return d
+
     def _accel(self, i):
-        a = tuple(c * self.p["acc"] for c in self.p["dir"])
+        a = tuple(c * self.p["acc"] for c in self._pull(0))
         if not self.p["blend_rate"]:
             return a
-        b = tuple(c * self.p["acc"] for c in self.p["blend_dir"])
+        b = tuple(c * self.p["acc"] for c in self._pull(1))
         wa = self._weight(i / (self.n - 1))
         return tuple(x * wa + y * (1 - wa) for x, y in zip(a, b))
 
@@ -1006,11 +1078,12 @@ class Rope:
             pos[i], vel[i] = q, v
         self.pos, self.vel = pos, vel
 
-    def advance(self, root_delta):
+    def advance(self, root_delta, move_dir=None):
         """One frame: the root moved by root_delta; returns node offsets from the new root."""
         self.age += 1
         if self.keys:
             self._apply_keys()
+        self.follow(move_dir)
         keyed_length = "length" in self.keys and not self.keys["length"][0].init_only
         if self.p["length_add"] and not keyed_length:
             self.length = max(0.0, self.length + self.p["length_add"])
@@ -1049,7 +1122,10 @@ def _particle_rope(p, n):
         here, _ = p.placement(age)
         before, _ = p.placement(age - 1)
         delta = tuple(a - b for a, b in zip(here, before)) if here is not None and before is not None else (0.0, 0.0, 0.0)
-        p._rope.append(rope.advance(delta))
+        moving = any(abs(c) > 1e-6 for c in delta)   # Add / Mul: the velocity; Move None: the spawn direction
+        if moving:   # move flags 0x180: a world velocity, never re-turned (moveChain's 0x100 branch)
+            rope.world_pull = [w and not rope.p["option"] & bit for w, bit in zip(rope.world_pull, (4, 8))]
+        p._rope.append(rope.advance(delta, delta if moving else p.dir))
     return p._rope[n]
 
 
@@ -1122,6 +1198,7 @@ def _line_extension(ptcl):
         word = struct.unpack_from("<I", data, base + 0x30)[0]
         return {"rot": [rangef(i * 8) for i in range(3)], "rot_add": [rangef(0x18 + i * 8) for i in range(3)],
                 "axis": _AXES.get(word & 0xF, (0, 1, 0)), "order": word >> 4 & 0xF,
+                "align": (word >> 8 & 0xF) != 6,   # LineDirAxisType: the stick follows the particle's movement
                 "length": rangef(0x38), "length_add": rangef(0x40),
                 "rot_key": key(0x48, "vec3"), "length_key": key(0x4C, "f32")}
     if line_type == 3 and base + 0x90 <= len(data):
@@ -1136,7 +1213,7 @@ def _line_extension(ptcl):
     return {}
 
 
-def _line_init(template, rng, ptcl, keys, serial=0):
+def _line_init(template, rng, ptcl, keys, serial=0, move_dir=None):
     ext = template.line_ext or {}
     line_type = ptcl.get("LineType")
     pair = [bgra_to_rgba(c) for c in ptcl.get("PlaceColor")]
@@ -1157,7 +1234,7 @@ def _line_init(template, rng, ptcl, keys, serial=0):
     if line_type == 4 and ext:
         line.update(rot=tuple(_rf(rng, r) for r in ext["rot"]), rot_add=tuple(_rf(rng, r) for r in ext["rot_add"]),
                     axis=ext["axis"], order=ext["order"], length=_rf(rng, ext["length"]),
-                    length_add=_rf(rng, ext["length_add"]))
+                    length_add=_rf(rng, ext["length_add"]), align=ext.get("align", False))
         for name in ("rot_key", "length_key"):
             if ext.get(name) is not None:
                 line["keys"][name] = (ext[name], kfm.draw_rates(ext[name], rng))
@@ -1169,7 +1246,7 @@ def _line_init(template, rng, ptcl, keys, serial=0):
     elif line_type == 3 and ext:
         gen_scale = template.record.gen.get("ParticleScale")[0] or 1.0 if template.record.gen else 1.0
         line["rope"] = Rope(_chain_params(ptcl.data, ext["chain_base"], rng, line["count"]), line["count"], gen_scale,
-                            _rope_keys(ptcl, rng), birth=0)
+                            _rope_keys(ptcl, rng), birth=0, move_dir=move_dir, world=template.world_axes)
     elif line_type in (1, 3, 4):
         line["type"] = 0   # extension missing: draw as a trail
     if template.cloth_ext is not None:
@@ -1210,6 +1287,20 @@ def _line_keyed(p, name, age):
     return kfm.evaluate(kf, timer, rates)
 
 
+def _stick_direction(p, n):
+    """Unit movement direction of a LENGTH stick's particle at age n (moveParticlePolyline LENGTH sub_993560 with
+    LineDirAxisType != 6): its frame-to-frame motion (Add / Mul, a world velocity), else its spawn direction (Move
+    None, turned by the generator: the points are in generator space already). None if there is neither."""
+    here, _ = p.placement(n)
+    before, _ = p.placement(max(n - 1, 0))
+    if here is not None and before is not None and n > 0:
+        d, length = _unit(tuple(a - b for a, b in zip(here, before)))
+        if length > 1e-6:
+            return d
+    d, length = _unit(p.dir)
+    return d if length > 1e-8 else None
+
+
 def _line_points(p, n, pos, anchor, scale, rgba, intensity):
     """[(pos, anchor, half width, rgba)] for a Polyline/Line particle at age n; None if it died."""
     L = p.line
@@ -1227,10 +1318,15 @@ def _line_points(p, n, pos, anchor, scale, rgba, intensity):
         length = length if length is not None else L["length"] + L["length_add"] * n
         if length <= 0 and L["length_add"]:
             return None
-        rot = _line_keyed(p, "rot_key", n)
-        rot = rot if rot is not None else tuple(r + a * n for r, a in zip(L["rot"], L["rot_add"]))
-        points = [(tuple(c + o for c, o in zip(pos, rotate(tuple(a * length * scale * i / last for a in L["axis"]),
-                                                             rot, L["order"]))), anchor) for i in range(count)]
+        direction = _stick_direction(p, n) if L.get("align") else None
+        if direction is not None:   # sub_993560: LineDirAxisType != 6 -> along the movement, LineRot unused
+            points = [(tuple(c + d * length * scale * i / last for c, d in zip(pos, direction)), anchor)
+                      for i in range(count)]
+        else:
+            rot = _line_keyed(p, "rot_key", n)
+            rot = rot if rot is not None else tuple(r + a * n for r, a in zip(L["rot"], L["rot_add"]))
+            points = [(tuple(c + o for c, o in zip(pos, rotate(tuple(a * length * scale * i / last for a in L["axis"]),
+                                                                 rot, L["order"]))), anchor) for i in range(count)]
     elif L["type"] == 1 and "points" in L:  # FIX: stored points
         rot = tuple(r + a * n for r, a in zip(L["rot"], L["rot_add"]))
         ms = tuple(m + a * n for m, a in zip(L["model_scale"], L["model_scale_add"]))
@@ -1751,7 +1847,12 @@ def state_at(p, frame):
     scale = p.keyed_or("scale", n, p.scale, p.scale_add)
     if scale <= 0:
         return None
-    pattern, alive = _pattern_at(p, n)
+    hit = None
+    if p.coll is not None and p.coll.get("flags", 0) & 3 and p.path is None:
+        p.placement(0)   # the collision track records the final hit
+        hit = p.coll.get("hit")
+    stop_anim = hit is not None and n > hit and p.coll["flags"] & 1   # CollFlag 1 FIN_ANIM_STOP
+    pattern, alive = _pattern_at(p, hit if stop_anim else n)
     if not alive:
         return None
     color = p.keyed("color", n)
@@ -1760,7 +1861,8 @@ def state_at(p, frame):
     intensity = min(max(intensity if intensity is not None else p.intensity, 0.0), INTENSITY_MAX)
     if p.refract:   # intensity only scales the refraction offset
         intensity = 1.0
-    angle = p.keyed_or("angle", n, p.angle, p.angle_add)
+    stop_spin = hit is not None and n > hit and p.coll["flags"] & 2   # CollFlag 2 FIN_ROT_STOP: angle add -> 0
+    angle = p.keyed_or("angle", hit if stop_spin else n, p.angle, p.angle_add)
     rot = tuple(p.keyed_or("rot", n, tuple(p.rot), tuple(p.rot_add)))
     model_scale = tuple(max(c, 0.0) for c in p.keyed_or("model_scale", n, tuple(p.model_scale),
                                                             tuple(p.model_scale_add)))

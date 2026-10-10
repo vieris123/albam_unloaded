@@ -94,6 +94,10 @@ When you add a new engine module, import it in `__init__.register()` **before** 
 4. Edit the result in Blender.
 5. Select it under Export and click Export. Files appear in the "exported" VFS.
 6. Use Save, or Patch (`albam.patch` → `archive.update_arc`) to rewrite an arc in place.
+   - The export list drops entries whose object was deleted (`export_panel.cull_exportables`, depsgraph handler ->
+     timer; the list hides them at once). A deleted object counts as "in no collection", because X leaves it alive
+     while the list points at it. Per-extension cleanup in `export_panel.ON_CULL`: a chain restores its previewed
+     bones and removes its `Chain <file>` bone collection, a `COL_` root removes its shape objects.
    - Entries are matched by (path without extension, file type), and the type comes from the extension through
      `file_type_for_extension` (`engines/mtfw/__init__.py`), which knows every DMC4 resource class
      (`DMC4_RESOURCE_CLASSES`, from `Note\DMC4Extensions.txt`; arc type = `~crc32(class) & 0x7FFFFFFF`) under all the
@@ -662,6 +666,29 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
     `RENAMED_PROPS`); `RangeStripType` picks the sampler (0 point, 1 line, 2 / 3 curves = linear in the preview, 4
     triangle, unused); `RangeStripFlag` 0x20 ALL_PARTS with RangeDivideNum spreads the slots across all parts
     (`strip_point`), 0x40 SKINING isn't previewed. The editor shows them as checkboxes / enums.
+  - **Rope pulls** (`ChainOptionFlag`, moveChain 0x994C20, verified 2026-10-10): 1 / 2 = main / blend pull in world
+    axes (`Rope.world_pull`, converted with the generator's world axes measured at import, which `effect.py` now
+    measures for any record with those bits, not only cloth); 4 / 8 REF_RANGE_DIR / BDIR (518 / 77 rope particles) =
+    the pull follows the owner particle's movement (`Rope.follow`: spawn direction for Move None, frame-to-frame
+    velocity for Add / Mul, unit length assumed); 0x10 external force; 0x20 blend turned with the main pull. PathChain
+    moves pass no movement, so 4 / 8 don't apply to them.
+  - **More flags (verified 2026-10-10):** `AxisFlags` Order = generator rotation-key order (updateWorldMatrix ->
+    sub_9600A0), AxisType is read only for the header unit generator; `ParticleOptionFlag` 0x20000 EXT_LINE_POS =
+    Polyline / Texline / Line draw only their first run of segments longer than sqrt(0.1) cm (`sim.ext_line_range`,
+    info `ext_line_pos`, applied in `_update_lines`); `CollFlag` acts on the final hit (`_coll_track` records
+    `coll["hit"]`): 1 freezes the flipbook frame, 2 the angle (`state_at`), 4 releases a life hold (life shortened in
+    `_coll_track`; such particles compute their track at spawn so `lifetime()` is right). The preview's collision is
+    a ground plane at the character's feet, so most collision records never hit in the preview.
+  - **More nibbles (2026-10-10):** generator `AxisFlags` bits 20-23 = `ScaleMatRelationType` (RelationType of
+    `mParticleScaleWmat`, the World Scale matrix; 2 / 3 like RelationType); bits 12-19 (`ScaleMatOrder` 4 /
+    `ScaleMatAxisType` 6 in every file) have no reader. Line LENGTH `LineRotFlags` bits 8-11 = `LineDirAxisType`: not
+    6 = the stick follows the particle's movement each frame (`sim._stick_direction`; 748 particles, mostly Add moves
+    with 4), and with ROT_INIT the spawn-rotation axis; FIX `FixFlags` bits 8-11 = `FixDirAxisType` (ROT_INIT axis,
+    6 everywhere), bits 0-3 (`FixRotAxisType`) no reader.
+  - **Light groups (verified 2026-10-10):** uModel::transDefault passes `mLightGroup` to sub_A66180, which keeps a
+    light for the model only if `light group (+0x1C) & mLightGroup != 0`; light attr byte +0x18: 2 SH ambient, 8
+    per-pixel list, 0x10 simple list (point lights), neither -> skipped. So a Light effect's `LightGroupFlag` lights a
+    model when they share a bit. Culling `OcclusionRadius` is 0 in every file (no reader found).
   - **Life** (`EFL_LIFE_FRAME`, verified 2026-10-10, schema notes): Appear / Keep / Vanish frames, and `KeepOptions`
     = `HoldUntilEffectEnds` (SE KeepHoldFlag) + KeepFrame keyframe offset + `HoldFrameLimit` (SE KeepHoldFrame;
     renamed, `edit.RENAMED_PROPS` upgrades props stored under the old names). A held particle's Keep phase waits
@@ -756,17 +783,53 @@ Researched 2026-10-05, supported 2026-10-10 (import / export, motion preview). R
     another armature (defaulting to the one found automatically).
 - **Blender** (`cns_chain.py`, registered for `phs` and `clt`, category CHAIN): import makes an Empty `PHS_<file>`
   (parented to its model's armature, see above) with every rCnsChain
-  setting as a custom property with a tooltip (mDir / mUp / mParentMode with min / max), `phs_joints` (the joint
+  setting as a custom property with a tooltip (mDir / mUp / mParentMode with min / max), `phs_joints` (the slot
   list) and a bone collection `Chain <file>` on the armature (bones matched by `mtfw.anim_retarget`). Export
   re-reads the source XFS and writes only what changed (all 41 files round-trip byte-identical, with or without an
-  armature); the joint list comes from the bone collection: bones still in it keep the source order, new ones go
-  after their parent. A chain can hold several strands or branch (Sanctus' pl023 chains), and the slots after the
-  first -1 may hold leftovers (kept when the chain is unchanged). Errors: more than 32 joints, a bone without a joint
-  number, an axis value out of range.
+  armature).
+  - **One file can hold several tendrils.** `mBone`'s 32 slots are joints with **-1 between tendrils**: the game
+    registers every slot that isn't -1 (cCnsChain::move 0x42DE20 walks all 32), a joint followed by -1 is a tip
+    (virtual tail), one after a -1 a root (keeps its animated position). 8 of the 41 files have several: Sanctus
+    pl023_02_007 7 x 3 joints, pl023_02_028 7, pl023_036 / 049 3, Berial em018_00 3, em018_01 2; Nero's / Dante's
+    coat files 1 each. (Until 2026-10-10 Albam stopped at the first -1 and called the rest "leftovers": import,
+    preview and edits saw only the first tendril, and an edit dropped the others.)
+  - `phs_joints` keeps the -1 separators (`cns_chain._joint_list`, `tendrils`). The bone collection holds every
+    tendril's bones; `chain_joints` rebuilds the slots from it: kept bones keep their slots and tendrils, a removed
+    bone's slot goes (an emptied tendril with it), a new bone extends its parent's tendril when the parent is its tip,
+    else starts a new tendril at the end. New chains get one tendril per parent-linked run of the selected bones
+    (`slots_from_bones`). Errors: more than 32 slots (separators count), a bone without a joint number, an axis value
+    out of range.
+  - **Settings in the Chain panel** (`CHAIN_SETTING_GROUPS`: Forces, Response, Shape, Collision & Floor, Carried
+    by Parent): the Empty's custom properties drawn with readable labels; each keeps its `cns_chain.HELP` tooltip.
+  - **Bookkeeping properties** (`phs_*` on chain Empties, `col_*` on collision objects) get an "Albam internal,
+    don't edit" tooltip from `cns_chain.INTERNAL_TIPS` (`apply_tips`, called wherever they're set). Lists and dicts
+    can't carry one, so `phs_status` / `phs_export_notes` are newline-joined strings and the preview's stored pose is
+    `_phs_preview_base` (hidden). Add new bookkeeping keys to `INTERNAL_TIPS`.
+  - **Per bone** (Bone Properties > **Chain Bone**, `ALBAM_PT_ChainBone`; `PoseBone.albam_chain`, `AlbamChainBone`):
+    - **Tendril Root** (`root`, get / set over the chain's `phs_joints`): on = a -1 before the bone (it starts a
+      tendril, the bone before it becomes a tip), off = merge into the tendril before. The owner bone is found by
+      pointer (`_owner`: `path_from_id` isn't supported on pose bone groups). The Chain panel lists the tendrils.
+    - **Limits** = the slot's `cBONE_DATA` (`adjust`, `grid` = measured axis X / Y / Z, `limit_min` / `limit_max` in
+      degrees): read from the file on attach (`load_bone_data`; not for new chains, whose template's slots aren't
+      theirs), written into the bone's current slot on export (`_write_bone_data`; other slots grid 2, off, zeros;
+      unchanged values keep their bytes). The preview clamps like the game (`cns_chain_preview.limit_angles`, before
+      and after the blend; see the RE note's step j): grid 2 (Z, the game files' value) clamps into its limits; grids
+      0 / 1, as decoded, rebuild a rotation that measures outside them. Checked: limits on the coat's root bone hold
+      it at the limit (-3 / -3 deg vs -64.7 / -88.6 free); all 41 files still round-trip byte-identical.
+- **New chains** (the user loads new files with their own game-side code, so any name works):
+  - **New Chain from Selected Bones** (`albam.phs_new`, Object Properties > Model Chains on an armature in Pose Mode):
+    `cns_chain.new_chain` builds a `PHS_` Empty on any chain file's XFS layout (`template_bytes`: an imported
+    chain's source, else the first `.phs` / `.clt` in Game Files) with the game's defaults (`DEFAULTS` =
+    rCnsChain::setDefault 0x466250), the selected bones' joints (armature order, so parents first) and the path
+    asked for (default `next_chain_path`: `<model>_NN.phs`, first NN unused in the scene and the Game Files).
+    Exported like an imported chain (the template is its "source"; checked: joints, defaults, quality 2).
+  - **Shift+D a `PHS_` Empty** makes a new chain with the copied settings: `adopt_chain_copies` (depsgraph handler
+    -> timer) spots copies by `phs_name` (the name the Empty was made with), gives them the next free path, their own
+    bone collection with the same bones, an export entry, preview off. The original exports unchanged.
 - **Motion preview** (`cns_chain_preview.py`, Object Properties > Chain on the `PHS_` Empty, `ob.albam_phs`):
   the DX9 solver (cCnsChain::move 0x42DB00 + calcJointImpl 0x430A20) replayed on the armature while the animation
   plays; preview only (nothing keyed, export unchanged).
-  - **Per frame:** `frame_change_pre` puts the chain bones back to their pose without the preview (`phs_preview_base`,
+  - **Per frame:** `frame_change_pre` puts the chain bones back to their pose without the preview (`_phs_preview_base`, hidden from Custom Properties by its leading `_`,
     stored when it's turned on) so the animation drives them. `frame_change_post` reads the animated pose, steps
     every previewed chain of each armature round(60 / fps) times in hierarchy order, and writes the bones'
     `matrix_basis`.
@@ -774,8 +837,9 @@ Researched 2026-10-05, supported 2026-10-10 (import / export, motion preview). R
     restarts there (a 2-frame reset that copies the animation, as the game does). **Simulate Range**
     (`albam.phs_simulate_range`) fills the scene range.
   - **Parent frame:** the armature object times its `root_motion` bone (mParentMode 1: its parent armature's).
-  - **Collision:** `albam_phs.collision_shapes` = an imported COL_ object (set by wire_scene); the shapes are placed
-    from the parsed `.col` and its armature each step, every shape in file order.
+  - **Collision:** `albam_phs.collision_shapes` = a COL_ object (set by wire_scene); the shapes as the objects have
+    them now (`col_shapes.build_col`, once per frame; the source file if an edit is broken) are placed on their
+    armature each step, every shape in file order.
   - **Attach to Body** (`albam.phs_attach_to_body`, done by wire_scene for coats): parents the chain's model so its
     joint 0 follows a body joint (2 for Nero's coat: in the game a cCnsMatrix puts coat joint 0 on body joint 2; the
     coat's LMTs don't move joint 0). Without it the coat stays at the origin.
@@ -789,27 +853,44 @@ Researched 2026-10-05, supported 2026-10-10 (import / export, motion preview). R
   0x7FFFFFFF`, DTI hash 0x4D990996), **XFS v5** (SE stores the same class as XFS v15 with the raw hash as extension).
   dmc4_xml reads and writes them byte-exact (`dmc4xml/xfs.py`, all 297 DX9 XFS files). 41 unique files, all under
   `arctool` (players pl000 / pl006, enemies em010 / em018 / em030 ...); the game's own extension is `clt`.
-  - One chain per file: `mBone` = S16[32], -1 padded, a parent-linked run of bones of the **attached model**
-    (pl000_03_00..05.phs = the six coat tails of `pl000_03.mod`, the coat model, bones 1-7, 8-13 ... each starting
-    under bone 0). Physics: mGravity, mSpring, mDamping, mMaxSpeed, mWind, mTurbulence, mTailLength, mFloorLevel,
+  - One settings block per file: `mBone` = S16[32], one or more tendrils (parent-linked runs of bones of the
+    **attached model**) separated by -1 (see above; pl000_03_00..05.phs = the six coat tails of `pl000_03.mod`, the
+    coat model, one tendril each: bones 1-7, 8-13 ... each starting under bone 0). Physics: mGravity, mSpring, mDamping, mMaxSpeed, mWind, mTurbulence, mTailLength, mFloorLevel,
     mCollisionSize, mStretch / mStretchLimit, mBlend, mDir / mUp (axis enums), mParentMode and *Local flags;
     `mBoneData` = 32 x `cBONE_DATA` per-bone limits (never enabled in the files).
 - **Collision shapes: `.col` = `rCollisionShape`** (file id `0x5B9071CF`, DTI 0x4EA4E09A): the hitbox format (see
   ROADMAP "Hitboxes"); chains collide with its shapes on the body model (`pl000_03.col`). Codec: `dmc4xml/col.py`
   (byte-exact on the 110 DX9 files).
-  - **Import** (`col_shapes.py`, dmc4 `col`, category HITBOX, import only): an Empty `COL_<file>` in its own
-    collection (group kinds / flags as properties, `col_shapes` JSON = the shape objects in file order) and per shape
-    a sphere Empty (size = radius) bone-parented at its joint offset (joint -1: placed in the model's own space, a
-    guess), or for a
-    capsule one per end plus a wire tube whose two rings are hooked to the ends (follows the pose exactly), coloured
-    by group flags (attack red, grab yellow, hurt blue, push green). Shapes on joints the armature lacks are skipped
-    and listed (`col_missing_joints`); type 1 shapes are skipped. Nero's `Collision\pl000.col`: 205 groups, 575
-    spheres. Panel: Object Properties > Collision Shapes (summary per kind / flags, Attach).
+  - **Import / export / new** (`col_shapes.py`, dmc4 `col`, category HITBOX): an Empty `COL_<file>` in its own
+    collection, its groups in `root.albam_col.groups` (kind, flags with a checkbox per named bit), and per shape a
+    sphere Empty (size x scale = radius) bone-parented at its joint offset (joint -1: placed in the model's own
+    space, a guess), or for a capsule one per end (`col_kind` a / b, sharing a key `col_capsule`) plus a wire tube
+    hooked to both (display only), coloured by group flags (attack red, grab yellow, hurt blue, push green). Every
+    shape object carries `col_root`; spheres / ends a carry `col_group`, `col_id`, `col_shrink`, and source shapes
+    `col_src` = [group, index]. Nero's `Collision\pl000.col`: 205 groups, 575 spheres.
+  - **Editing is plain Blender:** move / scale a sphere, Shift+D (a capsule: both ends), X, Ctrl+P > Bone to change
+    its joint, its group in the Collision Shapes panel. Copies are told apart by `col_name` (the name an end was made
+    with; Blender's duplicate suffixes the copies). **Not object pointers**: Blender 4.2's duplicate re-points ID
+    properties of the originals too (tested), so capsule ends pair by key, and a copied pair (matched by suffix) gets
+    a new key (`adopt_copies`). `sync_tubes` (depsgraph handler -> timer, `sync_all`) rebuilds a capsule's tube when
+    it changes, keeps both ends the same size (the one resized last wins) and drops orphan tubes.
+  - **Export** (`build_col`, registered): the source file with the objects' shapes: unchanged values keep their raw
+    bits (positions 1e-3 cm, radius 1e-3 cm), deleted shapes drop out, new ones and shapes moved to another group go
+    after that group's source shapes, positions from the parent relation (pose-independent, `joint_and_local`).
+    Source shapes that never got objects (type 1, joints the armature lacks, or a file never put on an armature) are
+    kept as they are (`col_unbuilt`, `col_built`). A capsule missing an end, or an end not on the armature, is
+    refused. Checked: pl000_03.col and Collision\pl000.col (575 shapes) export byte-identical; delete, Shift+D, move,
+    scale, group change and re-parenting come out as expected.
+  - **New file:** Object Properties > Collision Shapes on an armature: **New Collision Shapes** (`albam.col_new`, a
+    game path, one push group), **Add Sphere / Add Capsule** (`albam.col_add_shape`, Pose Mode: on the active bone,
+    a capsule to the other selected bone or its child; the target file is `scene.albam.col_ui.target` when the
+    armature has several), **Add Group**. New shapes / groups default to the game's usual values (id 0, shrink 0,
+    a sphere's second joint -1, group pad -1, flags push).
   - **Groups follow the LMT events** (`col_shapes.active_groups` / `update_visibility`, run by the chain preview's
     `frame_change_post` handler): bit k (k < 8) of the first event table's value switches on group
     `events_params_01[k]` ("Hitbox Slot Values") of the action playing on the shapes' armature; XOR consecutive
     values to see which slots change. Other groups' objects are hidden with `hide_set` (still evaluated). On by
-    default for hitbox files (`col_follow_events`), off for a chain model's body shapes (pl000_03.col isn't indexed
+    default for hitbox files (`albam_col.follow_events`), off for a chain model's body shapes (pl000_03.col isn't indexed
     by the events). Without LMT events every group is shown. Seen in the data (Nero: slots 0 / 1 = hurt + push
     groups 5 / 6; the Snatch, pl000_02 block 30, turns on grab groups 120-122 on frames 9 / 10 / 11 and off on 17),
     not traced in the game code.

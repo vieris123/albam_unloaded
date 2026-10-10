@@ -48,8 +48,8 @@ class AlbamModSettings(bpy.types.PropertyGroup):
     light_group: bpy.props.BoolVectorProperty(
         name="Light Group", size=GROUP_BITS,
         description="Light groups that light this model in the game: tick a group to have its lights shine on the "
-                    "model. A light (including a Light effect, through its LightGroupFlag) most likely lights the "
-                    "model when they share a group. The most common value in the game's models is groups 0 and 1")
+                    "model. A light (including a Light effect, through its LightGroupFlag) lights the model when "
+                    "they share at least one group. The most common value in the game's models is groups 0 and 1")
 
 
 @blender_registry.register_blender_type
