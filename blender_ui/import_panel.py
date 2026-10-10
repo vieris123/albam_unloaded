@@ -77,6 +77,8 @@ class ImportFileBase:
             # armature building needs it linked to for building
             bpy.context.collection.objects.link(bl_container)
         for child in bl_container.children_recursive:
+            if child.name in bpy.context.collection.objects:
+                continue
             try:
                 # already linked
                 bpy.context.collection.objects.link(child)
@@ -201,6 +203,10 @@ class ALBAM_UL_RealFileSystemUI(bpy.types.UIList):
         "ANIMATION": "ACTION",
         "COLLISION": "MOD_PHYSICS",
         "EFFECT": "PARTICLES",
+        "PLACEMENT": "EMPTY_ARROWS",
+        "SCHEDULE": "TIME",
+        "CHAIN": "LINKED",
+        "HITBOX": "MESH_CAPSULE",
         "MATERIAL": "MATERIAL",
         "TEXTURE": "TEXTURE",
     }

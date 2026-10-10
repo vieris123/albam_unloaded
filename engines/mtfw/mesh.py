@@ -374,6 +374,11 @@ def build_blender_model(file_list_item, context):
 
     context.scene.albam.exportable.file_list.update()
 
+    if app_id == "dmc4" and skeleton:
+        # chains (.phs) and collision shapes (.col) imported before their model attach to it now
+        from albam.engines.mtfw.cns_chain_preview import wire_scene
+        wire_scene(context)
+
     return bl_object
 
 

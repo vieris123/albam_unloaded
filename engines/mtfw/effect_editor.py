@@ -2,8 +2,8 @@
 
 The active record's fields are loaded into `scene.albam.efl_editor` (one item per schema field / bit-field, with a
 widget for its type) when a record becomes active. Every edit is written straight into the record object's
-efl_* custom properties, which export (effect_export.py) writes back into the file; Apply / Rebuild replay the
-preview. Keyframes are edited one at a time (any typed keyframe offset of the record, existing or not).
+efl_* custom properties, which export (effect_export.py) writes back into the file; Apply replays the preview
+(rebuilding the effect when an edit needs it). Keyframes are edited one at a time (any typed keyframe offset of the record, existing or not).
 """
 import bpy
 from bpy.app.handlers import persistent
@@ -1091,9 +1091,7 @@ class ALBAM_PT_EflEditor(bpy.types.Panel):
         root = effect_root(context.active_object)
         row = layout.row(align=True)
         row.label(text=root.albam_asset.relative_path or root.name, icon="PARTICLES")
-        row = layout.row(align=True)
-        row.operator("albam.efl_apply_edits", text="Apply", icon="PLAY")
-        row.operator("albam.efl_rebuild", text="Rebuild", icon="FILE_REFRESH")
+        layout.operator("albam.efl_apply_edits", text="Apply", icon="PLAY")
         layout.prop(context.scene.albam.import_options_efl, "darken_strength")
         missing = list(root.get("efl_missing_textures") or [])
         if missing:
@@ -1104,7 +1102,7 @@ class ALBAM_PT_EflEditor(bpy.types.Panel):
             if len(missing) > 3:
                 box.label(text=f"... and {len(missing) - 3} more")
             box.label(text="Add the folder containing effect\\tex (e.g. the base game's) as a Game Files root,")
-            box.label(text="then press Rebuild")
+            box.label(text="then press Apply")
         from .effect import linked_objects
         linked = linked_objects(root)
         box = layout.box()

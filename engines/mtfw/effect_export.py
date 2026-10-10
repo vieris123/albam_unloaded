@@ -22,8 +22,8 @@ from albam.exceptions import AlbamCheckFailure
 from albam.registry import blender_registry
 from albam.vfs import VirtualFileData
 from .efl import EffectList, schema
-from .efl.edit import (apply_keyframes, apply_props, apply_subs, as_list, record_from_raw, record_raw,
-                       restructure)
+from .efl.edit import (apply_keyframes, apply_props, apply_subs, as_list, keyframe_props, record_from_raw,
+                       record_raw, restructure)
 from .efl.model import Block, SLOTS
 
 SCALE = 0.01             # game centimetres -> metres
@@ -205,7 +205,7 @@ def build_efl_bytes(root):
     bad = [i for i in objects if i >= len(efl.records)]
     if bad:
         raise AlbamCheckFailure("Record objects point past the effect's records", details=str(bad),
-                                solution="Rebuild or re-import the effect")
+                                solution="Apply (with Rebuild Everything) or re-import the effect")
     keep = sorted(objects)
     removed = [i for i in range(len(efl.records)) if i not in objects]
     notes += [f"record {i:02d} removed" for i in removed]
@@ -259,6 +259,57 @@ def structure_changed(root):
     if new_record_objects(root) or len(objects) != len(count) or any(ob.get("efl_replaced") for ob in objects.values()):
         return True
     return bool(linked_changes(root))
+
+
+# What the import bakes into the objects besides the particle block: the generator keyframes (F-curves on the
+# Empty), the spawn strip, particle scale and relation type (sim settings), the generator's place (the ground plane
+# and world axes are measured from it), a path move's strip and collision
+_BUILT_GEN_FIELDS = ("RangeStripPath", "ParticleScale", "AxisFlags", "Order", "Pos", "Quat", "Scale", "ParentNo")
+_BUILT_GEN_KEYS = ("KeyframePosParamOffset", "KeyframeRotParamOffset", "KeyframeScaleParamOffset")
+_BUILT_MOVE_FIELDS = ("PathStripPath", "PathStripPartsNo")
+
+
+def built_changed(root, data):
+    """True if the edited bytes change something the import builds into the objects rather than something the
+    particle simulation reads every frame: any particle field (material, blending, texture, shape, flipbook,
+    orientation and culling settings), generator keyframes, the generator's strip / particle scale / relation /
+    place, a path move's strip, collision on or off. Apply has to rebuild the effect for those."""
+    built, edited = EffectList.from_bytes(source_bytes(root)).records, EffectList.from_bytes(data).records
+    if len(built) != len(edited):
+        return True
+
+    def fields(block, names):
+        return None if block is None else [block.get(n) if block.has(n) else None for n in names]
+
+    for old, new in zip(built, edited):
+        if (bytes(old.ptcl.data) if old.ptcl else None) != (bytes(new.ptcl.data) if new.ptcl else None):
+            return True
+        if fields(old.gen, _BUILT_GEN_FIELDS) != fields(new.gen, _BUILT_GEN_FIELDS):
+            return True
+        if old.gen is not None and new.gen is not None:
+            old_keys, new_keys = keyframe_props(old.gen), keyframe_props(new.gen)
+            if any(old_keys.get(k) != new_keys.get(k) for k in _BUILT_GEN_KEYS):
+                return True
+        if fields(old.move, _BUILT_MOVE_FIELDS) != fields(new.move, _BUILT_MOVE_FIELDS):
+            return True
+        if old.move is not None and new.move is not None and \
+                bool(old.move.get("CollParamOffset")) != bool(new.move.get("CollParamOffset")):
+            return True
+    return False
+
+
+def found_missing_textures(context, root):
+    """True if a texture that was missing when the effect was built is now under the Game Files roots (a folder
+    was added since), so a rebuild would load it."""
+    rfs = context.scene.albam.rfs
+    for path in root.get("efl_missing_textures") or []:
+        for candidate in (path + ".tex", path + ".rtex"):
+            try:
+                rfs.get_vfile(root.albam_asset.app_id or "dmc4", candidate)
+                return True
+            except KeyError:
+                continue
+    return False
 
 
 def linked_changes(root):
@@ -372,11 +423,12 @@ def export_efl(bl_obj):
 # -- applying edits to the scene --------------------------------------------------------------------
 
 def apply_to_scene(context, root, rebuild=False):
-    """Replay the preview with the edits; rebuild the effect objects when records were added/removed (or asked).
+    """Replay the preview with the edits; rebuild the effect objects when records were added/removed, an edit
+    changes what the import builds (built_changed), or when asked.
     Returns (root, notes, rebuilt). The active record keeps being the active object."""
     active = record_object(context.view_layer.objects.active)
     data, notes, order = build_efl_bytes(root)
-    if not rebuild and not structure_changed(root):
+    if not rebuild and not structure_changed(root) and not built_changed(root, data)             and not found_missing_textures(context, root):
         from . import effect_sim
         effect_sim.store_source(root, data, root.get("efl_start_frame", context.scene.frame_current))
         effect_sim.invalidate()
@@ -414,42 +466,29 @@ def _report_failure(op, err):
 
 @blender_registry.register_blender_type
 class ALBAM_OT_EflApplyEdits(bpy.types.Operator):
-    """Replay the particle preview with the edits. Rebuilds the effect's objects when records were added or
-    removed (textures, materials and shapes are rebuilt only by Rebuild Effect)"""
+    """Show the edits in the preview. Edits the particle simulation reads every frame (emission, life, motion) just
+    replay it; anything built from the file (particle settings such as blending, textures and shapes, generator
+    keyframes or placement, added or removed records) rebuilds the effect's objects"""
     bl_idname = "albam.efl_apply_edits"
     bl_label = "Apply Edits to Preview"
     bl_options = {"REGISTER", "UNDO"}
 
+    rebuild: bpy.props.BoolProperty(
+        name="Rebuild Everything",
+        description="Rebuild every object of the effect even if no edit needs it (if the preview looks out of date, "
+                    "e.g. after posing the armature, which moves the ground plane the particles bounce on)",
+        default=False)
+
     @classmethod
     def poll(cls, context):
         return effect_root(context.active_object) is not None
 
     def execute(self, context):
         try:
-            _root, notes, rebuilt = apply_to_scene(context, effect_root(context.active_object))
+            _root, notes, rebuilt = apply_to_scene(context, effect_root(context.active_object), self.rebuild)
         except Exception as err:
             return _report_failure(self, err)
         self.report({"INFO"}, f"{len(notes)} edit(s) applied" + (" (effect rebuilt)" if rebuilt else ""))
-        return {"FINISHED"}
-
-
-@blender_registry.register_blender_type
-class ALBAM_OT_EflRebuild(bpy.types.Operator):
-    """Rebuild the effect's objects from the edited file: materials, textures, shapes and particles"""
-    bl_idname = "albam.efl_rebuild"
-    bl_label = "Rebuild Effect"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        return effect_root(context.active_object) is not None
-
-    def execute(self, context):
-        try:
-            _root, notes, _ = apply_to_scene(context, effect_root(context.active_object), rebuild=True)
-        except Exception as err:
-            return _report_failure(self, err)
-        self.report({"INFO"}, f"Effect rebuilt with {len(notes)} edit(s)")
         return {"FINISHED"}
 
 

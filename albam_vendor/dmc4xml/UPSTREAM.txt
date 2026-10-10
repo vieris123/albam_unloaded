@@ -1,0 +1,7 @@
+Vendored copy of the dmc4xml package. Don't edit it here: change it upstream and run
+scripts/sync_dmc4xml.py.
+
+repository: https://github.com/vieris123/dmc4_xml.git
+commit: 64b01ecc9352b9780ffca1b6d011bd8082bdb398
+synced: 2026-10-10
+files: __init__.py, classes.py, col.py, dti.py, pla.py, sdl.py, xfs.py, xfsxml.py, xmlconv.py

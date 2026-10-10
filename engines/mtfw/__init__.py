@@ -855,6 +855,9 @@ FILE_ID_TO_EXTENSION = {
     0x49B5A885: "ssc",
     0x4B704CC0: "mia",
     0x4C0DB839: "sdl",
+    0x42EA212F: "pla",       # rPlacement
+    0x006F4D08: "phs",       # rCnsChain (the game's own extension is clt)
+    0x5B9071CF: "col",       # rCollisionShape (hitboxes, chain collision)
     0x4CA26828: "bmse",
     0x4E397417: "ean",
     0x4E44FB6D: "fpe",

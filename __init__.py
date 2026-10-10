@@ -44,6 +44,11 @@ def register():
     importlib.import_module("albam.engines.mtfw.effect_retype")
     importlib.import_module("albam.engines.mtfw.effect_efs")
     importlib.import_module("albam.engines.mtfw.effect_ean")
+    importlib.import_module("albam.engines.mtfw.placement")
+    importlib.import_module("albam.engines.mtfw.scheduler")
+    importlib.import_module("albam.engines.mtfw.cns_chain")
+    importlib.import_module("albam.engines.mtfw.col_shapes")
+    importlib.import_module("albam.engines.mtfw.cns_chain_preview")
     importlib.import_module("albam.blender_ui.foot_ik")
     if os.getenv("ALBAM_ENABLE_REEN"):
         importlib.import_module("albam.engines.reng.archive")
@@ -87,6 +92,8 @@ def register():
     register_handlers()
     from albam.engines.mtfw.effect_sim import register_handlers as register_effect_handlers
     register_effect_handlers()
+    from albam.engines.mtfw.cns_chain_preview import register_handlers as register_chain_handlers
+    register_chain_handlers()
     from albam.engines.mtfw.effect_editor import register_editor
     register_editor()
 
@@ -101,6 +108,8 @@ def unregister():
     unregister_handlers()
     from albam.engines.mtfw.effect_sim import unregister_handlers as unregister_effect_handlers
     unregister_effect_handlers()
+    from albam.engines.mtfw.cns_chain_preview import unregister_handlers as unregister_chain_handlers
+    unregister_chain_handlers()
     from albam.engines.mtfw.effect_editor import unregister_editor
     unregister_editor()
 

@@ -641,7 +641,9 @@ def mesh_rescale(ob):
 @blender_registry.register_export_function(app_id="re5", extension="sbc")
 def export_sbc156(bl_obj):
     """Every mesh under the root is one or more collision groups (split at 65,536 vertices); faces are triangulated,
-    modifiers and transforms applied. The trees are rebuilt from scratch by sbc_bvh."""
+    modifiers applied, and the geometry is written relative to the root Empty (a stage's root sits at the origin; a
+    moving part's .sbc is in its unit's local frame, so its root can be parented to the unit to preview it in place).
+    The trees are rebuilt from scratch by sbc_bvh."""
     asset = bl_obj.albam_asset
     groups, notes = sbc156_groups(bl_obj)
     try:
@@ -680,8 +682,10 @@ def _legacy_group_ids(bl_obj, meshes):
 
 
 def sbc156_groups(bl_obj):
-    """-> (SbcGroup list, notes). Coordinates go back to game space (cm, Y up)."""
+    """-> (SbcGroup list, notes). Coordinates go back to game space (cm, Y up), relative to the root Empty."""
+    bpy.context.view_layer.update()     # matrix_world is still identity right after an import or a parenting
     depsgraph = bpy.context.evaluated_depsgraph_get()
+    to_root = bl_obj.matrix_world.inverted()
     groups, notes = [], []
     meshes = sbc156_meshes(bl_obj)
     if not meshes:
@@ -699,8 +703,9 @@ def sbc156_groups(bl_obj):
         bm = bmesh.new()
         bm.from_mesh(ob_eval.to_mesh())
         ob_eval.to_mesh_clear()
-        bm.transform(ob.matrix_world)
-        if ob.matrix_world.determinant() < 0:
+        local = to_root @ ob.matrix_world
+        bm.transform(local)
+        if local.determinant() < 0:
             # a mirroring transform turns the faces inside out; collision is one-sided (floors must face up)
             bmesh.ops.reverse_faces(bm, faces=bm.faces[:])
             notes.append(f"{ob.name}: mirrored by its transform, face winding kept")
@@ -754,3 +759,76 @@ def sbc156_groups(bl_obj):
         if part:
             notes.append(f"{ob.name}: split into {part + 1} groups (65,536 vertices per group at most)")
     return groups, notes
+
+
+# ---- part IDs (moving collision) ---------------------------------------------------------------------------------
+
+def sbc_root(ob):
+    """The collision root Empty above a mesh (albam_asset extension sbc), or None."""
+    while ob is not None:
+        if ob.albam_asset.extension == "sbc" and ob.albam_asset.relative_path:
+            return ob
+        ob = ob.parent
+    return None
+
+
+def part_id(ob):
+    return ob.get(SBC_GROUP_ID, -1)
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_SbcSetPartId(bpy.types.Operator):
+    """Set the part ID (the group record's group_id) of the selected collision meshes. A moving piece's meshes need
+    the ID its unit moves (uStageSetMoveFloor mPartsId, usually 0); static collision uses -1"""
+    bl_idname = "albam.sbc_set_part_id"
+    bl_label = "Set Part ID"
+    bl_options = {"REGISTER", "UNDO"}
+
+    part_id: bpy.props.IntProperty(
+        name="Part ID",
+        description="group_id written for the selected collision meshes: -1 = never moved or switched (static "
+                    "stage collision); 0 and up = the ID a moving unit (uStageSetMoveFloor mPartsId) or a script "
+                    "(Sbc::activateParts) uses for these triangles",
+        default=0, min=-1, max=0x7FFFFFFF)
+
+    @classmethod
+    def poll(cls, context):
+        return any(o.type == "MESH" and sbc_root(o) for o in context.selected_objects)
+
+    def invoke(self, context, event):
+        if context.object is not None and sbc_root(context.object):
+            self.part_id = part_id(context.object)
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        meshes = [o for o in context.selected_objects if o.type == "MESH" and sbc_root(o)]
+        for o in meshes:
+            o[SBC_GROUP_ID] = self.part_id
+        self.report({"INFO"}, f"Part ID {self.part_id} on {len(meshes)} collision mesh(es)")
+        return {"FINISHED"}
+
+
+@blender_registry.register_blender_type
+class ALBAM_PT_SbcPart(bpy.types.Panel):
+    bl_label = "Collision Part"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "object"
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        return ob is not None and ob.type == "MESH" and sbc_root(ob) is not None and \
+            sbc_root(ob).albam_asset.app_id == "dmc4"
+
+    def draw(self, context):
+        ob = context.object
+        layout = self.layout
+        pid = part_id(ob)
+        row = layout.row()
+        row.label(text=f"Part ID: {pid}" + ("  (static)" if pid == -1 else ""), icon="MOD_PHYSICS")
+        row.operator("albam.sbc_set_part_id", text="Set", icon="GREASEPENCIL")
+        col = layout.column(align=True)
+        col.label(text=f"Root: {sbc_root(ob).name} (geometry is exported relative to it)", icon="EMPTY_AXIS")
+        if pid >= 0:
+            col.label(text="Moves with the unit whose mPartsId is this ID", icon="INFO")

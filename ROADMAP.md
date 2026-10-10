@@ -30,6 +30,17 @@ The preview follows the DX9 code for these, but they haven't been compared with 
   an edited stage collision (e.g. `st001-a-00`) and a single-group prop (e.g. `ko904-a00`) into the game: walk on
   floors, run into walls, check footstep sounds (ground material) and any scripted parts (group IDs).
 
+- [ ] **Edited placements and schedulers (`.pla` / `.sdl`, 2026-10-10).** Move an enemy in an `emset*.pla`, change a
+  fade in a `game_cmn\Fade\*.sdl`, Patch them in and check the game reads them (the files round-trip byte-identical,
+  but no edited one has been loaded yet).
+
+- [ ] **Model chains (2026-10-10).** Patch an edited chain (e.g. Nero's coat `pl000_03_00.phs` with another mSpring /
+  mGravity) and compare the coat with Albam's motion preview (Nero + coat LMTs, coat attached at body joint 2): swing,
+  how far it clips the legs when dashing (the preview clips mid-segment like the decompiled solver predicts).
+- [ ] **A moving floor (2026-10-10).** Edit or add a `uStageSetMoveFloor` piece (e.g. st405's blades: `blade01.sdl` +
+  `st405-a-02.sbc`, part ID 0), Patch it in, check the floor moves, carries the player and collides; then a new
+  platform following the recipe in `CLAUDE.md` ("Moving collision").
+
 ## Flags still to dig up
 
 The SE PDB names these, but their DX9 meaning hasn't been checked. Two SE names have already proved wrong for DX9
@@ -82,8 +93,38 @@ The game behaviour is known; Blender doesn't show it yet.
 
 ## Larger features
 
-- [ ] **Chains (`rCnsChain`, soft-body links).** Researched (see "Chains" in `CLAUDE.md`), not supported.
+- [ ] **Model chains: Dante's coat attachment.** The preview's Attach to Body uses body joint 2, which is what
+  `uPlayerNero::initModel` does for Nero's coat; Dante's (pl006_03, `uPlayerDante::setupDanteModel`?) wasn't traced.
+- [ ] **Hitboxes (saved for later, 2026-10-10).** Four file types keyed to a model's joints, already mined in IDA
+  (per the user) and described by 010 templates in `E:\DMC mod stuffs\DMC4 templates`:
+  - `.col` = `rCollisionShape` (shapes): codec done (`dmc4xml/col.py`, byte-exact on 110 DX9 files); Blender import
+    done (2026-10-10, `col_shapes.py`: sphere / capsule objects on the joints, coloured by group flags), export of
+    edited shapes still to do. Hitbox files also use joint -1, placed in the model's own space (a guess: check it
+    against the game). Which groups are on comes from the LMT's first event table (bit k = group
+    events_params_01[k]); the preview shows / hides groups with it. Groups carry
+    kind (cCollisionGroup.mKind) and flags (1 attack, 2 hurt, 4 push, 8 grab, 0x20 friendly attack); shapes are
+    spheres (type 0) / capsules (type 3) on joint IDs of the collision model, radius, pos0 / pos1 in the bones'
+    frames. `DMC4_col.bt`.
+  - `.atk` (186 files, `ATK\0`, u16, u16 count): `kAttackStatus` per entry (`DMC4_atk.bt`): mAsName[16], 4 unknown
+    bytes, mDamageValue, mAttackLv, mAttackLvI / B, mRangeType, mHitStopTimer, mDamageType / I / B (launch etc.),
+    mHitMarkAngle, mHitSE, mStylishPoint, mStylishTimer, mDTAdd, mAttackFlag, mBlownAngleType, mElementType.
+  - `.dfd` (32 files, `DFD\0`, u16, u16 count): `kDefendStatus` (`DMC4_dfd.bt`): mAsName[16], mResist[3],
+    mMaxInterrupt[5], mMaxBlown[5].
+  - `.rCollisionIdxData` (13 files): a tab-separated text table (first line = row count), probably linking shape
+    groups to attack / defend entries; not decoded yet.
+  - Plan: codecs for atk / dfd / idx in dmc4xml (byte-exact on the corpus), then Albam: `.col` export from the shape
+    objects, groups with kind / flags editable, and the attack / defend entries alongside.
 - [ ] **Editable `.mod` model settings beyond the light group** (`model_info`: middist, lowdist, strip type).
+
+- [ ] **SDL / PLA: add new property tracks from Blender.** Today values, keys, positions, duplicates and deletions
+  are editable; a property the source file doesn't have can't be added (it needs its MtPropertyType and track
+  type). An "Add Property" operator with the types the files use per class would close it.
+- [ ] **Sound effects (not scoped yet, for a later session).** LMT event table 2 plays sounds: slot bit k ->
+  `events_params_02[k]`, the same scheme as the hitbox groups of table 1. Per the user, the sound effect data follows
+  the XFS format (dmc4xml's XFS codec reads it), so the work starts there.
+- [ ] **XFS files (`.cam` rDevilCamera and the rest) in Albam.** dmc4_xml reads them; its XFS writer isn't byte-exact
+  yet (it zeroes each property's attr / getter / setter fields and writes header minor version 3, the files have
+  10), so fix that upstream before vendoring XFS. A camera-area import was prototyped (scratch only).
 
 ## Inherited bugs (from upstream Albam)
 
