@@ -136,7 +136,41 @@ The game behaviour is known; Blender doesn't show it yet.
 - [ ] **XFS files (`.cam` rDevilCamera and the rest) in Albam.** The XFS codec is byte-exact on all 297 DX9 XFS files
   and vendored (`dmc4xml/xfs.py`, `xfsxml.py`; the layout table's attr / getter / setter fields and the header version
   are kept since 2026-10-10); `.phs` chains already use it. Still missing: a Blender import for the other classes,
-  starting with `.cam` (a camera-area import was prototyped, scratch only).
+  in the order of "Resource classes" below, starting with `.cam` (a camera-area import was prototyped, scratch only).
+
+## Resource classes: native support by priority (2026-10-10)
+
+Which of the game's resource classes (`Note\DMC4Extensions.txt`, `DMC4_RESOURCE_CLASSES`) need Blender support
+beyond plain XML editing. Ranked by: spatial data (in a level or on a skeleton, painful as numbers), corpus size
+(unique files under `arctool`, SE and mod copies included), and whether XML editing is possible at all (only XFS
+classes and `.sdl` / `.pla`; binary formats need a codec first). Already native: `.mod`, `.tex`, `.lmt`, `.efl` /
+`.efs` / `.ean`, `.sbc`, `.sdl`, `.pla`, `.phs` / `.clt`, `.col` (import).
+
+1. [ ] **Hitboxes:** `.atk` (145), `.dfd` (23), `.idx` (23), plus `.col` export (114). Binary, so not even
+   XML-editable yet; shapes on joints, switched by LMT events. See "Hitboxes" above.
+2. [ ] **Camera areas, `.cam` rDevilCamera** (17, XFS): cCameraNormal mCameraPos / mTargetPos / mCameraUp / mFov /
+   Fog, area boxes (`mppBox`), area links (cCamAreaConnect). Cameras, boxes and link lines in Blender.
+3. [ ] **Level trigger volumes:** `.evh` rEventHit (18, XFS: cEventHitData Shape, Pos0-3, PosY, Height, facing
+   condition, player / camera placement on trigger, cEventPosData) and `.seg` rSoundSeg (17, XFS: SEG_HIT_DATA, the
+   same shapes plus radius, SE / stream to play). One volume builder for both.
+4. [ ] **AI routes, `.rut` rRouteNode** (53, XFS): nodeData minpos / maxpos boxes, attribute, nodeLink linkId / fCost.
+   Boxes and editable link edges.
+5. [ ] **Room defaults, `.rdf` rRoomDefault** (17, XFS): a spawn marker (mPlPos / mPlAngY, mCmrAngY); the rest (force
+   vector, light / particle scales, shadow switches) is fine as XML.
+6. [ ] **Sound:** rMotionSe (31, XFS: per entry mSeReqID, mSeJointID, attach and attribute flags; the LMT table-2 ->
+   sound link, so it belongs next to the LMT events) and the binary banks `.sreq` (126) / `.spac` (66) / `.dnrs` (59),
+   which need codecs. See "Sound effects" above.
+7. [ ] **Codec only, no Blender view:** `.msg` rMessage (237, MSG2 binary: game text; an editing job, XML / JSON is
+   enough) and `.mot` rMotion (85, single motions outside LMT banks; native import only if they turn out to matter).
+
+**Plain XML is enough** (XFS, values only), once Edit as XML handles XFS (item above): `.sprmap` rSprLayout (33, UI
+layout; a 2D preview would be a luxury), `.sif`, `.ase`, `.eng` / `.engv`, `.ssd`, `.equ`, `.rev_win`.
+
+**Not in the extracted folders yet:** `.nav`, `.lcm`, `.lge`, `.cdf`, `.nls`, `.shp` / `.shw`, `.fca`, `.esd` / `.esl`.
+If stage or demo archives with them get extracted, `.nav` (navigation mesh) and `.lge` (grid lighting) would rank
+high: both are spatial.
+
+Suggested order: finish 1, then Edit as XML for XFS (unlocks every plain-XML class), then 2 and 3.
 
 ## Inherited bugs (from upstream Albam)
 
