@@ -58,9 +58,21 @@ class ToolsSettings(bpy.types.PropertyGroup):
     bone_names_preset: bone_names_enum
     vg_a: bpy.props.StringProperty()
     vg_b: bpy.props.StringProperty()
-    face_group: bpy.props.IntProperty(name='Group')
-    surface_attr: bpy.props.IntProperty(name='Surface attributes')
-    special_attr: bpy.props.IntProperty(name='Behavior attributes')
+    # DMC4 SBC triangle fields (Vibed/RE/sbc_dx9_format.md). The face layer keeps its old name "group".
+    face_group: bpy.props.IntProperty(
+        name='Material',
+        description="Ground material ID of the selected faces (the triangle's type field, 1-33). It picks the "
+                    "footstep / hit effect material; 0 means none. Stored in the face layer 'group'",
+        min=0)
+    surface_attr: bpy.props.IntProperty(
+        name='Surface attributes',
+        description="Surface flags: 0x20 forces floor, 0x10 forces wall (otherwise faces steeper than 40 degrees "
+                    "are walls), 0x1000 shelters from rain. The field is decimal: 0x10 = 16, 0x20 = 32, 0x1000 = 4096")
+    special_attr: bpy.props.IntProperty(
+        name='Behavior attributes',
+        description="Collision channels the faces let through: bits 8-14 (floor) / 16-22 (wall) make them "
+                    "invisible to queries on those channels. 0x10000000 or 0x20000000 replaces the channels "
+                    "completely (special walls and ledges; decimal 268435456 / 536870912). 0 = blocks everything")
     face_preset_enum = bpy.props.EnumProperty(
         name="",
         description="Select face property",
@@ -244,7 +256,7 @@ class ALBAM_PT_FACE_PROP(bpy.types.Panel):
             for f in bm.faces:
                 if f.select:
                     layout.label(text=f'Index: {f.index}')
-                    layout.label(text=f'Group: {f[group]}')
+                    layout.label(text=f'Material: {f[group]}')
                     layout.label(text=f'Surface attribute: {hex(f[surface_attr])}')
                     layout.label(text=f'Behavior attribute: {hex(f[special_attr])}')
                     break
