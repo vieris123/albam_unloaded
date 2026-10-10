@@ -3,7 +3,7 @@ object layout can't (add a unit or a property track, change a class), with dmc4_
 dmc4xml.xmlconv; class names in `dti` are hashed by it, so new ones work).
 
 - Edit as XML (`albam.xml_edit`): the file as it is now (edits included: it goes through the exporter) becomes a
-  Text block `<root>.xml`, opened in a Text Editor if one is on screen.
+  Text block `<root>.xml`, shown in a Text Editor (one already open in any window, else a new window).
 - Apply XML (`albam.xml_apply`, in the Object panel and the Text Editor's Albam tab): XML -> file bytes (read back
   to check them) -> the file's Empties are rebuilt in place, in the same collection, with the root's transform.
   Objects parented to one of the Empties from outside (e.g. a collision root riding a moving-floor unit) and
@@ -178,11 +178,31 @@ def _text_for(root):
 
 
 def _show_text(context, text):
-    for area in context.screen.areas if context.screen else []:
-        if area.type == "TEXT_EDITOR":
-            area.spaces.active.text = text
-            return True
-    return False
+    """Show text in a Text Editor: one already on screen, else a new window turned into one (sidebar open on the
+    Albam tab, where Apply XML is). False if there's no window (background mode)."""
+    for window in context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == "TEXT_EDITOR":
+                area.spaces.active.text = text
+                return True
+    if context.window is None:
+        return False
+    before = set(context.window_manager.windows)
+    try:
+        bpy.ops.wm.window_new()
+    except RuntimeError:
+        return False
+    new = [w for w in context.window_manager.windows if w not in before]
+    if not new:
+        return False
+    area = max(new[0].screen.areas, key=lambda a: a.width * a.height)
+    area.ui_type = "TEXT_EDITOR"
+    space = area.spaces.active
+    space.text = text
+    space.show_line_numbers = True
+    space.show_syntax_highlight = True
+    space.show_region_ui = True
+    return True
 
 
 @blender_registry.register_blender_type
@@ -209,7 +229,8 @@ class ALBAM_OT_XmlEdit(bpy.types.Operator):
         text[TEXT_ROOT] = root.name
         text.cursor_set(0)
         if _show_text(context, text):
-            self.report({"INFO"}, f"{text.name} is open in the Text Editor: edit it, then Apply XML")
+            self.report({"INFO"}, f"{text.name} is open in the Text Editor: edit it, then Apply XML (sidebar, "
+                                  "Albam tab)")
         else:
             self.report({"INFO"}, f"Open {text.name} in a Text Editor to edit it, then Apply XML")
         return {"FINISHED"}

@@ -127,7 +127,12 @@ The game behaviour is known; Blender doesn't show it yet.
   `xml_edit.py` only handles `.sdl` / `.pla` so far.
 - [ ] **Sound effects (not scoped yet, for a later session).** LMT event table 2 plays sounds: slot bit k ->
   `events_params_02[k]`, the same scheme as the hitbox groups of table 1. Per the user, the sound effect data follows
-  the XFS format (dmc4xml's XFS codec reads it), so the work starts there.
+  the XFS format (dmc4xml's XFS codec reads it), so the work starts there. What a player's `sound\se\player\pl000\`
+  holds (uPlayerNero.arc): rMotionSe (`pl000.0CA6AED4`, native `.msse`, XFS v5; one per motion bank: pl000, pl020,
+  pl000_majin, wp024; most likely the slot value -> sound table), rSndIf (`.rSndIf` / `.sif`, XFS), rAttributeSe
+  (`.ase`, XFS), rSoundEngine / rSoundEngineValue (`.eng` / `.engv`, XFS), and the binary banks: rSoundRequest
+  (`.sreq`, magic SREQ v15), rSoundBank (`.spac`, magic SPAC v4; not in the class table, arc type 0x15D782FB),
+  rSoundRandom (`.dnrs`, magic DNRS).
 - [ ] **XFS files (`.cam` rDevilCamera and the rest) in Albam.** The XFS codec is byte-exact on all 297 DX9 XFS files
   and vendored (`dmc4xml/xfs.py`, `xfsxml.py`; the layout table's attr / getter / setter fields and the header version
   are kept since 2026-10-10); `.phs` chains already use it. Still missing: a Blender import for the other classes,

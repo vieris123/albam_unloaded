@@ -5,8 +5,9 @@ import glob
 
 from kaitaistruct import KaitaiStream
 
+from albam.exceptions import AlbamCheckFailure
 from albam.registry import blender_registry
-from . import EXTENSION_TO_FILE_ID, FILE_ID_TO_EXTENSION
+from . import DMC4_AMBIGUOUS_EXTENSIONS, EXTENSION_TO_FILE_ID, FILE_ID_TO_EXTENSION, file_type_for_extension
 from .structs.arc import Arc
 
 
@@ -116,6 +117,26 @@ class ArcWrapper:
         return file_
 
 
+def _file_type(file_path, extension, imported):
+    """.arc file type of an exported file: from its extension (any spelling, file_type_for_extension); an extension
+    two classes share (.bin from arctool -allowDuplicateExt) takes the type of the existing entry at that path"""
+    if extension.lower() in DMC4_AMBIGUOUS_EXTENSIONS:
+        types = [t for (p, t) in imported if p == file_path.lower() and FILE_ID_TO_EXTENSION.get(t) == extension.lower()]
+        if len(types) == 1:
+            return types[0]
+        raise AlbamCheckFailure(
+            f"Can't tell which file type {file_path}.{extension} is",
+            details=f".{extension} is used by more than one class, and the archive has "
+                    f"{'no' if not types else 'several'} entries of those types at that path.",
+            solution="Name the file with its class as the extension (e.g. .rCharTbl or .rPlParamTbl).")
+    try:
+        return file_type_for_extension(extension)
+    except KeyError:
+        raise AlbamCheckFailure(f"Unknown file type .{extension}", details=f"{file_path}.{extension}",
+                                solution="Name the file with its class name or native extension "
+                                         "(engines/mtfw/__init__.py DMC4_RESOURCE_CLASSES).")
+
+
 def update_arc(filepath, vfiles):
     file_ = None
     arc = Arc()
@@ -139,36 +160,31 @@ def update_arc(filepath, vfiles):
     vf_sorted.extend(vf_mod)
     vf_sorted.extend(vf_tail)
 
-    # build a dictionary for imported arc
+    # build a dictionary for imported arc, keyed by (path without extension, file type): extracted files carry
+    # different extensions for one type depending on the tool (see DMC4_RESOURCE_CLASSES)
     with open(filepath, 'rb') as f:
         parsed = Arc.from_bytes(f.read())
         parsed._read()
     for fe in parsed.file_entries:
-        path = fe.file_path
-        try:
-            extension = FILE_ID_TO_EXTENSION[fe.file_type]
-        except KeyError:
-            extension = str(fe.file_type)
-        relative_path = (path + "." + extension)
-        imported[relative_path] = fe
+        imported[(fe.file_path.lower(), fe.file_type)] = fe
 
     # patch dictionary with imported files
     for vf in vf_sorted:
         vf_data = vf.data_bytes
         chunk = zlib.compress(vf_data)
         path = ntpath.normpath(vf.relative_path)
-        file_path = ntpath.splitext(path)[0]
-        try:
-            file_type = EXTENSION_TO_FILE_ID[vf.extension]
-        except KeyError:
-            file_type = int(vf.extension)
+        extension = vf.extension
+        file_path = path[:-len(extension) - 1] if path.lower().endswith("." + extension.lower()) else \
+            ntpath.splitext(path)[0]
+        file_type = _file_type(file_path, extension, imported)
+        key = (file_path.lower(), file_type)
 
-        if imported.get(path):
-            item = imported.get(path)
+        if imported.get(key):
+            item = imported.get(key)
             item.zsize = len(chunk)
             item.size = len(vf_data)
             item.raw_data = chunk
-            imported[path] = item
+            imported[key] = item
         else:
             item = Arc.FileEntry(None, _parent=None, _root=None)
             item.file_path = file_path
@@ -178,7 +194,7 @@ def update_arc(filepath, vfiles):
             item.flags = 2
             item.offset = 0
             item.raw_data = chunk
-            exported[path] = item
+            exported[key] = item
 
     exported.update(imported)
 

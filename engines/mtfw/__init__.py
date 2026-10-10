@@ -946,3 +946,158 @@ FILE_ID_TO_EXTENSION = {
 }
 
 EXTENSION_TO_FILE_ID = {ext_desc: h for h, ext_desc in FILE_ID_TO_EXTENSION.items()}
+
+
+# DMC4 resource classes: (class, native extension, DTI hash), from the game's class table (Note\DMC4Extensions.txt;
+# every hash checked against dmc4xml.dti.dti_hash). An .arc entry's file type is ~crc32(class name) & 0x7FFFFFFF.
+# Extracted files carry one of several extensions per class, and Patch must map each to the type:
+# - the old extraction tool writes the class name (pl000.rSndIf, pl023.rCollisionIdxData) or, for a class it doesn't
+#   know, its DTI hash in hex (pl000.0CA6AED4 = rMotionSe, pl000_ricochet.0C88D5D1 = rAttributeSe);
+# - the new one keeps the native extension (pl000.sif, pl023.idx) with `-allowDuplicateExt`
+#   (arctool\pc-dmc4-full-ext.bat), so two classes can share one (.bin: DMC4_AMBIGUOUS_EXTENSIONS);
+# - some names come from the file's magic or the tool's own list (DMC4_TOOL_EXTENSIONS: .sreq, .spac, .phs ...).
+DMC4_RESOURCE_CLASSES = (
+    ('rArchive',                            'arc',           0x21034C90),
+    ('rAttackStatusData',                   'atk',           0x652A93A4),
+    ('rAttributeSe',                        'ase',           0x0C88D5D1),
+    ('rAttributeSeXml',                     'ase.xml',       0x27607C05),
+    ('rCameraList',                         'lcm',           0x5EF1FB52),
+    ('rCameraListXml',                      'lcm.xml',       0x3F1D8ECD),
+    ('rCharTbl',                            'bin',           0x19DDF06A),
+    ('rCloth',                              'cdf',           0x234D7104),
+    ('rClothXml',                           'cdf.xml',       0x15BB3845),
+    ('rCnsChain',                           'clt',           0x4D990996),
+    ('rCollada',                            'dae',           0x1EF2AB1C),
+    ('rCollision',                          'sbc',           0x3900DAD0),
+    ('rCollisionIdxData',                   'idx',           0x470745CB),
+    ('rCollisionShape',                     'col',           0x4EA4E09A),
+    ('rConfig',                             'cfg',           0x37D68C3D),
+    ('rDefendStatusData',                   'dfd',           0x27F3C33D),
+    ('rDevilCamera',                        'cam',           0x743FE170),
+    ('rEffect2D',                           'e2d',           0x76AA6987),
+    ('rEffectAnim',                         'ean',           0x5E7D6A45),
+    ('rEffectAnimation',                    'efa',           0x03FAE282),
+    ('rEffectList',                         'efl',           0x294488A8),
+    ('rEffectSetData',                      'esd',           0x32231BD1),
+    ('rEffectSetDataList',                  'esl',           0x482B5B95),
+    ('rEffectStrip',                        'efs',           0x528770DF),
+    ('rEventHit',                           'evh',           0x6125D9CD),
+    ('rFacialAnimation',                    'fca',           0x264087B8),
+    ('rGridEnvLight',                       'lge',           0x5E3DC9F3),
+    ('rLeafAnim',                           'rla',           0x46771E81),
+    ('rLeafAnimXml',                        'rla.xml',       0x7269A01A),
+    ('rMessage',                            'msg',           0x4CDF60E9),
+    ('rModel',                              'mod',           0x1041BD9E),
+    ('rMotion',                             'mot',           0x1A773D0C),
+    ('rMotionList',                         'lmt',           0x139EE51D),
+    ('rMotionSe',                           'msse',          0x0CA6AED4),
+    ('rMotionSeXml',                        'msse.xml',      0x274E0700),
+    ('rMovie',                              '',              0x4D3EDF75),
+    ('rMovieOnDisk',                        'wmv',           0x3B1799EF),
+    ('rMovieOnDiskInterMediate',            'wmv',           0x3856D990),
+    ('rMovieOnMemory',                      'mem.wmv',       0x61F3D9DB),
+    ('rMovieOnMemoryInterMediate',          'mem.wmv',       0x308C9095),
+    ('rNavigationMesh',                     'nav',           0x0C2CEAE9),
+    ('rNavigationMeshXml',                  'nav.xml',       0x3ADAA3A8),
+    ('rNavigationMeshDae',                  'mod.xml',       0x0BFF2DCA),
+    ('rNulls',                              'nls',           0x5E4C723C),
+    ('rPlParamTbl',                         'bin',           0x7A5DCF86),
+    ('rPlacement',                          'pla',           0x3F5955F1),
+    ('rResourceTest',                       'rts',           0x1C9DA2CB),
+    ('rReverb',                             'rev_win',       0x7A038F4C),
+    ('rReverbXml',                          'rev_win.xml',   0x6C9DB67D),
+    ('rRoomDefault',                        'rdf',           0x4D52E593),
+    ('rRouteNode',                          'rut',           0x2B93C4AD),
+    ('rRouteNodeXml',                       'rut.xml',       0x007B6D79),
+    ('rScheduler',                          'sdl',           0x44E79B6E),
+    ('rShader',                             'bfx',           0x4E32817C),
+    ('rShape',                              'shp',           0x257F693C),
+    ('rShapeWeight',                        'shw',           0x68BCE821),
+    ('rSndIf',                              'sif',           0x5D5CBBCE),
+    ('rSndIfXml',                           'sif.xml',       0x7BEDB837),
+    ('rSoundCurveSet',                      'scs',           0x094973CF),
+    ('rSoundCurveSetXml',                   'scs.xml',       0x68A50650),
+    ('rSoundCurveXml',                      'scv.xml',       0x1FC5766A),
+    ('rSoundDirectionalCurveXml',           'sdc.xml',       0x3A2E7709),
+    ('rSoundDirectionalSet',                'sds',           0x340F49F9),
+    ('rSoundDirectionalSetXml',             'sds.xml',       0x55E33C66),
+    ('rSoundEQ',                            'equ',           0x39F8A71D),
+    ('rSoundEQXml',                         'equ.xml',       0x3343A64C),
+    ('rSoundEngine',                        'eng',           0x16640CD4),
+    ('rSoundEngineXml',                     'eng.xml',       0x3D8CA500),
+    ('rSoundEngineValue',                   'engv',          0x1D076492),
+    ('rSoundEngineValueXml',                'engv.xml',      0x36EFCD46),
+    ('rSoundPackage',                       'spc',           0x33AE5307),
+    ('rSoundPackageXml',                    'spc.xml',       0x1846FAD3),
+    ('rSoundRandom',                        'srd',           0x29948FBA),
+    ('rSoundRandomXml',                     'srd.xml',       0x1D8A3121),
+    ('rSoundRequest',                       'srq',           0x6C1D2073),
+    ('rSoundRequestXml',                    'srq.xml',       0x0DF155EC),
+    ('rSoundSeg',                           'seg',           0x2E47C723),
+    ('rSoundSegXml',                        'seg.xml',       0x08FB2473),
+    ('rSoundSource',                        '',              0x02D8A847),
+    ('rSoundSourceADPCM',                   '',              0x1D571BA8),
+    ('rSoundSourceEnvironment',             'envw',          0x28AD352E),
+    ('rSoundSourceEnvironmentInterMediate', 'envw',          0x4B2401B3),
+    ('rSoundSourceMusic',                   'sngw',          0x3821B94D),
+    ('rSoundSourceMusicInterMediate',       'sngw',          0x00D223ED),
+    ('rSoundSourceSE',                      'sew',           0x61A363D0),
+    ('rSoundSourceSEInterMediate',          'sew',           0x75B121C0),
+    ('rSoundSourceOggVorbis',               '',              0x004F0120),
+    ('rSoundSpeakerSetXml',                 'sss.xml',       0x7EB72CF0),
+    ('rSoundStreamRequest',                 'stq',           0x07D5909F),
+    ('rSoundStreamRequestXml',              'stq.xml',       0x6639E500),
+    ('rSprAnm',                             'anm',           0x55A8FB34),
+    ('rSprLayout',                          'sprmap',        0x34A8C353),
+    ('rStreamScheduler',                    'ssd',           0x3001BEC4),
+    ('rTexture',                            'tex',           0x3CAD8076),
+    ('r2Texture',                           'tex2',          0x7470D7E9),
+    ('rRenderTargetTexture',                'rtex',          0x27CE98F6),
+    ('rVibration',                          'vib',           0x0D7DA737),
+)
+# extensions of the arc tool that aren't the class's native one (from the file's magic, or the tool's own list)
+DMC4_TOOL_EXTENSIONS = {
+    "phs": "rCnsChain",         # native clt
+    "sreq": "rSoundRequest",    # magic SREQ, native srq
+    "spac": "rSoundBank",       # magic SPAC; rSoundBank isn't in the class table (type 0x15D782FB, sound\se banks)
+    "dnrs": "rSoundRandom",     # magic DNRS, native srd
+}
+# native extensions two classes share: not mapped (rCharTbl / rPlParamTbl are both .bin); a class's "InterMediate"
+# variant shares its native extension with the class itself, which keeps it
+DMC4_AMBIGUOUS_EXTENSIONS = {"bin"}
+
+
+def arc_type_id(class_name):
+    """.arc entry file type of a resource class"""
+    import zlib
+    return (~zlib.crc32(class_name.encode()) & 0xFFFFFFFF) & 0x7FFFFFFF
+
+
+def _add_dmc4_types():
+    for name, ext, dti in DMC4_RESOURCE_CLASSES:
+        file_type = arc_type_id(name)
+        FILE_ID_TO_EXTENSION.setdefault(file_type, ext or name)
+        aliases = [name, f"{dti:08X}"]
+        if ext and ext not in DMC4_AMBIGUOUS_EXTENSIONS and "InterMediate" not in name:
+            aliases.append(ext)         # DMC4 wins over another game's use of it (seg)
+        for alias in aliases:
+            EXTENSION_TO_FILE_ID[alias] = file_type
+    for ext, name in DMC4_TOOL_EXTENSIONS.items():
+        FILE_ID_TO_EXTENSION.setdefault(arc_type_id(name), ext)
+        EXTENSION_TO_FILE_ID[ext] = arc_type_id(name)
+
+
+_add_dmc4_types()
+_EXTENSION_TO_FILE_ID_LOWER = {ext.lower(): file_type for ext, file_type in EXTENSION_TO_FILE_ID.items()}
+
+
+def file_type_for_extension(extension):
+    """.arc file type for a file extension (any spelling above, any case; a decimal number is taken as the type
+    itself, as older Albam exports named unknown types); KeyError if unknown"""
+    if extension in EXTENSION_TO_FILE_ID:
+        return EXTENSION_TO_FILE_ID[extension]
+    if extension.lower() in _EXTENSION_TO_FILE_ID_LOWER:
+        return _EXTENSION_TO_FILE_ID_LOWER[extension.lower()]
+    if extension.isdigit():
+        return int(extension)
+    raise KeyError(extension)

@@ -94,6 +94,15 @@ When you add a new engine module, import it in `__init__.register()` **before** 
 4. Edit the result in Blender.
 5. Select it under Export and click Export. Files appear in the "exported" VFS.
 6. Use Save, or Patch (`albam.patch` → `archive.update_arc`) to rewrite an arc in place.
+   - Entries are matched by (path without extension, file type), and the type comes from the extension through
+     `file_type_for_extension` (`engines/mtfw/__init__.py`), which knows every DMC4 resource class
+     (`DMC4_RESOURCE_CLASSES`, from `Note\DMC4Extensions.txt`; arc type = `~crc32(class) & 0x7FFFFFFF`) under all the
+     names extraction tools give it: the class name or the DTI hash in hex (old arctool: `pl023.rCollisionIdxData`,
+     `pl000.0CA6AED4` = rMotionSe), the native extension (new arctool with `-allowDuplicateExt`,
+     `arctool\pc-dmc4-full-ext.bat`: `.idx`, `.sif`), and the tool's own names (`DMC4_TOOL_EXTENSIONS`: `.phs`,
+     `.sreq`, `.spac` = rSoundBank 0x15D782FB, `.dnrs`). `.bin` (rCharTbl and rPlParamTbl) takes the type of the
+     existing entry at its path; a new `.bin` or an unknown extension is refused (`AlbamCheckFailure`). Checked on
+     uPlayerNero.arc: every spelling replaces its entry, a new `.rCollisionIdxData` is added with its type.
 
 Texture and MRL lookup during import goes through `scene.albam.rfs.get_vfile(app_id, game_path)` (the VFS path is commented out). **The added root folder must be the arc root**, so that paths relative to it equal the in-game paths stored in the .mod.
 
