@@ -23,18 +23,19 @@ from pathlib import PureWindowsPath
 from types import SimpleNamespace
 
 import bpy
-from mathutils import Euler, Matrix, Quaternion, Vector
+from mathutils import Matrix, Quaternion, Vector
 
 from albam.exceptions import AlbamCheckFailure
 from albam.registry import blender_registry
 from .efl import EffectList, EflError, VERSION_DX9
 from .efl import ean, efs
+from .efl import keyframe as kfm
 from .efl.edit import block_props, keyframe_props, sub_props
 from .efl.schema import bgra_to_rgba
 from .efl.primmodel import build_from_block
 from .efl.sim import CLOTH_TYPES, ROT_ORDERS, emission_space, keyframes_of as sim_keyframes_of, refracts
 from .efl.sim import _AXES as _SIM_AXES, culling_params as sim_culling_params
-from . import effect_ean, effect_efs, effect_export, effect_filter, effect_sim
+from . import effect_ean, effect_efs, effect_export, effect_filter, effect_keys, effect_sim
 from .texture import MISSING_TEXTURE_PROP, build_blender_textures
 
 SCALE = 0.01   # game centimetres -> metres
@@ -64,11 +65,12 @@ class ImportOptionsEFL(bpy.types.PropertyGroup):
         description="Load base textures from the Game Files folder (it must be the arc root)")
     simulate: bpy.props.BoolProperty(
         name="Simulate particles", default=True,
-        description="Emit and animate particles over time (approximation of the game's emitters), "
-                    "starting at the current frame. Off: one static shape per generator")
+        description="Emit and animate particles over time (approximation of the game's emitters), starting at the "
+                    "current frame (a timeline marker you can drag) up to the scene's End frame. Off: one static "
+                    "shape per generator")
     sim_frames: bpy.props.IntProperty(
         name="Frames", default=300, min=1, max=3600,
-        description="Game frames (60 fps) to simulate; generators that loop forever stop emitting after this")
+        description="Unused since 2026-10-10: the preview simulates up to the scene's End frame")
     group_all: effect_filter.group_all_prop()
     group_bits: effect_filter.group_bits_prop()
     surface: effect_filter.surface_prop()
@@ -89,9 +91,6 @@ def draw_efl_options(panel_instance, context):
     layout.prop(options, "build_geometry")
     layout.prop(options, "load_textures")
     layout.prop(options, "simulate")
-    row = layout.row()
-    row.enabled = options.simulate
-    row.prop(options, "sim_frames")
     layout.prop(options, "darken_strength")
     layout.label(text="Spawn filter (change it later in the Effect Editor):")
     effect_filter.draw_filter(layout, options)
@@ -299,6 +298,7 @@ class _EffectBuilder:
         self._attach(ob, gen, root)
         if gen is not None:
             self.animate_generator(ob, gen, index)
+        self.build_keys(ob, record)
         self.current_generator = ob
 
         if ptcl is not None and ptcl.has("TransMode") and not ptcl.get("TransMode") & 1:
@@ -398,38 +398,31 @@ class _EffectBuilder:
 
     def animate_generator(self, ob, gen, index):
         """Generator keyframes (updateWorldMatrix 0x96BE10): 0x1D8 position, 0x1DC Euler rotation (AxisFlags
-        order), 0x1CC scale, on the generator timer; baked as F-curves on the generator Empty."""
+        order), 0x1CC scale, on the generator timer; real location / rotation / scale keys on the generator Empty
+        (effect_keys.py: the rotation on its RelationType 2 companion), which export reads back."""
         keys = sim_keyframes_of(gen, {"KeyframePosParamOffset": "pos", "KeyframeRotParamOffset": "rot",
                                       "KeyframeScaleParamOffset": "scale"})
-        if not keys:
-            return
-        import random
-        from .efl import keyframe as kfm
-        rng = random.Random(1000 + index)
-        start = self.context.scene.frame_current
-        fps = self.context.scene.render.fps / (self.context.scene.render.fps_base or 1.0)
-        frames = self.options.sim_frames if self.options.simulate else 300
-        order = ROT_ORDERS[gen.get("Order")] if 0 <= gen.get("Order") < len(ROT_ORDERS) else "XYZ"
-        for name, kf in keys.items():
-            rates = kfm.draw_rates(kf, rng)
-            step = max(1, frames // 120)
-            for game_frame in list(range(0, frames, step)) + [frames]:
-                timer = max(game_frame - 1, 0) if kf.ref_type == 1 else game_frame
-                value = kfm.evaluate(kf, timer, rates)
-                if value is None:
+        if keys:
+            ob["efl_animated"] = sorted(keys)
+
+    def build_keys(self, ob, record):
+        """Every typed keyframe of the record as F-curves on its Empty (effect_keys.py)."""
+        scene = self.context.scene
+        fps = scene.render.fps / (scene.render.fps_base or 1.0)
+        start, rate = scene.frame_current, 60.0 / fps
+        for slot, block in record.blocks():
+            if block is None:
+                continue
+            for sub in block.subblocks():
+                if sub.kind != "kf" or not sub.value_type:
                     continue
-                scene_frame = start + game_frame * fps / 60.0
-                if name == "pos":
-                    ob.location = [c * SCALE for c in value]
-                    ob.keyframe_insert("location", frame=scene_frame)
-                elif name == "rot":   # RelationType 2: the rotation lives on the companion
-                    target = effect_export.rotation_handle(ob) or ob
-                    target.rotation_quaternion = Euler(value, order).to_quaternion()
-                    target.keyframe_insert("rotation_quaternion", frame=scene_frame)
-                else:
-                    ob.scale = value
-                    ob.keyframe_insert("scale", frame=scene_frame)
-        ob["efl_animated"] = sorted(keys)
+                try:
+                    kf = kfm.read(sub)
+                except Exception:
+                    continue
+                if kf.frames:
+                    effect_keys.build_track(ob, slot, sub.field.name, kf, start, rate)
+        ob[effect_keys.VERSION_KEY] = 1
 
     def joint_bones(self):
         """MT joint number -> bone. ParentNo is the joint number (bone['mtfw.anim_retarget'], the .mod's

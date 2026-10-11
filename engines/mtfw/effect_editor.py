@@ -7,8 +7,9 @@ efl_* custom properties, which export (effect_export.py) writes back into the fi
 timer applies the edits to the preview a moment later (replaying, or rebuilding the effect when an edit needs it);
 Apply does it on demand. A depsgraph handler lets Blender's own tools work on effect objects: Shift+D / Ctrl+V
 copies of a record Empty become new records, X removes the record, a game texture swapped in an effect material
-writes its path back, and an edited .efs / .ean is applied after Edit Mode. Keyframes are edited one at a time (any
-typed keyframe offset of the record, existing or not).
+writes its path back, and an edited .efs / .ean is applied after Edit Mode. Keyframes are F-curves on the record
+Empty (effect_keys.py): the editor adds a keyframe decorator to every keyable field, and the Keys tab holds what
+Blender has no equivalent for (the timer, init-only).
 """
 import traceback
 
@@ -22,7 +23,7 @@ from .efl.field_help import lookup as field_help
 from .efl.edit import as_list, keyframe_value_type, to_prop, upgrade_props
 from .efl.model import SLOTS
 from .efl.sim import ROT_ORDER_NAMES, ROT_ORDERS
-from . import effect_filter, effect_sim
+from . import effect_filter, effect_keys, effect_sim
 from .effect_export import (ROT_HANDLE_KEY, ROT_HANDLE_OF, adopt_duplicate, all_record_objects, apply_to_scene,
                             effect_root, ordered_record_objects, record_object, structure_changed)
 
@@ -313,6 +314,8 @@ def _on_item_edit(item, context):
             _show(bit, bit_value)
         if item.slot == "gen" and item.label == "Scale":   # the base scale is the Empty's scale
             ob.scale = item.floats[0], item.floats[2], item.floats[4]
+        if item.slot == "gen" and item.label == "WaitFrame":   # generator-timer keys move with the wait
+            effect_keys.sync_offsets(ob)
         if item.label in TEXTURE_FIELDS:   # the image picker follows the typed path
             item.image = _loaded_image(value)
     finally:
@@ -377,6 +380,7 @@ class AlbamEflFieldItem(bpy.types.PropertyGroup):
         type=bpy.types.Image, poll=_image_poll, update=_on_image_pick,
         description="Pick one of the game textures already loaded in this file (the path field follows). Use the "
                     "search button for any .tex under the Game Files roots")
+    track: bpy.props.StringProperty()      # "<slot>:<offset field>" of the keyframe track animating this field
     # name (PropertyGroup.name) = "<slot>/<field>", label = the field name
     label: bpy.props.StringProperty()
 
@@ -384,43 +388,14 @@ class AlbamEflFieldItem(bpy.types.PropertyGroup):
 # -- keyframes --------------------------------------------------------------------------------------
 
 def _kf_parse(identifier):
-    slot, _, field = identifier.partition(":")
-    return slot, field
+    return effect_keys.parse_track(identifier)
 
 
 def _pretty_kf(name):
-    out = name
-    for prefix in ("Keyframe",):
-        out = out[len(prefix):] if out.startswith(prefix) else out
-    for suffix in ("ParamOffset", "Offset"):
-        out = out[:-len(suffix)] if out.endswith(suffix) else out
-    return out or name
+    return effect_keys.pretty(name)
 
 
-def keyframe_fields(ob):
-    """[(slot, field, value type)] for every typed keyframe offset of a record object's blocks."""
-    out = []
-    for slot in SLOTS:
-        props = ob.get(f"efl_{slot}")
-        if props is None:
-            continue
-        struct = schema.struct_for_props(slot, int(props["type"]), props)
-        for f in struct.offset_fields():
-            vtype = keyframe_value_type(f)
-            if vtype:   # every block spans its offset fields (corpus: 68,167 blocks)
-                out.append((slot, f.name, vtype))
-    return out
-
-
-def _kf_prop(ob, slot, field):
-    kfs = ob.get("efl_kf")
-    if kfs is None or slot not in kfs:
-        return None
-    prop = kfs[slot].get(field)
-    if prop is None:   # stored under an older field name
-        old = next((o for o, n in schema.FIELD_ALIASES.items() if n == field), None)
-        prop = kfs[slot].get(old) if old else None
-    return prop
+keyframe_fields = effect_keys.tracks   # [(slot, field, value type)] of a record object's keyframe tracks
 
 
 def _kf_field_items(state, context):
@@ -429,81 +404,49 @@ def _kf_field_items(state, context):
         return _NO_ITEMS
     items = []
     for slot, field, vtype in keyframe_fields(ob):
-        prop = _kf_prop(ob, slot, field)
-        count = len(as_list(prop.get("frames")) or []) if prop is not None else 0
-        label = f"{_pretty_kf(field)} ({slot}, {vtype})" + (f" - {count} keys" if count else "")
-        items.append((f"{slot}:{field}", label, field, "KEYFRAME_HLT" if count else "KEYFRAME", len(items)))
+        count = effect_keys.key_count(ob, slot, field)
+        label = f"{effect_keys.track_name(slot, field)} ({vtype})" + (f" - {count} keys" if count else "")
+        items.append((effect_keys.track_id(slot, field), label, field, "KEYFRAME_HLT" if count else "KEYFRAME",
+                      len(items)))
     _kf_items[ob.name] = items or _NO_ITEMS
     return _kf_items[ob.name]
 
 
 def load_keyframe(state):
+    """Show the active track's header settings (timer, interpolation, loop, init-only)."""
     global _loading
     _loading = True
     try:
-        state.keys.clear()
         state.kf_vtype = ""
         ob = state.target
         if ob is None or not state.kf_field or ":" not in state.kf_field:
             return
         slot, field = _kf_parse(state.kf_field)
         vtype = next((v for s, f, v in keyframe_fields(ob) if (s, f) == (slot, field)), None)
-        prop = _kf_prop(ob, slot, field)
+        prop = effect_keys.stored(ob, slot, field)
         if prop is not None and prop.get("vtype"):
             vtype = str(prop["vtype"])
         state.kf_vtype = vtype or ""
-        if prop is None:
-            state.kf_inp, state.kf_ref, state.kf_loop, state.kf_init_only = "0", "0", False, False
-            return
-        state.kf_inp = str(int(prop.get("InpType", 0)) if int(prop.get("InpType", 0)) < 3 else 0)
-        state.kf_ref = str(int(prop.get("RefType", 0)))
-        state.kf_loop = bool(prop.get("LoopFlag", 0))
-        state.kf_init_only = bool(prop.get("InitOnlyFlag", 0))
-        frames = as_list(prop.get("frames")) or []
-        params = as_list(prop.get("params")) or []
-        per = len(params) // len(frames) if frames else 0
-        for i, frame in enumerate(frames):
-            key = state.keys.add()
-            key.frame = int(frame)
-            values = params[i * per:(i + 1) * per]
-            if vtype == "color":
-                b, g, r, a = values[0:4]
-                key.color_a = (r / 255, g / 255, b / 255, a / 255)
-                b, g, r, a = values[4:8]
-                key.color_b = (r / 255, g / 255, b / 255, a / 255)
-            else:
-                for j, v in enumerate(values[:6]):
-                    key.values[j] = float(v)
+        flags = effect_keys.header_flags(ob, slot, field)
+        state.kf_inp = str(flags["InpType"] if flags["InpType"] < 3 else 0)
+        state.kf_ref = str(flags["RefType"])
+        state.kf_loop = bool(flags["LoopFlag"])
+        state.kf_init_only = bool(flags["InitOnlyFlag"])
     finally:
         _loading = False
 
 
 def write_keyframe(state):
+    """Write the active track's header settings to the record (and its curves: interpolation, loop)."""
     ob = state.target
     if ob is None or not state.kf_vtype or ":" not in state.kf_field:
         return
     slot, field = _kf_parse(state.kf_field)
     vtype = state.kf_vtype
-    old = _kf_prop(ob, slot, field)
-    frames, params = [], []
-    for key in state.keys:
-        frames.append(int(key.frame))
-        if vtype == "color":
-            for color in (key.color_a, key.color_b):
-                r, g, b, a = (min(max(round(c * 255), 0), 255) for c in color)
-                params += [b, g, r, a]
-        elif vtype in ("u32", "fixangle"):
-            params += [int(round(v)) for v in key.values[:2 if vtype == "u32" else 6]]
-        else:
-            params += [float(v) for v in key.values[:2 if vtype == "f32" else 6]]
-    prop = {"vtype": vtype, "header": old.get("header", "0x0") if old is not None else "0x0",
-            "InpType": int(state.kf_inp), "RefType": int(state.kf_ref), "LoopFlag": int(state.kf_loop),
-            "InitOnlyFlag": int(state.kf_init_only), "frames": frames, "params": params}
-    if ob.get("efl_kf") is None:
-        ob["efl_kf"] = {}
-    if slot not in ob["efl_kf"]:
-        ob["efl_kf"][slot] = {}
-    ob["efl_kf"][slot][field] = prop
+    effect_keys.set_header(ob, slot, field, vtype, RefType=int(state.kf_ref), InitOnlyFlag=int(state.kf_init_only))
+    effect_keys.set_interpolation(ob, slot, field, vtype, int(state.kf_inp))
+    effect_keys.set_loop(ob, slot, field, vtype, state.kf_loop)
+    effect_keys.sync_offsets(ob)   # a generator-timer track sits after the WaitFrame
     schedule_live_apply(effect_root(ob))
 
 
@@ -517,21 +460,103 @@ def _on_kf_edit(owner, context):
         write_keyframe(_state(context))
 
 
-@blender_registry.register_blender_prop
-class AlbamEflKeyItem(bpy.types.PropertyGroup):
-    frame: bpy.props.IntProperty(
-        min=0, update=_on_kf_edit,
-        description="Game frame (60 fps) of this key, counted on the keyframe's Timer. Frames must increase")
-    values: bpy.props.FloatVectorProperty(
-        size=6, precision=4, update=_on_kf_edit,
-        description="The key's value and its random part: the game uses value + random x rand "
-                    "(X Y Z keys: one pair per axis)")
-    color_a: bpy.props.FloatVectorProperty(
-        size=4, subtype="COLOR_GAMMA", min=0.0, max=1.0, update=_on_kf_edit,
-        description="Colour A of this key. The game mixes colours A and B by a random amount")
-    color_b: bpy.props.FloatVectorProperty(
-        size=4, subtype="COLOR_GAMMA", min=0.0, max=1.0, update=_on_kf_edit,
-        description="Colour B of this key. The game mixes colours A and B by a random amount")
+def _track_of(ob, ident):
+    """(slot, field, vtype) of a track id on a record object, or None."""
+    slot, field = _kf_parse(ident)
+    return next(((s, f, v) for s, f, v in keyframe_fields(ob) if (s, f) == (slot, field)), None)
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_EflKeyInsert(bpy.types.Operator):
+    """Insert a key for this value at the current frame (a key already there is replaced). The first key starts
+    the track: from then on its keys are F-curves on the record's Empty, edited in the Graph Editor or Dope Sheet
+    (the value's random part is the "... Rand" / "... B" property next to it)"""
+    bl_idname = "albam.efl_key_insert"
+    bl_label = "Insert Key"
+    bl_options = {"REGISTER", "UNDO"}
+
+    track: bpy.props.StringProperty(description="The keyframe track: '<block>:<offset field>'")
+
+    @classmethod
+    def poll(cls, context):
+        return _state(context).target is not None
+
+    def execute(self, context):
+        state = _state(context)
+        ob = state.target
+        track = _track_of(ob, self.track)
+        if track is None:
+            self.report({"WARNING"}, f"{self.track} isn't a keyframe track of {ob.name}")
+            return {"CANCELLED"}
+        slot, field, vtype = track
+        frame = effect_keys.insert_key(ob, slot, field, vtype, context.scene.frame_current)
+        if abs(frame - context.scene.frame_current) > 1e-6:
+            self.report({"INFO"}, f"Key placed at frame {frame:g}: the track's keys start there (the effect's start "
+                                  "plus the generator's WaitFrame)")
+        _kf_items.pop(ob.name, None)
+        if state.kf_field != self.track and self.track in {i[0] for i in _kf_field_items(state, context)}:
+            _set_kf_field(state, self.track)
+        load_keyframe(state)
+        error = live_apply_now(context, effect_root(ob))
+        if error:
+            self.report({"WARNING"}, error)
+        return {"FINISHED"}
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_EflKeysClear(bpy.types.Operator):
+    """Remove every key of this track: the field's plain value is used again"""
+    bl_idname = "albam.efl_keys_clear"
+    bl_label = "Clear Keys"
+    bl_options = {"REGISTER", "UNDO"}
+
+    track: bpy.props.StringProperty(description="The keyframe track: '<block>:<offset field>'")
+
+    @classmethod
+    def poll(cls, context):
+        return _state(context).target is not None
+
+    def execute(self, context):
+        state = _state(context)
+        ob = state.target
+        track = _track_of(ob, self.track)
+        if track is None:
+            return {"CANCELLED"}
+        slot, field, vtype = track
+        if effect_keys.VERSION_KEY not in ob:
+            effect_keys.rebuild_tracks(ob)
+        effect_keys.remove_track(ob, slot, field, vtype)
+        _kf_items.pop(ob.name, None)
+        load_keyframe(state)
+        error = live_apply_now(context, effect_root(ob))
+        if error:
+            self.report({"WARNING"}, error)
+        return {"FINISHED"}
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_EflKeysSelect(bpy.types.Operator):
+    """Select this track's curves (and deselect the record's others) so the Graph Editor and Dope Sheet show them"""
+    bl_idname = "albam.efl_keys_select"
+    bl_label = "Show Curves"
+
+    track: bpy.props.StringProperty(description="The keyframe track: '<block>:<offset field>'")
+
+    @classmethod
+    def poll(cls, context):
+        return _state(context).target is not None
+
+    def execute(self, context):
+        state = _state(context)
+        ob = state.target
+        track = _track_of(ob, self.track)
+        if track is None:
+            return {"CANCELLED"}
+        effect_keys.select_track(ob, track[0], track[1])
+        for area in context.screen.areas:
+            if area.type in ("GRAPH_EDITOR", "DOPESHEET_EDITOR"):
+                area.tag_redraw()
+        return {"FINISHED"}
 
 
 def _on_record_index(state, context):
@@ -566,13 +591,29 @@ TABS = [("gen", "Generator", "Generator block: where, when and how many particle
         ("more", "More", "The record's collision and culling settings")]
 
 
-def _on_end_edit(state, context):
-    """End Effect: store it on the effect and replay its particles."""
-    if _loading or state.records_root is None:
-        return
+def _get_end_at(state):
+    return effect_sim.end_frame_of(state.records_root) is not None if state.records_root is not None else False
+
+
+def _set_end_at(state, value):
     root = state.records_root
-    root[effect_sim.END_KEY] = state.end_frame if state.end_at else -1
-    effect_sim.refresh_root(root, context.scene)
+    if root is None:
+        return
+    scene = bpy.context.scene
+    if value and effect_sim.end_frame_of(root, scene) is None:
+        effect_sim.set_end(root, scene, scene.frame_current)
+    elif not value:
+        effect_sim.set_end(root, scene, None)
+
+
+def _get_end_frame(state):
+    end = effect_sim.end_frame_of(state.records_root) if state.records_root is not None else None
+    return end if end is not None else 0
+
+
+def _set_end_frame(state, value):
+    if state.records_root is not None:
+        effect_sim.set_end(state.records_root, bpy.context.scene, value)
 
 
 def _on_filter_edit(state, context):
@@ -613,15 +654,15 @@ class AlbamEflEditor(bpy.types.PropertyGroup):
     group_bits: effect_filter.group_bits_prop(_on_filter_edit)
     surface: effect_filter.surface_prop(_on_filter_edit)
     end_at: bpy.props.BoolProperty(
-        name="End Effect", update=_on_end_edit,
-        description="Preview only: end the effect at a frame, as the game does when the move or animation that spawned "
-                    "it ends. Its emitters stop spawning, and particles held by Hold Until Effect Ends (Life tab) "
-                    "fade out after their KeepFrame. Off: the effect never ends and held particles stay to the end "
-                    "of the simulated range")
+        name="End Effect", get=_get_end_at, set=_set_end_at,
+        description="Preview only: end the effect at a timeline marker ('<effect> end', placed at the current frame; "
+                    "drag it in the timeline), as the game does when the move or animation that spawned it ends. "
+                    "Its emitters stop spawning, and particles held by Hold Until Effect Ends (Life tab) fade out "
+                    "after their KeepFrame. Off: the effect never ends and held particles stay to the scene's end")
     end_frame: bpy.props.IntProperty(
-        name="At Frame", update=_on_end_edit,
-        description="Timeline frame at which the preview ends the effect (not saved in the .efl: the game ends "
-                    "effects from the code that spawned them)")
+        name="At Frame", get=_get_end_frame, set=_set_end_frame,
+        description="Timeline frame of the effect's end marker (not saved in the .efl: the game ends effects from "
+                    "the code that spawned them)")
     records_root: bpy.props.PointerProperty(type=bpy.types.Object)
     records: bpy.props.CollectionProperty(type=AlbamEflRecordItem)
     records_index: bpy.props.IntProperty(update=_on_record_index,
@@ -629,20 +670,21 @@ class AlbamEflEditor(bpy.types.PropertyGroup):
     fields: bpy.props.CollectionProperty(type=AlbamEflFieldItem)
     kf_field: bpy.props.EnumProperty(
         name="Keyframe", items=_kf_field_items, update=_on_kf_field,
-        description="Which keyframe of the record to edit. A field with keys uses them instead of its plain value")
+        description="Which keyframe track of the record to show the settings of. A field with keys uses them "
+                    "instead of its plain value")
     kf_vtype: bpy.props.StringProperty()
     kf_inp: bpy.props.EnumProperty(name="Interpolation", items=INP_TYPES, update=_on_kf_edit,
-                                   description="How the value changes between keys")
+                                   description="How the value changes between keys (sets the keys' interpolation: "
+                                               "Linear, or Bezier for the two smooth types)")
     kf_ref: bpy.props.EnumProperty(name="Timer", items=REF_TYPES, update=_on_kf_edit,
                                    description="Which clock the key frames count on")
     kf_loop: bpy.props.BoolProperty(name="Loop", update=_on_kf_edit,
-                                    description="Start over after the last key instead of holding its value")
+                                    description="Start over after the last key instead of holding its value (a "
+                                                "Cycles modifier on the track's curves)")
     kf_init_only: bpy.props.BoolProperty(
         name="Init only", update=_on_kf_edit,
         description="Evaluate the keys once, when the particle spawns; after that the field's Add value applies. "
                     "Off: the keys set the value every frame (and Add is ignored)")
-    keys: bpy.props.CollectionProperty(type=AlbamEflKeyItem)
-    key_index: bpy.props.IntProperty(description="Click a key to select it")
     ptcl_open: bpy.props.BoolVectorProperty(
         size=len(PTCL_SECTIONS), default=[key in ("tex", "color", "size") for key, *_ in PTCL_SECTIONS],
         description="Click to show or hide this group of particle fields")
@@ -717,12 +759,16 @@ def load_record(state, ob):
             bits = {}
             for b in struct.bits:
                 bits.setdefault(b.field, []).append(b)
+            tracked = {effect_keys.animated_field(struct, f.name): f.name for f in struct.offset_fields()
+                       if keyframe_value_type(f)}
             for f in struct.fields:
                 if f.name not in props or f.sub:   # offsets are layout (older imports stored them)
                     continue
                 item = _add_field(state, slot, f, props[f.name])
                 extension = f.offset >= struct.base_size
                 item.section = ptcl_section(f.name, extension=extension)
+                if f.name in tracked:
+                    item.track = effect_keys.track_id(slot, tracked[f.name])
                 for b in bits.get(f.name, []):
                     if b.name in props and not b.sub:   # offsets are edited as keyframes (Keys tab)
                         _add_bit(state, slot, b, props[b.name]).section = ptcl_section(b.name, f.name, extension)
@@ -775,9 +821,6 @@ def sync_records(state, root, active=None):
             return
         state.group_all, state.group_bits, state.surface = effect_filter.options_from_masks(
             *effect_filter.get_masks(root))
-        end = root.get(effect_sim.END_KEY, -1)
-        state.end_at = end is not None and end >= 0
-        state.end_frame = end if state.end_at else int(root.get("efl_start_frame", 1)) + 60
         try:
             obs = ordered_record_objects(root)
         except Exception:   # duplicated records: still list them
@@ -832,7 +875,12 @@ def forget_objects():
     _object_count = -1
 
 
+_applying = False   # inside apply_to_scene: its own key / object changes aren't edits
+
+
 def _apply(context, root, state):
+    global _applying
+    _applying = True
     try:
         apply_to_scene(context, root)
         state.live_error = ""
@@ -841,7 +889,19 @@ def _apply(context, root, state):
     except Exception as err:   # a failed apply mustn't take the timer or the operator down
         traceback.print_exc()
         state.live_error = f"{type(err).__name__}: {err}"
+    finally:
+        _applying = False
     return state.live_error
+
+
+def _action_roots(action):
+    """Effect roots whose record Empties (or rotation companions) play an action."""
+    roots = set()
+    for ob in bpy.data.objects:
+        if ob.animation_data is not None and ob.animation_data.action == action and ob.get("efl_root") is not None \
+                and ("efl_record" in ob or ROT_HANDLE_OF in ob):
+            roots.add(ob["efl_root"].name)
+    return roots
 
 
 def _live_apply():
@@ -1018,6 +1078,10 @@ def _on_depsgraph(scene, depsgraph):
                 root = id_.get("efl_root")
                 if root is not None and _state().live:
                     _pending.add(root.name)
+                    queued = True
+            elif isinstance(id_, bpy.types.Action) and not _applying and _state().live:   # keys edited
+                for name in _action_roots(id_):
+                    _pending.add(name)
                     queued = True
     if queued:
         _schedule_timer()
@@ -1262,6 +1326,8 @@ class ALBAM_OT_EflRevertRecord(bpy.types.Operator):
                 ob[f"efl_{slot}"] = block_props(block)
                 keyframes[slot], subs[slot] = keyframe_props(block), sub_props(block)
         ob["efl_kf"], ob["efl_sub"] = keyframes, subs
+        effect_keys.rebuild_tracks(ob)
+        _kf_items.pop(ob.name, None)
         load_record(_state(context), ob)
         error = live_apply_now(context, effect_root(ob))
         if error:
@@ -1269,107 +1335,7 @@ class ALBAM_OT_EflRevertRecord(bpy.types.Operator):
         return {"FINISHED"}
 
 
-@blender_registry.register_blender_type
-class ALBAM_OT_EflKeyAdd(bpy.types.Operator):
-    """Add a key after the active one (a copy of it, 10 frames later), or the first key of a new keyframe"""
-    bl_idname = "albam.efl_key_add"
-    bl_label = "Add Key"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        state = _state(context)
-        return state.target is not None and bool(state.kf_vtype) and len(state.keys) < 255
-
-    def execute(self, context):
-        global _loading
-        state = _state(context)
-        _loading = True
-        try:
-            if len(state.keys):
-                src = state.keys[min(state.key_index, len(state.keys) - 1)]
-                key = state.keys.add()
-                key.frame = max(k.frame for k in state.keys) + 10
-                key.values, key.color_a, key.color_b = src.values[:], src.color_a[:], src.color_b[:]
-            else:
-                key = state.keys.add()
-                defaults = _KEY_DEFAULTS[state.kf_vtype]
-                if state.kf_vtype == "color":
-                    key.color_a = key.color_b = (1.0, 1.0, 1.0, 1.0)
-                else:
-                    for i, v in enumerate(defaults):
-                        key.values[i] = v
-            state.key_index = len(state.keys) - 1
-        finally:
-            _loading = False
-        write_keyframe(state)
-        return {"FINISHED"}
-
-
-@blender_registry.register_blender_type
-class ALBAM_OT_EflKeyRemove(bpy.types.Operator):
-    """Remove the active key (removing every key removes the keyframe)"""
-    bl_idname = "albam.efl_key_remove"
-    bl_label = "Remove Key"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        state = _state(context)
-        return state.target is not None and len(state.keys) > 0
-
-    def execute(self, context):
-        state = _state(context)
-        state.keys.remove(min(state.key_index, len(state.keys) - 1))
-        state.key_index = max(min(state.key_index, len(state.keys) - 1), 0)
-        write_keyframe(state)
-        return {"FINISHED"}
-
-
-@blender_registry.register_blender_type
-class ALBAM_OT_EflKeySort(bpy.types.Operator):
-    """Sort the keys by frame (the game needs increasing frames)"""
-    bl_idname = "albam.efl_key_sort"
-    bl_label = "Sort Keys"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        return len(_state(context).keys) > 1
-
-    def execute(self, context):
-        state = _state(context)
-        write_keyframe(state)
-        slot, field = _kf_parse(state.kf_field)
-        prop = _kf_prop(state.target, slot, field)
-        frames, params = as_list(prop["frames"]), as_list(prop["params"])
-        per = len(params) // len(frames)
-        order = sorted(range(len(frames)), key=lambda i: frames[i])
-        prop["frames"] = [frames[i] for i in order]
-        prop["params"] = [v for i in order for v in params[i * per:(i + 1) * per]]
-        load_keyframe(state)
-        return {"FINISHED"}
-
-
 # -- panel ------------------------------------------------------------------------------------------
-
-@blender_registry.register_blender_type
-class ALBAM_UL_EflKeys(bpy.types.UIList):
-    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
-        state = data
-        row = layout.row(align=True)
-        row.prop(item, "frame", text="")
-        vtype = state.kf_vtype
-        if vtype == "color":
-            row.prop(item, "color_a", text="")
-            row.prop(item, "color_b", text="")
-        elif vtype in ("f32", "u32"):
-            row.prop(item, "values", index=0, text="")
-            row.prop(item, "values", index=1, text="+rand")
-        else:
-            for axis in range(3):
-                row.prop(item, "values", index=2 * axis, text="XYZ"[axis])
-
 
 def _draw_sections(layout, state, items, searching):
     """Particle tab: the fields in collapsible groups (all open while searching)."""
@@ -1387,16 +1353,21 @@ def _draw_sections(layout, state, items, searching):
         if is_open:
             col = box.column(align=False)
             for item in group:
-                _draw_field(col, item, state.show_notes)
+                _draw_field(col, item, state.show_notes, state.target)
 
 
-def _draw_field(layout, item, show_notes):
+def _draw_field(layout, item, show_notes, ob=None):
     box_row = layout.row(align=True)
     split = box_row.split(factor=0.42, align=True)
     label = ("    " + item.label) if item.kind == "bit" or item.parent else item.label
     split.operator("albam.efl_field_info", text=label, emboss=False,
                    icon="ERROR" if item.error else TIER_ICONS.get(item.tier, "QUESTION")).field = item.name
     right = split.column(align=True)
+    if item.track and ob is not None:   # keyframe decorator, like Blender's own: keyed = filled
+        slot, field = _kf_parse(item.track)
+        keyed = effect_keys.has_keys(ob, slot, field)
+        box_row.operator("albam.efl_key_insert", text="", emboss=False,
+                         icon="DECORATE_KEYFRAME" if keyed else "DECORATE_ANIMATE").track = item.track
     if item.kind in ("floats", "ints"):
         prop = "floats" if item.kind == "floats" else "ints"
         if item.per > 1:
@@ -1468,6 +1439,12 @@ class _EflEditorDraw:
         row.prop(state, "live", toggle=True, icon="RECORD_ON" if state.live else "RECORD_OFF")
         row.prop(state, "face_viewport", toggle=True, icon="VIEW_CAMERA")
         layout.operator("albam.efl_record_motion", icon="REC")
+        if state.records_root == root:
+            row = layout.row(align=True)
+            row.prop(state, "end_at", toggle=True, icon="MARKER_HLT" if state.end_at else "MARKER")
+            sub = row.row(align=True)
+            sub.enabled = state.end_at
+            sub.prop(state, "end_frame")
         if state.live_error:
             box = layout.box()
             box.label(text="The last edit couldn't be applied:", icon="ERROR")
@@ -1512,11 +1489,6 @@ class _EflEditorDraw:
                     box.label(text="No record passes: the game shows nothing", icon="ERROR")
                 else:
                     box.label(text=f"Showing {shown} of {total} records", icon="HIDE_OFF")
-                row = box.row(align=True)
-                row.prop(state, "end_at")
-                sub = row.row(align=True)
-                sub.enabled = state.end_at
-                sub.prop(state, "end_frame")
 
         box = layout.box()
         header = box.row()
@@ -1575,46 +1547,47 @@ class _EflEditorDraw:
             for i, item in enumerate(visible):
                 if state.tab == "more" and (i == 0 or visible[i - 1].slot != item.slot):
                     col.label(text=item.slot.split(":", 1)[1].replace("ParamOffset", ""), icon="MOD_PHYSICS")
-                _draw_field(col, item, state.show_notes)
+                _draw_field(col, item, state.show_notes, state.target)
         if not shown:
             layout.label(text="Nothing to show here" + ("" if state.show_unverified else
                                                          " (try Unverified)"))
 
     def draw_keys(self, layout, state):
-        layout.prop(state, "kf_field", text="")
-        if not state.kf_vtype:
+        ob = state.target
+        tracks = keyframe_fields(ob) if ob is not None else []
+        if not tracks:
             layout.label(text="This record has no keyframe slots")
             return
-        row = layout.row(align=True)
+        layout.label(text="Keys are F-curves on the record's Empty (Graph Editor, Dope Sheet)", icon="INFO")
+        col = layout.column(align=True)
+        for slot, field, vtype in tracks:
+            ident = effect_keys.track_id(slot, field)
+            count = effect_keys.key_count(ob, slot, field)
+            row = col.row(align=True)
+            row.operator("albam.efl_keys_select", text=effect_keys.track_name(slot, field), emboss=False,
+                         icon="KEYFRAME_HLT" if count else "KEYFRAME").track = ident
+            row.label(text=f"{count} keys" if count else "")
+            row.operator("albam.efl_key_insert", text="", icon="DECORATE_KEYFRAME" if count else "DECORATE_ANIMATE"
+                         ).track = ident
+            sub = row.row(align=True)
+            sub.enabled = count > 0
+            sub.operator("albam.efl_keys_clear", text="", icon="X").track = ident
+        box = layout.box()
+        box.label(text="Track settings", icon="SETTINGS")
+        box.prop(state, "kf_field", text="")
+        if not state.kf_vtype:
+            return
+        row = box.row(align=True)
         row.prop(state, "kf_inp", text="")
         row.prop(state, "kf_ref", text="")
-        row = layout.row(align=True)
+        row = box.row(align=True)
         row.prop(state, "kf_loop", toggle=True)
         row.prop(state, "kf_init_only", toggle=True)
-        labels = {"f32": "frame | value | +rand", "u32": "frame | value | +rand",
-                  "color": "frame | colour A | colour B (random mix)",
-                  "vec3": "frame | X Y Z (+rand: expand below)", "fixangle": "frame | X Y Z (4096 = 360 deg)"}
-        layout.label(text=labels.get(state.kf_vtype, ""))
-        row = layout.row()
-        row.template_list("ALBAM_UL_EflKeys", "", state, "keys", state, "key_index", rows=4)
-        col = row.column(align=True)
-        col.operator("albam.efl_key_add", text="", icon="ADD")
-        col.operator("albam.efl_key_remove", text="", icon="REMOVE")
-        col.operator("albam.efl_key_sort", text="", icon="SORTSIZE")
-        if state.kf_vtype in ("vec3", "fixangle") and len(state.keys):
-            key = state.keys[min(state.key_index, len(state.keys) - 1)]
-            box = layout.box()
-            box.label(text=f"Key at frame {key.frame}")
-            for axis in range(3):
-                row = box.row(align=True)
-                row.label(text="XYZ"[axis])
-                row.prop(key, "values", index=2 * axis, text="")
-                row.prop(key, "values", index=2 * axis + 1, text="+rand")
-        frames = [k.frame for k in state.keys]
-        if any(b <= a for a, b in zip(frames, frames[1:])):
-            layout.label(text="Key frames must increase (use Sort)", icon="ERROR")
-        if not len(state.keys):
-            layout.label(text="No keys: the field's plain value is used", icon="INFO")
+        units = {"color": "Colour keys: the key's colour, and its '... B' property is the second colour of the "
+                          "random mix", "vec3": "X Y Z keys; '... Rand' is the random part per axis",
+                 "fixangle": "Angle keys in radians", "u32": "Whole-number keys; '... Rand' is the random range",
+                 "f32": "Value keys; '... Rand' is the random part (value + Rand x random)"}
+        box.label(text=units.get(state.kf_vtype, ""))
 
 
 @blender_registry.register_blender_type

@@ -4,7 +4,7 @@ Open work for the DMC4 fork, mostly the EFL (effects) side. Items are grouped by
 inside each group. Addresses are in the DMC4 DX9 executable; reverse-engineering details are in
 `Vibed/RE/efl_import_plan.md`, and the current state of each feature is in `CLAUDE.md`.
 
-Last updated: 2026-10-10.
+Last updated: 2026-10-11.
 
 ## Housekeeping
 
@@ -109,13 +109,18 @@ The game behaviour is known; Blender only approximates it. The other preview gap
   - Plan: codecs for atk / dfd / idx in dmc4xml (byte-exact on the corpus), then Albam: the attack / defend entries
     editable alongside the `.col` groups.
 - [ ] **Editable `.mod` model settings beyond the light group** (`model_info`: middist, lowdist, strip type).
-- [ ] **Particle keyframes as F-curves.** The Keys tab is a custom list because the game's keys carry a random part
-  per key, a timer kind, loop and init-only, which F-curves don't. They could map onto F-curves on custom properties
-  (as the `.sdl` tracks do) with the extras kept per key, so they're edited in the Graph Editor. Lossy mapping;
-  largest of the "normal Blender workflow" items (2026-10-10: live preview, Shift+D / X / Ctrl+V on records, the
-  editor in Object Properties and texture pickers are done).
-- [ ] **Timeline integration for effects.** The start frame and simulated length are import options; they could
-  follow the scene's frame range, with an "effect ends at frame" marker that also releases held particles.
+- [x] **Particle keyframes as F-curves.** Done 2026-10-11 (`effect_keys.py`): tracks are custom properties on the
+  record Empty with F-curves ("… Rand" / "… B" for the random part), generator keys are transform keys, loop is a
+  Cycles modifier, interpolation follows the keys; the timer and init-only stay in the Keys tab. Keyframe decorators
+  on the field rows. Every imported file still exports byte-identical. Not covered: keys of a track whose random
+  part should differ per key but isn't keyed (set a static Rand or key it), and a one-frame rounding when the scene
+  fps isn't a divisor of 60.
+- [x] **Timeline integration for effects.** Done 2026-10-11: start and end markers per effect (drag the start marker
+  to move the effect, keys included), the simulated length follows the scene's End frame.
+- [ ] **Keyframe UX leftovers.** A record's custom-property tracks share the Empty's action with its transform keys,
+  so the Dope Sheet shows them under the object; a channel group per track is set. Possible next steps: an
+  "Animate" entry in the field's right-click menu (needs the editor's items to be real RNA paths), showing the Rand
+  property next to its track in the Keys tab, and a per-track key list for people who prefer numbers.
 
 - [x] **SDL / PLA: add new property tracks from Blender.** Done 2026-10-10 through Edit as XML / Apply XML
   (`xml_edit.py`): new units, property tracks and classes are typed in dmc4_xml's XML. A form-style "Add Property"

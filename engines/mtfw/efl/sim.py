@@ -55,7 +55,10 @@ Sources (DX9):
                WidthPlaceRate), a world-space history: each pair built with its tick's particle matrix M (Rot(+RotAdd),
                scale, generator / alignment, buildPolygonStripEdgeVert 0x98D240; effect_sim._update_strips)
     keyframes  efl/keyframe.py; per-particle random rates drawn at spawn; a keyed value is absolute (its *Add is
-               ignored); InitOnly keys are evaluated once at spawn and the *Add field applies after that
+               ignored); InitOnly keys are evaluated once at spawn and the *Add field applies after that. Timers
+               (getKeyframeTimer 0x963F10, `clock`): particle age; generator (RefType 1) = Generator::mTimer, which
+               the generator ticks (updateSingleGenerator 0x9DDBF0 / uknGenBehaviorFunc1 0x9DDCB0) leave at 0
+               through WaitFrame, so it counts from the end of the wait; effect / parent / global from the start
     shape      Polygon (2): Width / Height half-extents (+Add, or keyframes clamped >= 0; <= 0 kills when not keyed);
                PrimModel (6): Radius0/1, Height0/1 (+Add, or keyframes), rebuilt per frame in the game (sub_990310)
     uv scroll  Model (5) with ModelAnimFlag 0x10: offset += ScrollU/V (or their keyframes) per frame, wrapped to [-1, 1]
@@ -221,6 +224,18 @@ _GEN_KEY_FIELDS = ("KeyframeScaleParamOffset", "KeyframeSetNumParamOffset", "Key
                    "KeyframePosParamOffset", "KeyframeRotParamOffset")
 
 
+def clock(kf, birth, age, wait=0):
+    """The timer frame a keyframe reads for a particle born at `birth` (game frames from the effect's start), `age`
+    frames later (getKeyframeTimer 0x963F10): its age for particle-age timers; the generator's timer for RefType 1,
+    which stands still at 0 through the generator's WaitFrame (`wait`, rolled once per generator); the effect's
+    timer (frames from the start) for the others."""
+    if kf.uses_particle_age:
+        return age
+    if kf.ref_type == 1:
+        return max(birth + age - wait, 0)
+    return birth + age
+
+
 def _rf(rng, pair):
     s, r = pair
     return s + rng.random() * r
@@ -328,6 +343,7 @@ class Particle:
     fade_rgb: bool = False      # life types 2 / 4 fade the colour instead of the alpha (sub_980340)
     disperse: float = None      # RangeDisperseType: place in the frame's batch (i / count), or None
     down: tuple = (0.0, -1.0, 0.0)   # world down in generator space (gravity; moveParticleMoveAdd falls along world Y)
+    wait: int = 0               # the generator's rolled WaitFrame: generator-timer keys count from its end (clock)
 
     def lifetime(self):
         return sum(self.life) if self.life else NO_LIFE_FRAMES
@@ -351,8 +367,7 @@ class Particle:
         kf, rates = entry
         if kf.init_only:
             age = 0
-        timer = age if kf.uses_particle_age else self.birth + age
-        return kfm.evaluate(kf, timer, rates)
+        return kfm.evaluate(kf, clock(kf, self.birth, age, self.wait), rates)
 
     def keyed_or(self, name, age, base, add):
         """A property with an *Add field: the keyframe (absolute) if keyed, else base + add * age. InitOnly keys
@@ -362,9 +377,9 @@ class Particle:
             return _linear(base, add, age)
         kf, rates = entry
         if kf.init_only:
-            value = kfm.evaluate(kf, 0 if kf.uses_particle_age else self.birth, rates)
+            value = kfm.evaluate(kf, clock(kf, self.birth, 0, self.wait), rates)
             return _linear(tuple(value) if isinstance(value, (list, tuple)) else value, add, age)
-        value = kfm.evaluate(kf, age if kf.uses_particle_age else self.birth + age, rates)
+        value = kfm.evaluate(kf, clock(kf, self.birth, age, self.wait), rates)
         return tuple(value) if isinstance(value, (list, tuple)) else value
 
     def is_keyed(self, name):
@@ -479,7 +494,7 @@ def _path_track(p):
         end = False
         if kind == 5:
             kf, rates = P["ofs_key"]
-            timer_frame = age if kf.uses_particle_age else p.birth + age
+            timer_frame = clock(kf, p.birth, age, p.wait)
             value = kfm.evaluate(kf, timer_frame, rates) or (0.0, 0.0, 0.0)
             end = not kf.loop and timer_frame >= kf.frames[-1]
             offset = tuple(v * s for v, s in zip(value, P["scale3"]))
@@ -553,19 +568,21 @@ def _path_track(p):
     return track
 
 
-def emission_schedule(gen, rng, max_frames):
-    """[(frame, count)] following the generator state machine."""
+def emission_schedule(gen, rng, max_frames, info=None):
+    """[(frame, count)] following the generator state machine; info (a dict) receives the rolled "wait"."""
     out = []
     set_num_key = keyframes_of(gen, {"KeyframeSetNumParamOffset": "set_num"}).get("set_num")
     set_num_rates = kfm.draw_rates(set_num_key, rng) if set_num_key else None
-    frame = _ru(rng, gen.get("WaitFrame"))
+    frame = wait = _ru(rng, gen.get("WaitFrame"))
+    if info is not None:
+        info["wait"] = wait
     bursts = _ru(rng, gen.get("BurstNum"))   # 0 = repeat until max_frames
     done = 0
     while frame < max_frames:
         length = max(_ru(rng, gen.get("LoopNum")), 1)
         for f in range(frame, min(frame + length, max_frames)):
             if set_num_key is not None:
-                count = int(kfm.evaluate(set_num_key, f, set_num_rates) or 0)
+                count = int(kfm.evaluate(set_num_key, clock(set_num_key, f, 0, wait), set_num_rates) or 0)
             else:
                 count = _ru(rng, gen.get("SetNum"))
             if count > 0:
@@ -695,7 +712,7 @@ def _shape_point(ranges, kind, rng, t):
     return x, y, z
 
 
-def _direction(gen, move, rng, offset, keys, normal=None):
+def _direction(gen, move, rng, offset, keys, normal=None, spawn_clock=None):
     """Spawn direction (calcDir of the move's Rot), blended by UknRangeThing[0] toward a target (movevel_transform
     0x9750B0, particle flag 0x80): the spawn strip's normal for strip spawns without NORM_OFF (initParticle 0x97121A),
     else the spawn offset for RangeDirType diffuse / converge."""
@@ -705,7 +722,7 @@ def _direction(gen, move, rng, offset, keys, normal=None):
     order = move.get("RotOrder")
     if "move_rot" in keys:
         kf, rates = keys["move_rot"]
-        angles = kfm.evaluate(kf, 0, rates)
+        angles = kfm.evaluate(kf, spawn_clock(kf) if spawn_clock else 0, rates)
     else:
         angles = [_rf(rng, r) for r in move.get("Rot")]
     d = rotate(axis, angles, order)
@@ -733,6 +750,7 @@ class _Template:
         self.range_normals = range_normals  # and their unit normals (game axes), or None
         self.ground_y = ground_y            # ground plane height in generator space (cm) for collision
         self.down = (0.0, -1.0, 0.0)        # world down in generator space (simulate() sets it)
+        self.wait = 0                       # the generator's rolled WaitFrame (simulate() sets it)
         self.collision = _collision_params(record.move)
         self.ptcl_keys = keyframes_of(record.ptcl, _PTCL_KEYS)
         self.move_keys = keyframes_of(record.move, {**_MOVE_KEYS, "KeyframeReleaseFrameParamOffset": "release"})
@@ -774,7 +792,7 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
     ranges = None
     if template.range_key is not None:   # keyed spawn extents: key base = Range.s, key range = Range.r
         kf = template.range_key
-        timer = max(birth - 1, 0) if kf.ref_type == 1 else birth
+        timer = max(birth - template.wait - 1, 0) if kf.ref_type == 1 else birth
         s = kfm.evaluate(kf, timer, (0.0, 0.0, 0.0))
         sr = kfm.evaluate(kf, timer, (1.0, 1.0, 1.0))
         if s is not None:
@@ -786,11 +804,14 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
         offset = tuple(o + p * s for o, p, s in zip(offset, on_strip, scale))
         if gen.get("RangeStripFlag") & 0x04:   # NORM_OFF: the strip's normal doesn't steer the direction
             strip_normal = None
-    d, axis, order = _direction(gen, move, rng, offset, keys, strip_normal)
+    def spawn_clock(kf):
+        return clock(kf, birth, 0, template.wait)
+
+    d, axis, order = _direction(gen, move, rng, offset, keys, strip_normal, spawn_clock)
     speed = accel = coef = gravity = 0.0
     path = None
     if move is not None and move.type in PATH_TYPES:
-        path = _path_init(template, move, rng, offset, keys, axis, order)
+        path = _path_init(template, move, rng, offset, keys, axis, order, spawn_clock)
     elif move is not None and move.type in (1, 2):
         speed = _rf(rng, move.get("Speed"))
         if move.type == 1:
@@ -807,7 +828,8 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
         life_frames = tuple(_ru(rng, life.get(k)) for k in ("AppearFrame", "KeepFrame", "VanishFrame"))
         if template.keep_key is not None:   # the keyframe replaces KeepFrame, evaluated once at spawn
             kf = template.keep_key
-            timer = 0 if kf.ref_type in (0, 5, 6, 7) else (max(birth - 1, 0) if kf.ref_type == 1 else birth)
+            timer = 0 if kf.ref_type in (0, 5, 6, 7) else (max(birth - template.wait - 1, 0) if kf.ref_type == 1
+                                                            else birth)
             keep = kfm.evaluate(kf, timer, kfm.draw_rates(kf, rng))
             if keep is not None:
                 life_frames = (life_frames[0], max(int(keep), 0), life_frames[2])
@@ -896,9 +918,10 @@ def spawn(template, rng, birth, t, pat_counts=(1,), serial=0):
                     rot, rot_add, model_scale, model_scale_add, color, intensity, aspect, sequence, pattern,
                     pat_speed, pat_count, anim_flag, key_is_speed, axis, order, keys, path, line, strip, light,
                     shape=shape, scroll=scroll, refract=refracts(ptcl), flip=flip, place_color=place_color,
-                    fade_rgb=life is not None and life.type in (2, 4), down=template.down)
+                    fade_rgb=life is not None and life.type in (2, 4), down=template.down, wait=template.wait)
     if line is not None and line.get("rope") is not None:
         line["rope"].birth = birth   # generator-timer rope keys run from the particle's birth frame
+        line["rope"].wait = template.wait
     c = template.collision
     if c is not None and template.ground_y is not None and path is None and \
             not any(name in keys for name in ("move_rot", "speed", "fall")):
@@ -1043,6 +1066,7 @@ class Rope:
         movement direction at spawn (ChainOptionFlag REF_RANGE_DIR / BDIR; PathChain ropes have none)."""
         self.p, self.n, self.scale = dict(params), nodes, scale
         self.keys, self.birth, self.age = keys or {}, birth, 0
+        self.wait = 0   # the generator's WaitFrame: generator-timer keys count from its end
         self.length = params["length"]
         # ChainOptionFlag 1 NO_MAT_DIR / 2 NO_MAT_BDIR: that pull isn't turned by the generator (world axes; moveChain
         # only scales it per axis). world = game world -> generator space at import, as for cloth
@@ -1076,9 +1100,9 @@ class Rope:
         return 1 - t
 
     def _timer(self, kf):
-        if self.birth is None or not kf.uses_particle_age:
-            return (self.birth or 0) + self.age
-        return self.age
+        if self.birth is None:   # a generator-owned rope: its age is the effect's frame
+            return max(self.age - self.wait, 0) if kf.ref_type == 1 else self.age
+        return clock(kf, self.birth, self.age, self.wait)
 
     def _apply_keys(self, initial=False):
         """Rope keyframes (moveChain 0x994C20): Length = total length, Rot / BlendRot = angles (the pull direction
@@ -1389,8 +1413,7 @@ def _line_keyed(p, name, age):
     if entry is None:
         return None
     kf, rates = entry
-    timer = (0 if kf.init_only else age) if kf.uses_particle_age else p.birth + (0 if kf.init_only else age)
-    return kfm.evaluate(kf, timer, rates)
+    return kfm.evaluate(kf, clock(kf, p.birth, 0 if kf.init_only else age, p.wait), rates)
 
 
 def _stick_direction(p, n):
@@ -1588,8 +1611,7 @@ def _cloth_keyed(p, c, name, age):
     if entry is None:
         return None
     kf, rates = entry
-    timer = (0 if kf.init_only else age) if kf.uses_particle_age else p.birth + (0 if kf.init_only else age)
-    return kfm.evaluate(kf, timer, rates)
+    return kfm.evaluate(kf, clock(kf, p.birth, 0 if kf.init_only else age, p.wait), rates)
 
 
 def _to_generator(c, d):
@@ -1812,17 +1834,18 @@ def _cloth_points(p, n):
     return frames[n]
 
 
-def _path_init(template, move, rng, spawn_point, keys, axis, order):
-    """Per-particle path state (initParticleMovePath*)."""
+def _path_init(template, move, rng, spawn_point, keys, axis, order, spawn_clock=None):
+    """Per-particle path state (initParticleMovePath*); spawn_clock(kf) = the timer frame keys read at spawn."""
     kind = move.type
+    at_spawn = spawn_clock or (lambda kf: 0)
     if "move_rot" in keys:
         kf, rates = keys["move_rot"]
-        rot = tuple(kfm.evaluate(kf, 0, rates))
+        rot = tuple(kfm.evaluate(kf, at_spawn(kf), rates))
     else:
         rot = tuple(_rf(rng, r) for r in move.get("Rot"))
     keyed_timer = template.move_keys.get("release")
-    release_timer = (int(kfm.evaluate(keyed_timer, 0, kfm.draw_rates(keyed_timer, rng)) or 0) if keyed_timer
-                     else _ru(rng, move.get("ReleaseFrame")))
+    release_timer = (int(kfm.evaluate(keyed_timer, at_spawn(keyed_timer), kfm.draw_rates(keyed_timer, rng)) or 0)
+                     if keyed_timer else _ru(rng, move.get("ReleaseFrame")))
     path = {
         "kind": kind, "spawn": spawn_point, "rot": rot, "order": order, "axis": axis,
         "option": move.get("PathOptionFlag"), "release_type": move.get("ReleaseType"),
@@ -1839,7 +1862,8 @@ def _path_init(template, move, rng, spawn_point, keys, axis, order):
             path["ofs_key"] = (kf, kfm.draw_rates(kf, rng))
     if path["kind"] != 5:
         keyed_speed = keys.get("speed")
-        path["speed"] = (kfm.evaluate(keyed_speed[0], 0, keyed_speed[1]) if keyed_speed else _rf(rng, move.get("Speed")))
+        path["speed"] = (kfm.evaluate(keyed_speed[0], at_spawn(keyed_speed[0]), keyed_speed[1]) if keyed_speed
+                         else _rf(rng, move.get("Speed")))
         path["accel"] = _rf(rng, move.get("Acceleration"))
         path["d0"] = _rf(rng, move.get("Distance")) if move.has("Distance") else 0.0
         if move.has("PathLength"):
@@ -1877,7 +1901,12 @@ def simulate(record, seed=0, max_frames=300, pat_counts=(1,), strip_points=None,
     # is only known in Blender, so effect_sim applies it
     disperse = record.gen.get("RangeDisperseType") in (1, 2)
     serial = frames_done = 0
-    for frame, count in emission_schedule(record.gen, rng, max_frames):
+    schedule_info = {}
+    schedule = emission_schedule(record.gen, rng, max_frames, schedule_info)
+    template.wait = schedule_info.get("wait", 0)   # generator-timer keys count from the end of the wait
+    if template.path_rope is not None:
+        template.path_rope.rope.wait = template.wait
+    for frame, count in schedule:
         if end_frame is not None and frame >= end_frame:
             break
         for i in range(count):

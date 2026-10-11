@@ -63,9 +63,90 @@ def forget(name):
     _history.pop(name, None)
 
 
+def forget_history(root):
+    """Drop the recorded emitter motion of an effect (its generators' keyframes changed)."""
+    for ob in bpy.data.objects:
+        if ob.get("efl_root") == root:
+            _history.pop(ob.name, None)
+
+
 def store_source(root, efl_bytes, start_frame):
     root["efl_data"] = base64.b64encode(efl_bytes).decode("ascii")
     root["efl_start_frame"] = int(start_frame)
+    ensure_start_marker(root, bpy.context.scene)
+
+
+# -- timeline markers ---------------------------------------------------------------------------
+# The effect's frame 0 is a timeline marker "<root> start" (drag it to move the effect in time: its objects' keys
+# move with it); End Effect is a marker "<root> end" (the preview's stand-in for the owner ending the effect).
+
+START_MARKER = "efl_start_marker"   # effect root: the start marker's name
+END_MARKER = "efl_end_marker"       # effect root: the end marker's name (missing marker = the effect never ends)
+
+
+def _marker(root, key, scene):
+    name = root.get(key) if root is not None else None
+    return scene.timeline_markers.get(name) if name else None
+
+
+def ensure_start_marker(root, scene):
+    marker = _marker(root, START_MARKER, scene)
+    if marker is None:
+        name = f"{root.name} start"
+        marker = scene.timeline_markers.get(name) or scene.timeline_markers.new(name, frame=int(root["efl_start_frame"]))
+        root[START_MARKER] = name
+    marker.frame = int(root["efl_start_frame"])
+    return marker
+
+
+def set_end(root, scene, frame):
+    """End Effect: put the end marker at a scene frame, or remove it (None)."""
+    marker = _marker(root, END_MARKER, scene)
+    if frame is None:
+        if marker is not None:
+            scene.timeline_markers.remove(marker)
+        root.pop(END_MARKER, None)
+    else:
+        if marker is None:
+            name = f"{root.name} end"
+            marker = scene.timeline_markers.get(name) or scene.timeline_markers.new(name, frame=int(frame))
+            root[END_MARKER] = name
+        marker.frame = int(frame)
+    refresh_root(root, scene)
+
+
+def end_frame_of(root, scene=None):
+    """The scene frame of the effect's end marker, or None."""
+    marker = _marker(root, END_MARKER, scene or bpy.context.scene)
+    return marker.frame if marker is not None else None
+
+
+def sync_markers(scene):
+    """A dragged start marker moves its effect: the start frame, every key of its objects and its end marker."""
+    for root in scene.objects:
+        if root.albam_asset.extension != "efl" or START_MARKER not in root:
+            continue
+        marker = _marker(root, START_MARKER, scene)
+        if marker is None:
+            continue
+        delta = marker.frame - int(root.get("efl_start_frame", marker.frame))
+        if delta:
+            shift_effect(root, scene, delta)
+
+
+def shift_effect(root, scene, delta):
+    """Move an effect by delta scene frames: its start, its objects' keys and its end marker."""
+    from .effect_keys import shift
+    root["efl_start_frame"] = int(root.get("efl_start_frame", scene.frame_current)) + delta
+    ensure_start_marker(root, scene)
+    for ob in bpy.data.objects:
+        if ob.get("efl_root") == root:
+            shift(ob, delta)
+    end = _marker(root, END_MARKER, scene)
+    if end is not None:
+        end.frame += delta
+    forget_history(root)
+    refresh_root(root, scene)
 
 
 def create_sim_object(collection, name, generator, source, root, record_index, info):
@@ -208,11 +289,22 @@ def _tables_uncached(info):
     return rows, [0], [len(rows)], False
 
 
+def sim_length(ob, scene=None):
+    """Game frames simulated for a particle system: up to the scene's end frame (at least one frame)."""
+    scene = scene or bpy.context.scene
+    start, rate = _start_and_rate(ob, scene)
+    return max(int(math.floor((scene.frame_end - start) * rate)) + 1, 1)
+
+
 def _particles(ob):
-    if ob.name in _cache:
-        return _cache[ob.name]
+    scene = bpy.context.scene
+    root = ob.get("efl_root")
+    key = (sim_length(ob, scene), end_game_frame(root, scene) if root is not None else None)
+    cached = _cache.get(ob.name)
+    if cached is not None and cached[0] == key:
+        return cached[1]
     particles = []
-    info, root = ob.get(SIM_KEY), ob.get("efl_root")
+    info = ob.get(SIM_KEY)
     if info and root is not None and root.get("efl_data"):
         try:
             efl = EffectList.from_bytes(base64.b64decode(root["efl_data"]))
@@ -225,16 +317,16 @@ def _particles(ob):
                 range_strip = _unflatten(info["range_strip"], sizes)
                 if info.get("range_strip_normals"):
                     range_normals = _unflatten(info["range_strip_normals"], sizes)
-            particles = simulate(record, seed=info["record"], max_frames=info["frames"],
+            particles = simulate(record, seed=info["record"], max_frames=key[0],
                                  pat_counts=list(_tables(info, ob)[2]), strip_points=strip_points,
                                  range_strip=range_strip, ground_y=info.get("ground_y"),
-                                 world_axes=info.get("world_axes"), end_frame=end_game_frame(root),
+                                 world_axes=info.get("world_axes"), end_frame=key[1],
                                  range_normals=range_normals, down=info.get("down"))
         except Exception as err:   # a broken record must not break playback of the rest
             print(f"EFL: simulation failed for {ob.name}: {err}")
     for particle in particles:   # life window, to skip state_at for particles not alive at a frame
         particle.end = particle.birth + particle.lifetime()
-    _cache[ob.name] = particles
+    _cache[ob.name] = (key, particles)
     return particles
 
 
@@ -259,15 +351,12 @@ def _alive_states(ob, frame):
     return out
 
 
-END_KEY = "efl_end_frame"   # effect root: scene frame the preview ends the effect at (-1 / missing = never)
-
-
 def end_game_frame(root, scene=None):
-    """Game frame (from the effect's start) at which the preview ends the effect, or None."""
-    end = root.get(END_KEY, -1) if root is not None else -1
-    if end is None or end < 0:
-        return None
+    """Game frame (from the effect's start) at which the preview ends the effect (the end marker), or None."""
     scene = scene or bpy.context.scene
+    end = end_frame_of(root, scene)
+    if end is None:
+        return None
     fps = scene.render.fps / (scene.render.fps_base or 1.0)
     start = root.get("efl_start_frame", scene.frame_start)
     return max(int(math.floor((end - start) * GAME_FPS / fps)), 0)
@@ -746,6 +835,10 @@ def _sim_objects(scene):
 
 @persistent
 def _on_frame_change(scene, depsgraph=None):
+    try:
+        sync_markers(scene)
+    except Exception as err:
+        print(f"EFL: marker sync failed: {err}")
     for ob in _sim_objects(scene):
         try:
             update_object(ob, scene)
@@ -799,8 +892,7 @@ class ALBAM_OT_EflRecordMotion(bpy.types.Operator):
             return {"CANCELLED"}
         current = scene.frame_current
         first = min(_start_and_rate(ob, scene)[0] for ob in objects)
-        last = max(_start_and_rate(ob, scene)[0] + int(ob[SIM_KEY]["frames"] / _start_and_rate(ob, scene)[1])
-                   for ob in objects)
+        last = max(scene.frame_end, first)
         for frame in range(first, last + 1):
             scene.frame_set(frame)
         scene.frame_set(current)

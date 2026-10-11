@@ -94,7 +94,8 @@ def current_block(ob, slot):
         btype, data = block.type, bytes(block.data)
     block = Block(slot, btype, bytearray(data))
     problems = []
-    for props, apply in ((ob.get(f"efl_{slot}"), apply_props), ((ob.get("efl_kf") or {}).get(slot), apply_keyframes),
+    from .effect_keys import keyframe_props_of
+    for props, apply in ((ob.get(f"efl_{slot}"), apply_props), (keyframe_props_of(ob).get(slot), apply_keyframes),
                          ((ob.get("efl_sub") or {}).get(slot), apply_subs)):
         if props is not None:
             problems += apply(block, props)[1]
@@ -120,6 +121,8 @@ def store_block(ob, block):
         value[slot] = props
         ob[key] = value
     ob[TYPE_PROP[slot]] = block.type_name
+    from .effect_keys import rebuild_tracks
+    rebuild_tracks(ob, slots=(slot,))   # the new block's keyframes as F-curves
 
 
 # -- operator ---------------------------------------------------------------------------------------

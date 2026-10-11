@@ -255,6 +255,25 @@ def _kf_same(a, b):
         all(_same(list(x), list(y)) for x, y in zip(a.params, b.params)) and len(a.params) == len(b.params)
 
 
+kf_same = _kf_same   # the same keyframe (header flags, frames, values); the Blender side compares curves with it
+
+
+def props_same(a, b):
+    """Two block_props / sub_props mappings hold the same values (NaN-tolerant, hex strings as numbers)."""
+    keys_a = set(a.keys()) if hasattr(a, "keys") else set()
+    keys_b = set(b.keys()) if hasattr(b, "keys") else set()
+    if keys_a != keys_b:
+        return False
+    for key in keys_a:
+        va, vb = a[key], b[key]
+        if hasattr(va, "keys") or hasattr(vb, "keys"):
+            if not (hasattr(va, "keys") and hasattr(vb, "keys") and props_same(va, vb)):
+                return False
+        elif not _same(va, vb):
+            return False
+    return True
+
+
 def keyframe_props(block):
     """{offset field name: keyframe prop} for the typed keyframes of a block."""
     out = {}

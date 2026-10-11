@@ -22,9 +22,10 @@ from albam.exceptions import AlbamCheckFailure
 from albam.registry import blender_registry
 from albam.vfs import VirtualFileData
 from .efl import EffectList, schema
-from .efl.edit import (apply_keyframes, apply_props, apply_subs, as_list, keyframe_props, record_from_raw,
-                       record_raw, restructure)
+from .efl.edit import (apply_keyframes, apply_props, apply_subs, as_list, block_props, keyframe_props, props_same,
+                       record_from_raw, record_raw, restructure, sub_props)
 from .efl.model import Block, SLOTS
+from . import effect_keys
 
 SCALE = 0.01             # game centimetres -> metres
 POS_TOLERANCE = 1e-3     # cm
@@ -227,7 +228,7 @@ def build_efl_bytes(root):
 
     for index, (record, ob) in enumerate(zip(efl.records, order)):
         label = f"record {index:02d} ({ob.name})"
-        keyframes, subs = ob.get("efl_kf") or {}, ob.get("efl_sub") or {}
+        keyframes, subs = effect_keys.keyframe_props_of(ob, root), ob.get("efl_sub") or {}
         for key in SLOTS:
             block = getattr(record, key)
             if block is None:
@@ -261,19 +262,19 @@ def structure_changed(root):
     return bool(linked_changes(root))
 
 
-# What the import bakes into the objects besides the particle block: the generator keyframes (F-curves on the
-# Empty), the spawn strip, particle scale and relation type (sim settings), the generator's place (the ground plane
-# and world axes are measured from it), a path move's strip and collision
+# What the import bakes into the objects besides the particle block: the spawn strip, particle scale and relation
+# type (sim settings), the generator's place (the ground plane and world axes are measured from it), a path move's
+# strip and collision. The generator keyframes are the Empty's own F-curves (effect_keys.py), so they don't count.
 _BUILT_GEN_FIELDS = ("RangeStripPath", "ParticleScale", "AxisFlags", "Order", "Pos", "Quat", "Scale", "ParentNo")
-_BUILT_GEN_KEYS = ("KeyframePosParamOffset", "KeyframeRotParamOffset", "KeyframeScaleParamOffset")
+_GEN_MOTION_KEYS = ("KeyframePosParamOffset", "KeyframeRotParamOffset", "KeyframeScaleParamOffset")
 _BUILT_MOVE_FIELDS = ("PathStripPath", "PathStripPartsNo")
 
 
 def built_changed(root, data):
     """True if the edited bytes change something the import builds into the objects rather than something the
     particle simulation reads every frame: any particle field (material, blending, texture, shape, flipbook,
-    orientation and culling settings), generator keyframes, the generator's strip / particle scale / relation /
-    place, a path move's strip, collision on or off. Apply has to rebuild the effect for those."""
+    orientation and culling settings), the generator's strip / particle scale / relation / place, a path move's
+    strip, collision on or off. Apply has to rebuild the effect for those."""
     built, edited = EffectList.from_bytes(source_bytes(root)).records, EffectList.from_bytes(data).records
     if len(built) != len(edited):
         return True
@@ -282,19 +283,31 @@ def built_changed(root, data):
         return None if block is None else [block.get(n) if block.has(n) else None for n in names]
 
     for old, new in zip(built, edited):
-        if (bytes(old.ptcl.data) if old.ptcl else None) != (bytes(new.ptcl.data) if new.ptcl else None):
+        if (old.ptcl is None) != (new.ptcl is None):
             return True
+        if old.ptcl is not None and (old.ptcl.type != new.ptcl.type
+                                     or not props_same(block_props(old.ptcl), block_props(new.ptcl))
+                                     or not props_same(sub_props(old.ptcl), sub_props(new.ptcl))):
+            return True   # fields and collision / culling, not the particle keyframes (the simulation reads those)
         if fields(old.gen, _BUILT_GEN_FIELDS) != fields(new.gen, _BUILT_GEN_FIELDS):
             return True
-        if old.gen is not None and new.gen is not None:
-            old_keys, new_keys = keyframe_props(old.gen), keyframe_props(new.gen)
-            if any(old_keys.get(k) != new_keys.get(k) for k in _BUILT_GEN_KEYS):
-                return True
         if fields(old.move, _BUILT_MOVE_FIELDS) != fields(new.move, _BUILT_MOVE_FIELDS):
             return True
         if old.move is not None and new.move is not None and \
                 bool(old.move.get("CollParamOffset")) != bool(new.move.get("CollParamOffset")):
             return True
+    return False
+
+
+def generator_motion_changed(root, data):
+    """True if a generator's position / rotation / scale keyframes differ between the source and the edited bytes
+    (the recorded emitter motion is stale then)."""
+    built, edited = EffectList.from_bytes(source_bytes(root)).records, EffectList.from_bytes(data).records
+    for old, new in zip(built, edited):
+        if old.gen is not None and new.gen is not None:
+            old_keys, new_keys = keyframe_props(old.gen), keyframe_props(new.gen)
+            if any(old_keys.get(k) != new_keys.get(k) for k in _GEN_MOTION_KEYS):
+                return True
     return False
 
 
@@ -428,8 +441,11 @@ def apply_to_scene(context, root, rebuild=False):
     Returns (root, notes, rebuilt). The active record keeps being the active object."""
     active = record_object(context.view_layer.objects.active)
     data, notes, order = build_efl_bytes(root)
-    if not rebuild and not structure_changed(root) and not built_changed(root, data)             and not found_missing_textures(context, root):
+    if not rebuild and not structure_changed(root) and not built_changed(root, data) \
+            and not found_missing_textures(context, root):
         from . import effect_sim
+        if generator_motion_changed(root, data):
+            effect_sim.forget_history(root)
         effect_sim.store_source(root, data, root.get("efl_start_frame", context.scene.frame_current))
         effect_sim.invalidate()
         from .effect_filter import apply_filter
