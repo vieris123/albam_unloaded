@@ -453,21 +453,68 @@ def apply_to_scene(context, root, rebuild=False):
         context.scene.frame_set(context.scene.frame_current)
         _refresh_editor(context)
         return root, notes, False
-    active_index = order.index(active) if active in order else None
+    # the rebuild replaces the effect's objects: remember which of them were selected / active (the record's place in
+    # the rebuilt file + the object's role: the Empty, its particles, shape, lights, companion) and give the new
+    # objects the same state; everything else keeps its selection
+    view_objects = context.view_layer.objects
+    active_key = _object_key(view_objects.active, root, order)
+    selected_keys = {key for key in (_object_key(ob, root, order) for ob in view_objects if _is_selected(ob)) if key}
     from .effect import rebuild_effect
     new_root = rebuild_effect(context, root, data)
-    target = new_root
-    if active_index is not None:
-        target = next((o for o in all_record_objects(new_root) if int(o["efl_record"]) == active_index), new_root)
-    for ob in context.view_layer.objects:
-        if ob is not None:   # inside an operator the list can still hold the objects the rebuild removed
-            ob.select_set(False)
-    if target.name in context.view_layer.objects:
-        context.view_layer.objects.active = target
+    new_objects = _objects_by_key(new_root)
+    for key in selected_keys:
+        ob = new_objects.get(key)
+        if ob is not None and ob.name in view_objects:
+            ob.select_set(True)
+    target = new_objects.get(active_key) if active_key else None
+    if target is not None and target.name in view_objects:
+        view_objects.active = target
         target.select_set(True)
     context.scene.frame_set(context.scene.frame_current)
     _refresh_editor(context)
     return new_root, notes, True
+
+
+def _is_selected(ob):
+    try:
+        return ob is not None and ob.select_get()
+    except (RuntimeError, ReferenceError):   # not in the view layer, or already removed
+        return False
+
+
+def _role(ob, record):
+    """What an object is to its record: "" the Empty, "handle" the rotation companion, else its name's suffix after
+    the record's name (_particles, _lights, _billboard, ...; effect.py / effect_sim.py name them so)."""
+    if ob == record:
+        return ""
+    if ob.get(ROT_HANDLE_OF) is not None:
+        return "handle"
+    return ob.name[len(record.name):] if ob.name.startswith(record.name) else ob.name
+
+
+def _object_key(ob, root, order):
+    """(record position in the rebuilt file, role) of an effect object, ("root", "") for the root, else None."""
+    if ob is None:
+        return None
+    if ob == root:
+        return ("root", "")
+    record = record_object(ob)
+    if record is None or record not in order:
+        return None
+    return (order.index(record), _role(ob, record))
+
+
+def _objects_by_key(root):
+    """{(record index, role): object} of a freshly built effect (every record's efl_record is its file index)."""
+    out = {("root", ""): root}
+    records = {int(o["efl_record"]): o for o in all_record_objects(root)}
+    for ob in bpy.data.objects:
+        if ob.get("efl_root") != root:
+            continue
+        record = record_object(ob)
+        if record is not None and "efl_record" in record:
+            out[(int(record["efl_record"]), _role(ob, record))] = ob
+    return out
 
 
 def _refresh_editor(context):

@@ -12,7 +12,12 @@ Albam Unloaded: a fork of [Brachi's Albam](https://github.com/Brachi/albam) Blen
 The addon imports and exports models (.mod), textures (.tex/.rtex), collision (.sbc) and animations (.lmt). Version `0.4.0.dev11` (`__version__.py`); `bl_info` must be kept in sync by hand.
 
 - Runtime: Blender 4.x (the pycache is cpython-311). The addon is imported as the `albam` package from `E:\DMC mod stuffs\blender_addon\addons\`.
-- There is no test suite, no build script and no linter config. Verify changes in Blender. Blender 4.2 is installed, so many changes can be tested headless:
+- Tests: `tests/` (2026-10-12; see `tests/README.md`): `python tests/run_tests.py [words]` runs the Blender tests
+  (`tests/blender/test_*.py`, headless) and the plain-Python corpus tests (`tests/corpus/`), 4 at a time, and
+  reports each; data paths come from `tests/common.py` (`ALBAM_DMC4_DATA`, default `E:\DMC mod stuffs`). Add a test
+  there when a feature lands, and run the related ones before saying a change works; the full suite is slow
+  (well over 10 minutes), so run it only when asked or before a commit that touches shared code. There is no build script and
+  no linter config. Blender 4.2 is installed, so many changes can be tested headless:
   `"C:\Program Files\Blender Foundation\Blender 4.2\blender.exe" -b --factory-startup --python test.py`
   The script should put `E:\DMC mod stuffs\blender_addon\addons` on `sys.path`, `import albam`, call `albam.register()`, then drive `bpy.context.scene.albam.*` and the operators. Panels can't be drawn headless; call `UIList.filter_items` with a stub `self` instead.
 - Test data (read-only, never write to it):
@@ -40,6 +45,7 @@ Open work is tracked in `ROADMAP.md` (repo root): keep it up to date when an ite
 | `engines/reng/` | Experimental RE Engine support (pak/mesh/mdf/tex), gated by `ALBAM_ENABLE_REEN`. |
 | `lib/` | Helpers: `blender.py` (mesh/material utilities), `bvh_construction.py` + `primitive_geometry.py` + `pymorton.py` + `rays.py` (BVH for the SBC21 export of other games; DMC4 uses `engines/mtfw/sbc_bvh.py`), `bone_names.py` (bone rename presets), `common_op.py`, `dds.py`, `vec_op.py` (**`vec_mult` actually divides**). |
 | `albam_vendor/` | Vendored `kaitaistruct` (the read-write runtime), `pymmh3` and `dmc4xml` (the `.sdl` / `.pla` codecs, a **third-party copy** of the package in the user's [dmc4_xml](https://github.com/vieris123/dmc4_xml) repo: never edit it here, change it upstream and run `scripts/sync_dmc4xml.py <dmc4_xml checkout>`, which records the commit in `albam_vendor/dmc4xml/UPSTREAM.txt`). They can only be imported after `register()` has put this folder on `sys.path`. |
+| `tests/` | End-to-end tests: `run_tests.py` (runner), `common.py` (data / output paths), `blender/` (headless Blender), `corpus/` (plain Python over the DX9 files). See `tests/README.md`. |
 | `scripts/sync_dmc4xml.py` | Re-syncs `albam_vendor/dmc4xml` from a dmc4_xml checkout (default: `E:\DMC mod stuffs\dmc4_xml`). |
 
 ## DMC4 reverse-engineering notes
@@ -464,7 +470,23 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
   bit-fields stay in step; gen `Scale` also sets the Empty's scale; `Pos` / `Quat` / `ParentNo` are read-only (move
   or parent the Empty). Tabs: Generator / Particle / Life / Move / Keys (the record's keyframe tracks and the active
   track's timer / interpolation / loop / init-only; the keys are F-curves, see Keyframes as F-curves) / More
-  (collision, culling). Records box: a scrollable
+  (collision, culling). **Bulk edit** (2026-10-12): with several record Empties selected (the active one shown),
+  every field edit is also written to the other selected records whose block has the same field
+  (`_propagate` -> `write_field_to`: same name and type, or the same bits of the same word; others skipped,
+  `multi_report` says how many; no toggle). Copy buttons send values without editing them:
+  `albam.efl_copy_field_to_selected` per field row (that field plus its keyframe track) and per Keys tab track row,
+  and `albam.efl_copy_to_selected` per group: `draw_common` = schema.PTCL_DRAW (Intensity, Scale, ColorFlag,
+  Color0 / 1) with its Intensity / Scale / Color / PatNo keys, `gen_common` = every generator field except
+  `GEN_PLACEMENT` (Pos, Quat, Scale, ParentNo, AxisFlags) with the SetNum / Range keys, `tab:<tab>` (Life = the
+  whole block with its KeepFrame keys), and each Particle section's header button. Tracks copy with
+  `copy_track_to` (the source's exported keyframe rebuilt on the target, so the target's WaitFrame offset
+  applies). Selection: the records list mirrors the Empties' selection (a dot per row, `AlbamEflRecordItem.selected`
+  reads `select_get`) and rows are clicked like the Outliner (`albam.efl_pick_record`, `invoke` reads the event:
+  click = select alone and show, Shift = add and show, Ctrl = add / remove); `albam.efl_select_records` All /
+  None / Same Type. A rebuild (`apply_to_scene`) gives the new objects the old ones' selection and active state,
+  keyed by (record position in the rebuilt file, role: the Empty, `_particles`, `_lights`, shape, companion;
+  `_object_key` / `_objects_by_key`), so clicking particles in the viewport and editing keeps them selected.
+  Records box: a scrollable
   list (`ALBAM_UL_EflRecords` over `efl_editor.records`, kept in step by `sync_records`) to select, then Duplicate, Copy to (another imported effect; attaches to the same joint if its armature has it), Remove.
   Unverified fields (tiers other than dx9 / se) are hidden unless toggled. The panel can't be drawn headless;
   tests call `ALBAM_PT_EflEditor.draw` with a stub layout.
@@ -567,7 +589,14 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
   - A new strip takes its points from a chosen curve or mesh (evaluated, every chain or spline a part, converted
     into the record generator's space) or a straight line along +Y. The record's `RangeStripPath` (spawn strip) or,
     for PathStrip moves, `PathStripPath` points at it.
-  - A new flipbook is a DX9 one-sequence grid over the particle's texture; the particle's `AnimPath` points at it.
+  - A new flipbook is a DX9 one-sequence grid over the particle's texture, or ("Frames From" a UV-mapped mesh,
+    2026-10-12) one frame per face of that mesh, its UV bounds over the texture in face order (`rects_from_mesh`;
+    faces without UV area are refused); the particle's `AnimPath` points at it. A particle that draws no texture is
+    refused (the rebuild only keeps flipbooks of textured particles, so the new one used to vanish).
+  - **Ctrl+J a UV-mapped mesh into a flipbook**: the joined faces arrive with collapsed `Flipbook` UVs and sequence
+    0 / frame 0; `effect_ean.repair_joined` (queued by the editor's depsgraph handler, job `ean_join`, Object Mode)
+    gives each the UVs of another UV map where it has an area and frame numbers after its sequence's last frame,
+    then a linked flipbook's effect applies.
   - The objects are linked like imported ones (`efl_root` / `efl_linked`, `original_bytes` empty, so they always
     export). The effect rebuilds right away, so the preview uses them. The game path is the user's (63 characters at
     most), and a path the effect already links is refused.

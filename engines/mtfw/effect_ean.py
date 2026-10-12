@@ -11,6 +11,11 @@ also selects a sequence's frames, generates a sequence from its grid and makes a
 UVs are `pixel / ean_uv_size` (the texture's size), V flipped (pixel y grows down, UV v up); export rounds each face's
 UV bounds back to whole pixels, so untouched files export byte-identical. Every frame in the game's files has a
 positive size, so a frame is just its bounds. SE files keep their stored per-frame UVs while the rect is unchanged.
+
+Other meshes come in two ways: Ctrl+J joins a UV-mapped mesh into a flipbook (`repair_joined`, run from the effect
+editor's depsgraph handler: a joined face has collapsed `Flipbook` UVs, so it takes its own UV map's and becomes new
+frames at the end of its sequence), and New Flipbook's "Frames From" builds a flipbook from a mesh's faces
+(`rects_from_mesh`: each face's UV bounds on its active UV map, in face order).
 """
 import json
 
@@ -176,6 +181,81 @@ def _faces(ob):
     finally:
         if not in_edit:
             bm.free()
+
+
+def _collapsed(face, uv):
+    first = face.loops[0][uv].uv
+    return all(abs(loop[uv].uv[0] - first[0]) < 1e-9 and abs(loop[uv].uv[1] - first[1]) < 1e-9 for loop in face.loops)
+
+
+def repair_joined(ob):
+    """Faces joined into a flipbook (Ctrl+J) carry collapsed Flipbook UVs and sequence 0 / frame 0: give them the UVs of
+    another UV map where they have an area, and frame numbers after their sequence's last frame (in face order).
+    Returns how many faces were repaired. Object Mode only."""
+    if ob.mode == "EDIT" or ob.type != "MESH" or ob.data.uv_layers.get(UV_LAYER) is None or len(ob.data.uv_layers) < 2:
+        return 0
+    bm = bmesh.new()
+    bm.from_mesh(ob.data)
+    try:
+        uv, seq, frame = _layers(bm)
+        others = [layer for layer in bm.loops.layers.uv.values() if layer.name != UV_LAYER]
+        joined = []
+        for face in bm.faces:
+            if not _collapsed(face, uv):
+                continue
+            source = next((layer for layer in others if not _collapsed(face, layer)), None)
+            if source is not None:
+                joined.append((face, source))
+        if not joined:
+            return 0
+        repaired = {face.index for face, _ in joined}
+        last = {}
+        for face in bm.faces:
+            if face.index not in repaired:
+                last[face[seq]] = max(last.get(face[seq], -1), face[frame])
+        for face, source in joined:
+            for loop in face.loops:
+                loop[uv].uv = loop[source].uv
+            last[face[seq]] = last.get(face[seq], -1) + 1
+            face[frame] = last[face[seq]]
+        bm.to_mesh(ob.data)
+        ob.data.update()
+        return len(joined)
+    finally:
+        bm.free()
+
+
+def rects_from_mesh(ob, size):
+    """Frames (pixel rects) from a mesh's faces: each face's bounds on its active UV map, in face order. Raises
+    AlbamCheckFailure without a UV map or with faces that have no area on it."""
+    evaluated = ob.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    mesh = evaluated.to_mesh()
+    try:
+        layer = mesh.uv_layers.active
+        if layer is None:
+            raise AlbamCheckFailure(f"{ob.name} has no UV map", solution="Unwrap it, or pick another mesh")
+        W, H = size
+        rects, empty = [], []
+        for poly in mesh.polygons:
+            us = [layer.data[i].uv[0] for i in poly.loop_indices]
+            vs = [layer.data[i].uv[1] for i in poly.loop_indices]
+            x, y = round(min(us) * W), round((1.0 - max(vs)) * H)
+            rect = (x, y, round(max(us) * W) - x, round((1.0 - min(vs)) * H) - y)
+            if rect[2] > 0 and rect[3] > 0:
+                rects.append(rect)
+            else:
+                empty.append(poly.index)
+        if empty:
+            raise AlbamCheckFailure(f"Some faces of {ob.name} have no area on its UV map",
+                                    details=f"faces {empty[:10]} (UV map {layer.name!r}, {W} x {H} pixels)",
+                                    solution="Give every face a UV rectangle, or delete those faces")
+        if not rects:
+            raise AlbamCheckFailure(f"{ob.name} has no faces", solution="Each face becomes a frame")
+        if len(rects) > MAX_FRAMES:
+            raise AlbamCheckFailure(f"{ob.name} has {len(rects)} faces", solution=f"At most {MAX_FRAMES} frames")
+        return rects
+    finally:
+        evaluated.to_mesh_clear()
 
 
 def ean_from_object(ob):
@@ -539,12 +619,31 @@ def _clean_path(path):
     return path[:-4] if path.lower().endswith(".ean") else path
 
 
-def new_flipbook(name, image, cols, cells, cell_size):
-    """A DX9 flipbook with one sequence cut from a grid over image."""
+def new_flipbook(name, image, cols, cells, cell_size, rects=None):
+    """A DX9 flipbook with one sequence: a grid over image, or the given pixel rects (frames from a mesh)."""
+    if rects:
+        x, y, w, h = rects[0]
+        seq = ean.Sequence(list(rects), 0, (w // 2, h // 2), (x, y), 1, len(rects), (w, h))
+        return ean.EffectAnim(ean.VERSION_DX9, [seq])
     w, h = cell_size
     patterns = [((j % cols) * w, (j // cols) * h, w, h) for j in range(cells)]
     seq = ean.Sequence(patterns, 0, (w // 2, h // 2), (0, 0), cols, cells, (w, h))
     return ean.EffectAnim(ean.VERSION_DX9, [seq])
+
+
+def _source_items(self, context):
+    items = [("GRID", "Grid", "A grid of frames over the texture (Columns, Frames, Frame Size)")]
+    for ob in context.scene.objects:
+        if ob.type == "MESH" and ob.data.uv_layers and DATA_KEY not in ob and "efs_version" not in ob \
+                and not any(k in ob for k in ("efl_record", "efl_root", "efl_generator")):
+            items.append((ob.name, ob.name, f"One frame per face of {ob.name}: the face's rectangle on its active UV map "
+                                            "over the texture, in face order"))
+    _source_items.cache = items   # Blender needs the list kept alive
+    return items
+
+
+def _sheet_size(image):
+    return tuple(image.size) if image is not None and image.size[0] and image.size[1] else (256, 256)
 
 
 class _NewFlipbookProps:
@@ -558,13 +657,27 @@ class _NewFlipbookProps:
                                  description="Number of frames, read row by row")
     cell_size: bpy.props.IntVectorProperty(name="Frame Size", size=2, default=(64, 64), min=1, max=0x7FFF,
                                            description="Width and height of one frame in pixels")
+    source: bpy.props.EnumProperty(name="Frames From", items=_source_items,
+                                   description="Where the frames come from: a grid, or the faces of a UV-mapped mesh "
+                                               "(each face's UV rectangle over the texture is a frame, in face order)")
 
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "path")
-        layout.prop(self, "columns")
-        layout.prop(self, "cells")
-        layout.prop(self, "cell_size")
+        layout.prop(self, "source")
+        if self.source == "GRID":
+            layout.prop(self, "columns")
+            layout.prop(self, "cells")
+            layout.prop(self, "cell_size")
+
+    def make(self, path, image):
+        """The new flipbook; raises AlbamCheckFailure for a bad source mesh."""
+        if self.source == "GRID":
+            return new_flipbook(path, image, self.columns, self.cells, tuple(self.cell_size))
+        src = bpy.context.scene.objects.get(self.source)
+        if src is None:
+            raise AlbamCheckFailure("Pick the mesh to take the frames from")
+        return new_flipbook(path, image, 1, 0, (0, 0), rects_from_mesh(src, _sheet_size(image)))
 
     def fit(self, image):
         if image is not None and image.size[0] and image.size[1]:   # Columns x Columns cells over the texture
@@ -616,8 +729,18 @@ class ALBAM_OT_EanNew(_NewFlipbookProps, bpy.types.Operator):
         if f"ean:{path}" in linked_objects(root):
             self.report({"ERROR"}, f"This effect already has a flipbook at {path}")
             return {"CANCELLED"}
+        ptcl = record["efl_ptcl"]
+        if not ptcl.get("BaseMapPath") or (int(ptcl.get("type", -1)) == 6
+                                           and int(ptcl.get("PrimModelType", 1)) in (0, 2, 4)):
+            self.report({"ERROR"}, "This particle draws no texture (BaseMapPath is empty, or it's an untextured "
+                                   "PrimModel), so a flipbook would have nothing to cut frames from")
+            return {"CANCELLED"}
         image = self._image(record)
-        anim = new_flipbook(path, image, self.columns, self.cells, tuple(self.cell_size))
+        try:
+            anim = self.make(path, image)
+        except AlbamCheckFailure as err:
+            self.report({"ERROR"}, f"{err.message}: {err.details}" if err.details else err.message)
+            return {"CANCELLED"}
         collection = root.users_collection[0] if root.users_collection else context.scene.collection
         ob = create_ean_object(path.rsplit("\\", 1)[-1], anim, b"", collection, image)
         ob.albam_asset.app_id = root.albam_asset.app_id
@@ -630,7 +753,8 @@ class ALBAM_OT_EanNew(_NewFlipbookProps, bpy.types.Operator):
             apply_to_scene(context, root)
         except Exception as err:
             return _report_failure(self, err)
-        self.report({"INFO"}, f"New flipbook {path}.ean ({self.cells} frames); edit it from Linked files")
+        self.report({"INFO"}, f"New flipbook {path}.ean ({len(anim.sequences[0].patterns)} frames); edit it from "
+                              "Linked files")
         return {"FINISHED"}
 
 
@@ -659,7 +783,11 @@ class ALBAM_OT_EanNewForImage(_NewFlipbookProps, bpy.types.Operator):
             self.report({"ERROR"}, f"Give a game path of 1 to {PATH_MAX} characters")
             return {"CANCELLED"}
         image = context.space_data.image
-        anim = new_flipbook(path, image, self.columns, self.cells, tuple(self.cell_size))
+        try:
+            anim = self.make(path, image)
+        except AlbamCheckFailure as err:
+            self.report({"ERROR"}, f"{err.message}: {err.details}" if err.details else err.message)
+            return {"CANCELLED"}
         ob = create_ean_object(path.rsplit("\\", 1)[-1], anim, b"", context.collection or context.scene.collection,
                                image)
         ob.albam_asset.app_id = "dmc4"
@@ -671,7 +799,7 @@ class ALBAM_OT_EanNewForImage(_NewFlipbookProps, bpy.types.Operator):
         context.view_layer.objects.active = ob
         ob.select_set(True)
         load_target(_state(context), ob)
-        self.report({"INFO"}, f"New flipbook {path}.ean ({self.cells} frames)")
+        self.report({"INFO"}, f"New flipbook {path}.ean ({len(anim.sequences[0].patterns)} frames)")
         return {"FINISHED"}
 
 

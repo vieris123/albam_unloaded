@@ -282,6 +282,119 @@ def _summary(value):
     return ", ".join(f"{v:.4g}" if isinstance(v, float) else str(v) for v in flat)
 
 
+# draw common (schema.PTCL_DRAW, DRAW_COMMON in the game): intensity, scale, colours and their keyframes, shared by
+# every drawn particle type (Light has its colour part at other offsets, under the same names)
+DRAW_COMMON = tuple(f.name for f in schema.PTCL_DRAW if not f.sub)
+DRAW_COMMON_TRACKS = tuple(f.name for f in schema.PTCL_DRAW if f.sub and f.sub.startswith("kf"))
+# generator common: every generator field except where the record sits (one EFL_GENERATOR struct for every type)
+GEN_PLACEMENT = ("Pos", "Quat", "Scale", "ParentNo", "AxisFlags", "someJointIdx", "member_0x50", "member_0x60")
+GEN_COMMON_TRACKS = ("KeyframeSetNumParamOffset", "KeyframeRangeParamOffset")
+GROUP_LABELS = {
+    "draw_common": "Draw Common (Intensity, Scale, ColorFlag, Color0 / 1 and their keys)",
+    "gen_common": "Generator Common (spawn timing, counts, range, strip, vibration, sound, SetNum / Range keys; "
+                  "not Pos, Quat, Scale, ParentNo, AxisFlags or the Pos / Rot / Scale keys)",
+    "tab:life": "Life (Appear / Keep / Vanish frames, the hold and the KeepFrame keys)",
+}
+
+
+def selected_records(context, exclude=None):
+    """The record Empties among the selected objects (each once), without `exclude`."""
+    out = []
+    for ob in context.selected_objects:
+        record = record_object(ob)
+        if record is not None and record != exclude and record not in out:
+            out.append(record)
+    return out
+
+
+def _struct_of(ob, slot):
+    props = ob.get(f"efl_{slot}")
+    return schema.struct_for_props(slot, int(props["type"]), props) if props is not None else None
+
+
+def write_field_to(ob, item, value):
+    """Write an editor item's value into another record object, if its block has the same field (same name and
+    type, or for a bit-field the same bits of the same word); the word and its bit-fields stay in step. Returns True
+    when written."""
+    block_slot, _, sub_field = item.slot.partition(":")
+    struct = _struct_of(ob, block_slot)
+    if struct is None:
+        return False
+    try:
+        container = _container(ob, item.slot)
+    except (KeyError, TypeError):
+        return False
+    if item.label not in container:
+        return False
+    if sub_field:   # collision / culling: the sub-struct is the same for every block that has it
+        container[item.label] = value
+        return True
+    bit = struct.bits_by_name.get(item.label)
+    if item.kind == "bit" or item.parent:
+        if bit is None or bit.field != item.parent or bit.shift != item.shift or bit.width != item.width \
+                or item.parent not in container:
+            return False
+        container[item.label] = value
+        mask = ((1 << item.width) - 1) << item.shift
+        container[item.parent] = to_prop((_as_int(container[item.parent]) & ~mask) | ((_as_int(value) << item.shift) & mask))
+        return True
+    field = struct.by_name.get(item.label)
+    if field is None or field.sub or field.type != item.ftype:
+        return False
+    container[item.label] = value
+    for b in struct.bits:   # the word's bit-fields follow it
+        if b.field == item.label and b.name in container and not b.sub:
+            container[b.name] = (_as_int(value) >> b.shift) & ((1 << b.width) - 1)
+    if block_slot == "gen" and item.label == "Scale":
+        ob.scale = [float(v) for v in as_list(value)[0::2]]
+    if block_slot == "gen" and item.label == "WaitFrame":
+        effect_keys.sync_offsets(ob)
+    return True
+
+
+def copy_track_to(source, ob, slot, field):
+    """Make a keyframe track of `ob` the same as `source`'s (its keys, random parts and header; no keys = none).
+    Returns True when `ob` has that track."""
+    vtype = next((v for s, f, v in effect_keys.tracks(ob) if (s, f) == (slot, field)), None)
+    if vtype is None:
+        return False
+    if effect_keys.VERSION_KEY not in ob:
+        effect_keys.rebuild_tracks(ob)
+    prop = (effect_keys.keyframe_props_of(source).get(slot) or {}).get(field)
+    effect_keys.remove_track(ob, slot, field, vtype)
+    if prop is not None:
+        prop = prop.to_dict() if hasattr(prop, "to_dict") else dict(prop)
+    if prop is None or not as_list(prop.get("frames")):
+        if prop is not None:   # keep the header (timer, init-only) with no keys
+            effect_keys.set_header(ob, slot, field, vtype, **{k: prop[k] for k in KF_HEADER if k in prop})
+        return True
+    if ob.get("efl_kf") is None:
+        ob["efl_kf"] = {}
+    if slot not in ob["efl_kf"]:
+        ob["efl_kf"][slot] = {}
+    ob["efl_kf"][slot][field] = prop
+    from .efl.edit import kf_from_prop
+    start, rate = effect_keys.timing(effect_root(ob))
+    effect_keys.build_track(ob, slot, field, kf_from_prop(prop, vtype), start, rate)
+    return True
+
+
+KF_HEADER = ("InpType", "RefType", "LoopFlag", "InitOnlyFlag")
+
+
+def _propagate(state, context, item, value, source):
+    """All Selected: write the edit into the other selected records; note what happened in the panel."""
+    others = selected_records(context, source)
+    written = [ob for ob in others if write_field_to(ob, item, value)]
+    state.multi_report = (f"{item.label}: written to {len(written)} more record(s)"
+                          + (f", {len(others) - len(written)} without it" if len(others) > len(written) else ""))
+    roots = {effect_root(ob) for ob in written} - {None}
+    if item.slot == "gen" and item.label in ("GroupFlag", "MaterialFlag"):
+        for root in roots:
+            effect_filter.apply_filter(root)
+    return roots
+
+
 def _on_item_edit(item, context):
     global _loading
     if _loading:
@@ -324,6 +437,9 @@ def _on_item_edit(item, context):
     if item.slot == "gen" and item.label in ("GroupFlag", "MaterialFlag") and root is not None:
         effect_filter.apply_filter(root)
     schedule_live_apply(root)
+    if selected_records(context, ob):   # several records selected: the edit goes to all of them
+        for other_root in _propagate(state, context, item, value, ob):
+            schedule_live_apply(other_root)
 
 
 def _loaded_image(path):
@@ -503,6 +619,245 @@ class ALBAM_OT_EflKeyInsert(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _group_items(state, group):
+    """The editor items of a copy group: "draw_common", a Particle section key, or a whole tab ("tab:<tab>")."""
+    if group == "draw_common":
+        names = set(DRAW_COMMON)
+        return [i for i in state.fields if i.slot == "ptcl" and (i.label in names or i.parent in names)]
+    if group == "gen_common":
+        return [i for i in state.fields if i.slot == "gen" and i.label not in GEN_PLACEMENT
+                and i.parent not in GEN_PLACEMENT]
+    if group.startswith("tab:"):
+        tab = group[4:]
+        return [i for i in state.fields if ((":" in i.slot) if tab == "more" else i.slot == tab)]
+    return [i for i in state.fields if i.slot == "ptcl" and (i.section if i.section in _PTCL_SECTION_INDEX
+                                                             else "other") == group]
+
+
+def _group_tracks(ob, group):
+    """(slot, offset field) of the keyframe tracks that belong to a copy group."""
+    if group == "draw_common":
+        return [("ptcl", f) for s, f, _v in effect_keys.tracks(ob) if s == "ptcl" and f in DRAW_COMMON_TRACKS]
+    if group == "gen_common":
+        return [("gen", f) for s, f, _v in effect_keys.tracks(ob) if s == "gen" and f in GEN_COMMON_TRACKS]
+    if group.startswith("tab:"):
+        return [(s, f) for s, f, _v in effect_keys.tracks(ob) if s == group[4:]]
+    names = next((n for key, _l, _d, n in PTCL_SECTIONS if key == group), ())
+    struct = _struct_of(ob, "ptcl")
+    alias = {"Color": "Color0", "PatNo": "PatNoMin"}   # tracks without a single field: the section they belong to
+    out = []
+    for s, f, _v in effect_keys.tracks(ob):
+        if s == "ptcl":
+            name = effect_keys.animated_field(struct, f) or alias.get(effect_keys.pretty(f), effect_keys.pretty(f))
+            if name in names:
+                out.append((s, f))
+    return out
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_EflPickRecord(bpy.types.Operator):
+    """Show this record and select it, like the Outliner: click = select it alone, Shift+click = add it to the
+    selection, Ctrl+click = add or remove it. Edits in the Effect Editor go to every selected record"""
+    bl_idname = "albam.efl_pick_record"
+    bl_label = "Pick Record"
+    bl_options = {"REGISTER", "UNDO"}
+
+    index: bpy.props.IntProperty(description="Row of the records list")
+    mode: bpy.props.EnumProperty(items=[("SET", "Select", "Select this record alone"),
+                                        ("EXTEND", "Extend", "Add this record to the selection (Shift)"),
+                                        ("TOGGLE", "Toggle", "Add or remove this record (Ctrl)")],
+                                 description="Plain, Shift or Ctrl click")
+
+    def invoke(self, context, event):
+        self.mode = "EXTEND" if event.shift else "TOGGLE" if event.ctrl else "SET"
+        return self.execute(context)
+
+    def execute(self, context):
+        global _loading
+        state = _state(context)
+        if not 0 <= self.index < len(state.records):
+            return {"CANCELLED"}
+        ob = state.records[self.index].ob
+        if ob is None or ob.name not in context.view_layer.objects:
+            return {"CANCELLED"}
+        if self.mode == "TOGGLE" and ob.select_get():
+            ob.select_set(False)
+            if context.view_layer.objects.active == ob:   # show another selected record instead
+                other = next((o for o in context.selected_objects if record_object(o) is not None), None)
+                if other is not None:
+                    context.view_layer.objects.active = other
+                    load_record(state, record_object(other))
+            return {"FINISHED"}
+        if self.mode == "SET":
+            for other in context.selected_objects:
+                if other is not None:
+                    other.select_set(False)
+        ob.select_set(True)
+        context.view_layer.objects.active = ob
+        _loading = True
+        try:
+            state.records_index = self.index
+        finally:
+            _loading = False
+        if state.target != ob:
+            load_record(state, ob)
+        return {"FINISHED"}
+
+
+_SELECT_MODES = [
+    ("ALL", "All", "Select every record of this effect"),
+    ("NONE", "None", "Select only the record shown"),
+    ("TYPE", "Same Type", "Select every record of this effect with the same particle type as the record shown"),
+]
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_EflSelectRecords(bpy.types.Operator):
+    """Select records of the effect together, for editing them at once"""
+    bl_idname = "albam.efl_select_records"
+    bl_label = "Select Records"
+    bl_options = {"REGISTER", "UNDO"}
+
+    mode: bpy.props.EnumProperty(items=_SELECT_MODES)
+
+    @classmethod
+    def poll(cls, context):
+        return _state(context).records_root is not None
+
+    @classmethod
+    def description(cls, context, properties):
+        return next(d for key, _n, d in _SELECT_MODES if key == properties.mode)
+
+    def execute(self, context):
+        state = _state(context)
+        shown = state.target
+        kind = shown.get("efl_particle_type") if shown is not None else None
+        count = 0
+        for item in state.records:
+            ob = item.ob
+            if ob is None or ob.name not in context.view_layer.objects:
+                continue
+            pick = (self.mode == "ALL" or ob == shown
+                    or (self.mode == "TYPE" and ob.get("efl_particle_type") == kind))
+            ob.select_set(pick)
+            count += pick
+        if shown is not None and shown.name in context.view_layer.objects:
+            context.view_layer.objects.active = shown
+        self.report({"INFO"}, f"{count} record(s) selected")
+        return {"FINISHED"}
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_EflCopyFieldToSelected(bpy.types.Operator):
+    """Copy this one field (and its keyframes, if it has a track) from the record shown to every other selected
+    record that has the same field. Other fields are left alone"""
+    bl_idname = "albam.efl_copy_field_to_selected"
+    bl_label = "Copy Field to Selected"
+    bl_options = {"REGISTER", "UNDO"}
+
+    field: bpy.props.StringProperty(description="The editor field ('<slot>/<name>'); empty with track = only the keys")
+    track: bpy.props.StringProperty(description="A keyframe track ('<slot>:<offset field>') to copy")
+    keys: bpy.props.BoolProperty(name="Keyframes", default=True,
+                                 description="Also copy the field's keyframe track (its keys, random parts, timer)")
+
+    @classmethod
+    def poll(cls, context):
+        state = _state(context)
+        return state.target is not None and bool(selected_records(context, state.target))
+
+    @classmethod
+    def description(cls, context, properties):
+        if not properties.field:
+            return ("Copy this keyframe track (keys, random parts, timer and interpolation) from the record shown to "
+                    "every other selected record that has it")
+        name = properties.field.split("/", 1)[-1]
+        return (f"Copy {name} from the record shown to every other selected record that has it"
+                + (", with its keyframes" if properties.track else "") + ". Other fields are left alone")
+
+    def execute(self, context):
+        state = _state(context)
+        source = state.target
+        others = selected_records(context, source)
+        written = keyed = 0
+        label = self.field.split("/", 1)[-1] if self.field else effect_keys.pretty(_kf_parse(self.track)[1])
+        if self.field:
+            item = state.fields.get(self.field)
+            if item is None or item.kind == "readonly":
+                self.report({"WARNING"}, f"{self.field} can't be copied")
+                return {"CANCELLED"}
+            try:
+                value = _item_value(item)
+            except ValueError as err:
+                self.report({"WARNING"}, f"{item.label}: {err}")
+                return {"CANCELLED"}
+            written = sum(write_field_to(ob, item, value) for ob in others)
+        if self.track and (self.keys or not self.field):
+            slot, field = _kf_parse(self.track)
+            keyed = sum(copy_track_to(source, ob, slot, field) for ob in others)
+        for root in {effect_root(ob) for ob in others} - {None}:
+            if self.field.startswith("gen/") and label in ("GroupFlag", "MaterialFlag"):
+                effect_filter.apply_filter(root)
+            schedule_live_apply(root)
+        _kf_items.clear()
+        done = max(written, keyed)
+        self.report({"INFO"}, f"{label}: copied to {done} of {len(others)} record(s)"
+                              + (f" ({len(others) - done} don't have it)" if done < len(others) else ""))
+        return {"FINISHED"}
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_EflCopyToSelected(bpy.types.Operator):
+    """Bulk edit: copy the active record's values in this group (and its keyframe tracks, unless turned off) to every
+    other selected record that has the same fields. Records of other types get the fields they share"""
+    bl_idname = "albam.efl_copy_to_selected"
+    bl_label = "Copy to Selected"
+    bl_options = {"REGISTER", "UNDO"}
+
+    group: bpy.props.StringProperty(
+        description="What to copy: draw_common (intensity, scale, colours), a Particle section, or tab:<tab>")
+    keys: bpy.props.BoolProperty(name="Keyframes", default=True,
+                                 description="Also make the selected records' keyframe tracks of this group the same")
+
+    @classmethod
+    def poll(cls, context):
+        state = _state(context)
+        return state.target is not None and bool(selected_records(context, state.target))
+
+    @classmethod
+    def description(cls, context, properties):
+        label = GROUP_LABELS.get(properties.group)
+        if label:
+            return (f"Bulk edit: copy the active record's {label} to every other selected record that has those "
+                    "fields, keyframes included unless turned off")
+        return cls.__doc__
+
+    def execute(self, context):
+        state = _state(context)
+        source = state.target
+        others = selected_records(context, source)
+        items = [i for i in _group_items(state, self.group) if i.kind != "readonly" and not i.error]
+        fields = written = tracks = 0
+        for item in items:
+            try:
+                value = _item_value(item)
+            except ValueError:
+                continue
+            fields += 1
+            written += sum(write_field_to(ob, item, value) for ob in others)
+        if self.keys:
+            for slot, field in _group_tracks(source, self.group):
+                tracks += sum(copy_track_to(source, ob, slot, field) for ob in others)
+        roots = {effect_root(ob) for ob in others} - {None}
+        for root in roots:
+            if self.group == "tab:gen":
+                effect_filter.apply_filter(root)
+            schedule_live_apply(root)
+        _kf_items.clear()
+        self.report({"INFO"}, f"Copied {fields} field(s) to {len(others)} record(s): {written} values"
+                              + (f", {tracks} keyframe track(s)" if self.keys else ""))
+        return {"FINISHED"}
+
+
 @blender_registry.register_blender_type
 class ALBAM_OT_EflKeysClear(bpy.types.Operator):
     """Remove every key of this track: the field's plain value is used again"""
@@ -559,16 +914,36 @@ class ALBAM_OT_EflKeysSelect(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _record_selected(item):
+    ob = item.ob
+    try:
+        return ob is not None and ob.select_get()
+    except RuntimeError:   # not in the view layer
+        return False
+
+
+def _select_record(item, value):
+    ob = item.ob
+    if ob is None:
+        return
+    try:
+        ob.select_set(bool(value))
+    except RuntimeError:
+        pass
+
+
 def _on_record_index(state, context):
-    """Clicking a row of the records list makes that record active and loads it."""
+    """Clicking a row of the records list makes that record active and loads it. A ticked (selected) row keeps the
+    selection, so you can pick which of the selected records is the source; an unticked row is selected alone."""
     if _loading or not 0 <= state.records_index < len(state.records):
         return
     ob = state.records[state.records_index].ob
     if ob is None or ob.name not in context.view_layer.objects:
         return
-    for other in context.selected_objects:
-        if other is not None:   # a rebuild may have just removed it
-            other.select_set(False)
+    if not ob.select_get():
+        for other in context.selected_objects:
+            if other is not None:   # a rebuild may have just removed it
+                other.select_set(False)
     context.view_layer.objects.active = ob
     ob.select_set(True)
     if state.target != ob:
@@ -579,6 +954,9 @@ def _on_record_index(state, context):
 class AlbamEflRecordItem(bpy.types.PropertyGroup):
     # name (PropertyGroup.name) = the row label, so the list's name filter searches it
     ob: bpy.props.PointerProperty(type=bpy.types.Object)
+    selected: bpy.props.BoolProperty(
+        name="Selected", get=lambda item: _record_selected(item), set=lambda item, value: _select_record(item, value),
+        description="Whether this record's Empty is selected (edits go to every selected record that has the field)")
     index: bpy.props.IntProperty()
     is_new: bpy.props.BoolProperty()
 
@@ -645,6 +1023,7 @@ class AlbamEflEditor(bpy.types.PropertyGroup):
     show_unverified: bpy.props.BoolProperty(
         name="Unverified", description="Also show fields whose meaning isn't verified in the DX9 code")
     show_notes: bpy.props.BoolProperty(name="Notes", description="Show the reverse-engineering note of each field")
+    multi_report: bpy.props.StringProperty()   # what the last edit of several selected records did
     show_records: bpy.props.BoolProperty(name="Records", default=True,
                                          description="Show the list of the effect's records")
     show_filter: bpy.props.BoolProperty(
@@ -942,6 +1321,12 @@ def _run_job(job, state):
     elif kind == "material":
         for root in _material_image_changed(job[1]):
             schedule_live_apply(root)
+    elif kind == "ean_join":
+        ob = job[1]
+        if ob.name in bpy.data.objects:
+            from .effect_ean import repair_joined
+            if repair_joined(ob) and ob.get("efl_root") is not None:
+                schedule_live_apply(ob["efl_root"])
     elif kind == "structure" and state.live:
         for root in bpy.data.objects:
             if root.albam_asset.extension != "efl" or not root.get("efl_data"):
@@ -1079,6 +1464,12 @@ def _on_depsgraph(scene, depsgraph):
                 if root is not None and _state().live:
                     _pending.add(root.name)
                     queued = True
+                if "ean_data" in id_:   # a mesh joined into a flipbook (Ctrl+J) gets frames
+                    _queue.append(("ean_join", id_))
+                    queued = True
+            elif update.is_updated_geometry and isinstance(id_, bpy.types.Object) and "ean_data" in id_:
+                _queue.append(("ean_join", id_))
+                queued = True
             elif isinstance(id_, bpy.types.Action) and not _applying and _state().live:   # keys edited
                 for name in _action_roots(id_):
                     _pending.add(name)
@@ -1286,10 +1677,11 @@ class ALBAM_UL_EflRecords(bpy.types.UIList):
         if item.ob is None:
             layout.label(text=item.name + "  (deleted)", icon="ERROR")
             return
-        if item.ob.get("efl_filtered"):
-            layout.label(text=item.name + "  (filtered out)", icon="HIDE_ON")
-        else:
-            layout.label(text=item.name, icon="ADD" if item.is_new else "PARTICLES")
+        row = layout.row(align=True)
+        row.label(text="", icon="LAYER_ACTIVE" if item.selected else "LAYER_USED")
+        text = item.name + ("  (filtered out)" if item.ob.get("efl_filtered") else "")
+        icon = "HIDE_ON" if item.ob.get("efl_filtered") else "ADD" if item.is_new else "PARTICLES"
+        row.operator("albam.efl_pick_record", text=text, icon=icon, emboss=False).index = index
 
 
 @blender_registry.register_blender_type
@@ -1337,8 +1729,9 @@ class ALBAM_OT_EflRevertRecord(bpy.types.Operator):
 
 # -- panel ------------------------------------------------------------------------------------------
 
-def _draw_sections(layout, state, items, searching):
-    """Particle tab: the fields in collapsible groups (all open while searching)."""
+def _draw_sections(layout, state, items, searching, bulk=False):
+    """Particle tab: the fields in collapsible groups (all open while searching); bulk: a Copy to Selected button
+    on each."""
     groups = {}
     for item in items:
         groups.setdefault(item.section if item.section in _PTCL_SECTION_INDEX else "other", []).append(item)
@@ -1348,15 +1741,19 @@ def _draw_sections(layout, state, items, searching):
             continue
         box = layout.box()
         is_open = searching or state.ptcl_open[index]
-        box.prop(state, "ptcl_open", index=index, text=f"{label} ({len(group)})", emboss=False,
-                 icon="TRIA_DOWN" if is_open else "TRIA_RIGHT")
+        header = box.row(align=True)
+        header.prop(state, "ptcl_open", index=index, text=f"{label} ({len(group)})", emboss=False,
+                    icon="TRIA_DOWN" if is_open else "TRIA_RIGHT")
+        if bulk:
+            header.operator("albam.efl_copy_to_selected", text="", icon="PASTEDOWN").group = key
         if is_open:
             col = box.column(align=False)
             for item in group:
-                _draw_field(col, item, state.show_notes, state.target)
+                _draw_field(col, item, state.show_notes, state.target, bulk)
 
 
-def _draw_field(layout, item, show_notes, ob=None):
+def _draw_field(layout, item, show_notes, ob=None, bulk=False):
+    """One field row; bulk (other records selected): a button copying just this field to them."""
     box_row = layout.row(align=True)
     split = box_row.split(factor=0.42, align=True)
     label = ("    " + item.label) if item.kind == "bit" or item.parent else item.label
@@ -1368,6 +1765,9 @@ def _draw_field(layout, item, show_notes, ob=None):
         keyed = effect_keys.has_keys(ob, slot, field)
         box_row.operator("albam.efl_key_insert", text="", emboss=False,
                          icon="DECORATE_KEYFRAME" if keyed else "DECORATE_ANIMATE").track = item.track
+    if bulk and item.kind != "readonly":
+        op = box_row.operator("albam.efl_copy_field_to_selected", text="", emboss=False, icon="PASTEDOWN")
+        op.field, op.track = item.name, item.track
     if item.kind in ("floats", "ints"):
         prop = "floats" if item.kind == "floats" else "ints"
         if item.per > 1:
@@ -1500,6 +1900,10 @@ class _EflEditorDraw:
             else:
                 box.template_list("ALBAM_UL_EflRecords", "", state, "records", state, "records_index",
                                   rows=6, maxrows=12)
+            row = box.row(align=True)
+            row.label(text="Select:")
+            for mode, label, _d in _SELECT_MODES:
+                row.operator("albam.efl_select_records", text=label).mode = mode
         row = box.row(align=True)
         row.operator("albam.efl_duplicate_record", text="Duplicate", icon="DUPLICATE")
         row.operator("albam.efl_copy_record_to", text="Copy to", icon="PASTEDOWN")
@@ -1528,6 +1932,21 @@ class _EflEditorDraw:
         row.prop(state, "show_unverified", toggle=True)
         row.prop(state, "show_notes", toggle=True)
         row.operator("albam.efl_revert_record", text="", icon="LOOP_BACK")
+        others = selected_records(context, active)
+        bulk = bool(others)
+        box = layout.box() if bulk else None
+        if box is not None:   # several records selected: edits go to all of them
+            box.label(text=f"Edits go to all {len(others) + 1} selected records (those that have the field)",
+                      icon="DOCUMENTS")
+            row = box.row(align=True)
+            buttons = {"gen": [("Copy Generator Common to Selected", "gen_common")],
+                       "ptcl": [("Copy Draw Common to Selected", "draw_common"), ("Copy Tab", "tab:ptcl")],
+                       "life": [("Copy Life to Selected", "tab:life")]}.get(
+                           state.tab, [("Copy Tab to Selected", f"tab:{state.tab}")])
+            for text, group in buttons:
+                row.operator("albam.efl_copy_to_selected", text=text, icon="PASTEDOWN").group = group
+            if state.multi_report:
+                box.label(text=state.multi_report, icon="INFO")
         search = state.search.lower()
         visible = []
         for item in state.fields:
@@ -1541,19 +1960,20 @@ class _EflEditorDraw:
             visible.append(item)
         shown = len(visible)
         if state.tab == "ptcl":
-            _draw_sections(layout, state, visible, bool(search))
+            _draw_sections(layout, state, visible, bool(search), bulk)
         else:
             col = layout.column(align=False)
             for i, item in enumerate(visible):
                 if state.tab == "more" and (i == 0 or visible[i - 1].slot != item.slot):
                     col.label(text=item.slot.split(":", 1)[1].replace("ParamOffset", ""), icon="MOD_PHYSICS")
-                _draw_field(col, item, state.show_notes, state.target)
+                _draw_field(col, item, state.show_notes, state.target, bulk)
         if not shown:
             layout.label(text="Nothing to show here" + ("" if state.show_unverified else
                                                          " (try Unverified)"))
 
     def draw_keys(self, layout, state):
         ob = state.target
+        bulk = ob is not None and bool(selected_records(bpy.context, ob))
         tracks = keyframe_fields(ob) if ob is not None else []
         if not tracks:
             layout.label(text="This record has no keyframe slots")
@@ -1572,6 +1992,9 @@ class _EflEditorDraw:
             sub = row.row(align=True)
             sub.enabled = count > 0
             sub.operator("albam.efl_keys_clear", text="", icon="X").track = ident
+            if bulk:
+                op = row.operator("albam.efl_copy_field_to_selected", text="", icon="PASTEDOWN")
+                op.field, op.track = "", ident
         box = layout.box()
         box.label(text="Track settings", icon="SETTINGS")
         box.prop(state, "kf_field", text="")
