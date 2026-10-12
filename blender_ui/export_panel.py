@@ -1,4 +1,6 @@
+import os
 import time
+from pathlib import PurePosixPath, PureWindowsPath
 
 import bpy
 from bpy.app.handlers import persistent
@@ -26,6 +28,81 @@ class AlbamExportSettings(bpy.types.PropertyGroup):
     null_zcoords: bpy.props.BoolProperty(default=False)
     no_vf_grouping: bpy.props.BoolProperty(default=False)  # dd weapons and armor requires it
     force_max_num_weights: bpy.props.BoolProperty(default=False)
+    game_folder: bpy.props.StringProperty(
+        name="Game Folder", subtype="DIR_PATH",
+        description="The folder the game loads loose files from (its effect, model ... folders sit inside it). "
+                    "Save to Game Folder writes every file of an export there at its game path. Remembered in the "
+                    "add-on preferences for new .blend files")
+
+
+ADDON_ID = __package__.split(".")[0]   # "albam"
+
+
+@blender_registry.register_blender_type
+class AlbamPreferences(bpy.types.AddonPreferences):
+    bl_idname = ADDON_ID
+
+    game_folder: bpy.props.StringProperty(
+        name="Game Folder", subtype="DIR_PATH",
+        description="The folder the game loads loose files from. Save to Game Folder (Export section) writes "
+                    "exported files there at their game paths; new .blend files start with this folder")
+
+    def draw(self, context):
+        self.layout.prop(self, "game_folder")
+
+
+def _preferences(context):
+    addon = context.preferences.addons.get(ADDON_ID)
+    return addon.preferences if addon is not None else None
+
+
+def game_folder(context):
+    """The loose-file root: this scene's, else the one remembered in the add-on preferences ("" if none)."""
+    folder = context.scene.albam.export_settings.game_folder
+    if not folder:
+        prefs = _preferences(context)
+        folder = prefs.game_folder if prefs is not None else ""
+    return bpy.path.abspath(folder) if folder else ""
+
+
+def remember_game_folder(context, folder):
+    context.scene.albam.export_settings.game_folder = folder
+    prefs = _preferences(context)
+    if prefs is not None and prefs.game_folder != folder:
+        prefs.game_folder = folder
+        context.preferences.is_dirty = True   # saved with the preferences (auto-save or Save Preferences)
+
+
+def export_files(vfs, item):
+    """[(relative path, VirtualFile)] of every file of the export `item` belongs to (its root's leaves)."""
+    root_id = item.name if item.is_root else item.tree_node.root_id
+    return [(vf.relative_path, vf) for vf in vfs.file_list
+            if vf.tree_node.root_id == root_id and not vf.is_expandable and vf.relative_path]
+
+
+def target_path(folder, relative_path):
+    """Absolute path of a game path under the folder; None for paths that would leave it."""
+    parts = PureWindowsPath(relative_path.replace("/", "\\")).parts
+    if not parts or PureWindowsPath(relative_path).anchor or PurePosixPath(relative_path).is_absolute() or             any(p in ("..", "") for p in parts):
+        return None
+    return os.path.join(folder, *parts)
+
+
+def save_to_folder(folder, files):
+    """Write (relative path, bytes) pairs under folder, creating folders. Returns (written, replaced, refused)."""
+    written, replaced, refused = [], [], []
+    for relative_path, data in files:
+        path = target_path(folder, relative_path)
+        if path is None:
+            refused.append(relative_path)
+            continue
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if os.path.exists(path):
+            replaced.append(relative_path)
+        with open(path, "wb") as f:
+            f.write(data)
+        written.append(path)
+    return written, replaced, refused
 
 
 def is_stale(item):
@@ -195,6 +272,7 @@ class ALBAM_PT_FileExplorer2(bpy.types.Panel):
         split = self.layout.split(factor=0.1)
         col = split.column()
         col.operator("albam.save_file_exported", icon="SORT_ASC", text="")
+        col.operator("albam.save_to_game_folder", icon="FILE_FOLDER", text="")
         col.operator("albam.pack", icon="PACKAGE", text="")
         col.operator("albam.patch", icon="FILE_REFRESH", text="")
         col.operator("albam.remove_exported", icon="X", text="")
@@ -209,8 +287,58 @@ class ALBAM_PT_FileExplorer2(bpy.types.Panel):
             sort_lock=True,
             rows=8,
         )
+        row = self.layout.row(align=True)
+        row.prop(context.scene.albam.export_settings, "game_folder", text="Game Folder")
         self.layout.row()
-        self.layout.row()
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_SaveToGameFolder(bpy.types.Operator):
+    """Write every file of the selected export (e.g. an effect with its new strips and flipbooks) into the game's
+    loose-file folder at their game paths, creating missing folders and replacing files already there. The first
+    time, pick the folder; it's remembered (change it in the Game Folder field below the list)"""
+    bl_idname = "albam.save_to_game_folder"
+    bl_label = "Save to Game Folder"
+
+    directory: bpy.props.StringProperty(subtype="DIR_PATH", options={"HIDDEN", "SKIP_SAVE"})
+
+    @classmethod
+    def poll(cls, context):
+        vfs = context.scene.albam.exported
+        if not len(vfs.file_list) or not 0 <= vfs.file_list_selected_index < len(vfs.file_list):
+            return False
+        return bool(export_files(vfs, vfs.file_list[vfs.file_list_selected_index]))
+
+    def invoke(self, context, event):  # pragma: no cover
+        folder = game_folder(context)
+        if folder and os.path.isdir(folder):
+            return self.execute(context)
+        self.directory = folder
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        folder = bpy.path.abspath(self.directory) if self.directory else game_folder(context)
+        if not folder or not os.path.isdir(folder):
+            self.report({"ERROR"}, "Pick the game's loose-file folder first (Game Folder, below the exported files)")
+            return {"CANCELLED"}
+        remember_game_folder(context, folder)
+        vfs = context.scene.albam.exported
+        files = export_files(vfs, vfs.file_list[vfs.file_list_selected_index])
+        try:
+            written, replaced, refused = save_to_folder(folder, [(rel, vf.get_bytes()) for rel, vf in files])
+        except OSError as err:
+            self.report({"ERROR"}, f"Couldn't write into {folder}: {err}")
+            return {"CANCELLED"}
+        for path in written:
+            print(f"Albam: saved {path}")
+        message = f"Saved {len(written)} file(s) to {folder}"
+        if replaced:
+            message += f" ({len(replaced)} replaced)"
+        if refused:
+            message += f"; skipped {len(refused)} with a path outside the folder: {', '.join(refused[:3])}"
+        self.report({"WARNING"} if refused else {"INFO"}, message)
+        return {"FINISHED"}
 
 
 @blender_registry.register_blender_type

@@ -93,7 +93,14 @@ When you add a new engine module, import it in `__init__.register()` **before** 
 3. Select a file and click Import (`albam.import_real`).
 4. Edit the result in Blender.
 5. Select it under Export and click Export. Files appear in the "exported" VFS.
-6. Use Save, or Patch (`albam.patch` → `archive.update_arc`) to rewrite an arc in place.
+6. Use Save, **Save to Game Folder**, or Patch (`albam.patch` → `archive.update_arc`) to rewrite an arc in place.
+   - The user's game is modded to load loose files from outside the arcs, so Save to Game Folder is their usual
+     route: `albam.save_to_game_folder` (`blender_ui/export_panel.py`, folder button next to Save) writes every file
+     of the selected export (an effect with its edited / new `.efs` / `.ean`, ...) under the loose-file root at its
+     game path (`relative_path`), creating folders and replacing existing files; paths with `..` or a drive are
+     refused (`target_path`). The root is `scene.albam.export_settings.game_folder` (field under the exported list),
+     mirrored into the add-on preferences (`AlbamPreferences.game_folder`, bl_idname `albam`) so new .blend files
+     start with it; the first save without one opens a folder picker. Test: `test_game_folder.py` (scratch).
    - The export list drops entries whose object was deleted (`export_panel.cull_exportables`, depsgraph handler ->
      timer; the list hides them at once). A deleted object counts as "in no collection", because X leaves it alive
      while the list points at it. Per-extension cleanup in `export_panel.ON_CULL`: a chain restores its previewed
@@ -524,7 +531,9 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
   preview reads their current data, not the disk. `root['efl_linked_hash']` (crc32 hex strings) records what the
   effect was built with; `effect_export.linked_changes` / `structure_changed` make Apply rebuild after an edit, and
   `rebuild_effect` keeps the linked objects (re-parented, moved into the new collection; ones no longer referenced
-  are removed). `export_efl` returns the `.efl` plus every linked file whose bytes differ from its source. The
+  are removed). `export_efl` returns the `.efl` plus every linked file whose bytes differ from its source. Each linked object
+  also has its own row in the Export list (added after the effect's by `_EffectBuilder.build`, once: rebuilds keep
+  the row), so it can be exported alone, unchanged or not (2026-10-12). The
   Effect Editor lists them (Linked files box, `albam.efl_select_linked`). Standalone `.efs` / `.ean` import still
   exists for files no effect references.
 - **`.efs` strip curves** (`effect_efs.py`, layout in `efl/efs.py`; DX9 and SE share it, field names from the SE PDB):
@@ -533,7 +542,11 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
   parts from the connected chains (ordered by `efs_part`, then vertex index; each walked from its lowest-numbered
   end; branches are refused), normalises the normals, and gives unmoved points the source file's exact floats
   (`_keep_unmoved`), so untouched files export byte-identical (all 55). Extruding or Shift+D-duplicating a chain
-  copies its attributes; a duplicate becomes a new part after its source.
+  copies its attributes; a duplicate becomes a new part after its source. A strip converted to a **curve**
+  (Object > Convert > Curve, 2026-10-12) exports as Blender draws it (`_strip_mesh`: evaluated `to_mesh`, each spline
+  a part, a Bezier segment gives the spline's resolution points unless both its handles are Vector); curves carry
+  no attributes, so normals and blend data come from the nearest source point (`_from_nearest_source`), else the
+  game's up axis. Unmoved poly-converted strips still export byte-identical.
 - **`.ean` flipbooks, edited like UVs** (`effect_ean.py`, layout in `efl/ean.py`): import makes a mesh `EAN_<file>`
   with one quad face per frame. UV layer `Flipbook` = the frame's rectangle as `pixel / ean_uv_size` (V flipped); face
   attributes `ean_seq` / `ean_frame` place it (a Shift+D duplicate copies them and lands after its source). The

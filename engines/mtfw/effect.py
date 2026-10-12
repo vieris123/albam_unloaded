@@ -264,8 +264,14 @@ class _EffectBuilder:
         root.albam_asset.app_id = self.app_id
         root.albam_asset.relative_path = relative_path
         root.albam_asset.extension = "efl"
-        exportable = self.context.scene.albam.exportable.file_list.add()
-        exportable.bl_object = root
+        exportable = self.context.scene.albam.exportable.file_list
+        exportable.add().bl_object = root
+        # the linked .efs / .ean get their own rows too (export one alone, or Save to Game Folder); kept ones already
+        # have theirs from the previous build
+        listed = {item.bl_object for item in exportable}
+        for key, ob in sorted(self.linked.items()):
+            if ob not in listed:
+                exportable.add().bl_object = ob
         root["efl_missing_textures"] = sorted(self.missing_textures)
         effect_filter.set_masks(root, *self.masks)
         effect_filter.apply_filter(root)

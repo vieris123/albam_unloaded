@@ -5,6 +5,9 @@ centimetres (Y up) to Blender metres (Z up). Edit it like any mesh: move, extrud
 duplicate a chain (Shift+D) to add a part. Export rebuilds the parts from the connected chains: they're ordered by
 their `efs_part` attribute (copied along when extruding or duplicating), then by vertex index, and each chain is
 walked from its lowest-numbered end. Per-point normals and blend indices / weights ride along as attributes.
+The object may also be converted to a curve (Object > Convert > Curve) for smooth editing: export then takes the
+curve as Blender draws it (each spline a part, its Resolution U setting the point count) and, since curves carry no
+attributes, each point's normal and blend data from the nearest point of the source file (else the game's up axis).
 """
 import bpy
 
@@ -139,8 +142,28 @@ def _chains(mesh):
     return [c[2] for c in chains]
 
 
+def _strip_mesh(ob):
+    """(mesh, cleanup or None): the object's own mesh, or a curve evaluated as Blender draws it."""
+    if ob.type == "MESH":
+        return ob.data, None
+    if ob.type != "CURVE":
+        raise AlbamCheckFailure(f"{ob.name} can't be written as an .efs strip",
+                                details=f"it is a {ob.type.lower()} object",
+                                solution="Keep strips as meshes or curves (Object > Convert)")
+    evaluated = ob.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    return evaluated.to_mesh(), evaluated.to_mesh_clear
+
+
 def build_efs_bytes(ob):
-    mesh = ob.data
+    mesh, cleanup = _strip_mesh(ob)
+    try:
+        return _build_efs_bytes(ob, mesh)
+    finally:
+        if cleanup is not None:
+            cleanup()
+
+
+def _build_efs_bytes(ob, mesh):
     n = len(mesh.vertices)
     coords = [0.0] * (n * 3)
     mesh.vertices.foreach_get("co", coords)
@@ -158,7 +181,9 @@ def build_efs_bytes(ob):
         return values
 
     game_space = ob.get("efs_space") == "game"
-    norms = read(NORM_ATTR, "vector", (0.0, 0.0, 1.0))
+    up = (0.0, 1.0, 0.0) if game_space else (0.0, 0.0, 1.0)   # the game's up axis in the object's axes
+    norms = read(NORM_ATTR, "vector", up)
+    has_attrs = mesh.attributes.get(NORM_ATTR) is not None
     indices = read(BLEND_INDEX_ATTR, "int", 0)
     weights = read(BLEND_WEIGHT_ATTR, "int", 0)
     strip = efs.EffectStrip(int(ob.get("efs_version", efs.VERSION_DX9)), [], int(ob.get("efs_header_320c", 0)),
@@ -172,6 +197,8 @@ def build_efs_bytes(ob):
             part.vertices.append(efs.Vertex(_to_game(tuple(coords[v * 3:v * 3 + 3]), game_space), norm,
                                             _unpack(indices[v]), _unpack(weights[v])))
         strip.parts.append(part)
+    if not has_attrs:   # a converted curve: no stored normals / blend data
+        _from_nearest_source(strip, ob)
     _keep_unmoved(strip, ob)
     stored = ob.get("efs_part_indices")
     if stored is not None:
@@ -181,6 +208,27 @@ def build_efs_bytes(ob):
                                         solution="Keep the parts' point counts, or re-import the .efs")
             part.indices = [tuple(int(x) for x in t) for t in idx]
     return efs.to_bytes(strip)
+
+
+def _from_nearest_source(strip, ob):
+    """Normals and blend indices / weights for points that lost them (a strip converted to a curve): those of the
+    nearest point of the same part in the source file (any part when the source has fewer)."""
+    data = ob.albam_asset.original_bytes
+    if not data:
+        return
+    try:
+        source = efs.parse_strip(bytes(data))
+    except efs.EfsError:
+        return
+    if not source.parts:
+        return
+    for i, part in enumerate(strip.parts):
+        pool = source.parts[i].vertices if i < len(source.parts) and source.parts[i].vertices else             [v for p in source.parts for v in p.vertices]
+        if not pool:
+            continue
+        for v in part.vertices:
+            near = min(pool, key=lambda s: sum((a - b) ** 2 for a, b in zip(s.pos, v.pos)))
+            v.norm, v.blend_indices, v.blend_weights = near.norm, near.blend_indices, near.blend_weights
 
 
 def _keep_unmoved(strip, ob):
