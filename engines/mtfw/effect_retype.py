@@ -15,8 +15,8 @@ from albam.registry import blender_registry
 from .efl import EffectList, EflError, schema
 from .efl.edit import apply_keyframes, apply_props, apply_subs, block_props, keyframe_props, sub_props
 from .efl.model import Block
-from .efl.retype import (RETYPE_SLOTS, RetypeError, offered_types, retype, template_score, variant_of,
-                         variants)
+from .efl.retype import (RETYPE_SLOTS, RetypeError, offered_types, refit_fix_points, retype, template_score,
+                         variant_of, variants)
 from .effect_export import (_raw_of, _replaced_of, _report_failure, apply_to_scene, effect_root, record_object,
                             source_bytes)
 
@@ -123,6 +123,41 @@ def store_block(ob, block):
     ob[TYPE_PROP[slot]] = block.type_name
     from .effect_keys import rebuild_tracks
     rebuild_tracks(ob, slots=(slot,))   # the new block's keyframes as F-curves
+
+
+def extension_key_of(props):
+    """The extension a particle block's stored props choose (schema.extension_key), or None."""
+    return schema.extension_key(int(props["type"]), lambda name: props[name] if name in props else None)
+
+
+def change_extension(context, ob, get_new):
+    """Rebuild a record's particle block for a new extension choice instead of writing the bare value (the block
+    would keep its old size and the game would read the extension from whatever follows): a new LineType /
+    ClothType is a Change Type to that variant (its extension from a game example, or defaults), a new LineOfsNum on
+    a FIX line refits the stored points. get_new(name) = the edited value of a field. Returns notes; raises
+    RetypeError / AlbamCheckFailure."""
+    old = current_block(ob, "ptcl")
+    old_key = schema.extension_key(old.type, lambda name: old.get(name) if old.has(name) else None)
+    new_key = schema.extension_key(old.type, get_new)
+    choice = "ClothType" if old.type in schema.CLOTH_PTCL_TYPES else "LineType"
+    variant = get_new(choice)
+    variant = int(variant) if variant is not None else None
+    if old_key is not None and new_key is not None and old_key[:2] == new_key[:2] == ("line", 1):
+        new, notes = refit_fix_points(old, new_key[2])
+    else:
+        template, source = find_template(context, "ptcl", old.type, variant)
+        new, notes = retype(old, old.type, template, variant)
+        notes.insert(0, f"now {schema.EXTENSIONS[new_key[:2]][0] if new_key else 'no extension'}"
+                        + (f" (example: {source})" if source else ""))
+        count = get_new("LineOfsNum")
+        if count is not None and new.has("LineOfsNum") and new.get("LineOfsNum") != int(count):
+            if variant == 1 and choice == "LineType":
+                new, more = refit_fix_points(new, int(count))
+                notes += more[:1]
+            else:
+                new.set("LineOfsNum", int(count))
+    store_block(ob, new)
+    return notes
 
 
 # -- operator ---------------------------------------------------------------------------------------

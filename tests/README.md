@@ -49,10 +49,13 @@ The tests only read game files, never write them.
 | `test_live`, `test_apply_blend` | live preview, Blender's own tools on records (Shift+D, X), blending edits |
 | `test_sections`, `test_flag_ui`, `test_flags`, `test_relation`, `test_options`, `test_filter` | Effect Editor sections, flag checkboxes, RelationType 2, import options, spawn filter |
 | `test_retype_blender` | Change Type in Blender |
+| `test_line_type` | editing LineType / ClothType / a FIX line's LineOfsNum rebuilds the block for its layout |
 | `test_linked`, `test_linked_export`, `test_new_files` | linked `.efs` / `.ean`: rebuilds, own Export rows, New Strip / New Flipbook |
 | `test_efs_ean`, `test_efs_curve`, `test_efs_join` | strips: round trip, edits, a strip converted to a curve, a mesh joined into a strip |
 | `test_ean_uv`, `test_ean_mesh`, `test_ean_hidden` | flipbooks: UV editing, joining meshes / frames from a mesh, hidden state over rebuilds |
 | `test_game_folder` | Save to Game Folder |
+| `test_frame_cache` | the per-frame playback cache: replays, scrubbing and fresh computation draw the same; camera moves redraw |
+| `test_ribbon_nodes` | line ribbons built by the Ribbons node group match the points' camera-facing strips, UVs, colours and material |
 | `test_missing` | missing textures |
 | `test_culling`, `test_orient`, `test_billboard_face`, `test_billboard_modes`, `test_polygon_align`, `test_light`, `test_light_group` | preview rules: culling fade, particle orientation, camera facing, lights, light groups |
 

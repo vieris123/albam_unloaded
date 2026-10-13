@@ -542,6 +542,14 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
   - Source records store the result in `efl_replaced` ({slot: {type, data}}), which `build_efl_bytes` swaps in at
     the same file position (`_replace_block`). New records rewrite `efl_raw`. A pending `efl_replaced` counts as a
     structure change, so Apply rebuilds the effect.
+  - **Editing the extension choice directly** (2026-10-13): a field edit (LineType, ClothType, a FIX line's
+    LineOfsNum, or their packed word, in the editor or a bulk edit) that changes `schema.extension_key` no longer
+    writes the bare value (the block kept its old size and the game read the extension from the following
+    bytes): `effect_editor._guard_extension` undoes the write and calls `effect_retype.change_extension`, a Change
+    Type to that variant (template from the game files, shared fields and keyframes kept) or, for a FIX line's
+    point count, `efl.retype.refit_fix_points` (kept points stay, new ones continue the last step). FOLLOW <->
+    FIX_END (no extension) stays an ordinary edit. The panel notes the rebuild (`efl_editor.edit_note`).
+    Test: `tests/blender/test_line_type.py`.
   - Generator and life types aren't offered: their layouts are identical and what the type changes is unknown.
     ClothLine (14) and move 7 aren't offered either.
   - Test: retyping 60 sampled files' blocks to every type and variant (14,807 cases) writes, reads back, keeps the
@@ -649,6 +657,22 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
         Geometry Nodes group. The group instances the hidden source shape and applies per-point `rot`,
         `scale3`, `alpha`, `uv_off` and `uv_scale`.
       - A `frame_change_pre` handler (registered in `albam.register()` like foot IK) rewrites the points.
+      - **Speed (2026-10-13):** `update_object` caches each system's final mesh data per scene frame (`_frames`:
+        compact `array('f')` payloads from `_point_payload` / `_update_lines` / `_update_strips`, written by
+        `_write_points` / `_write_ribbons`), reused when the frame's `_signature` (game frame, generator / object /
+        parent-inverse matrices, the camera for `_camera_dependent` systems) matches. Recording emitter motion at a
+        frame drops the cached later frames of that object; a new simulation, `invalidate`, `refresh_root`,
+        `forget_history` drop them all. Systems outside their particles' frame window (`_window`) with an empty mesh
+        skip the frame (`_idle`); ribbons whose layout didn't change are rewritten in place (`_topology`).
+        The signature compares matrices with mathutils' own equality; ribbon payloads carry per-loop UVs (built from
+        the faces, which from_pydata keeps in order). `sim.Rope._step` is written per component in the order of the
+        old tuple code (bit-identical in Blender's Python 3.11; Python 3.12's compensated `sum()` made the old code
+        differ by an ulp outside Blender), and line gradient factors are computed once per particle (`_factors`).
+        `ec024_60v2` (109 systems, 72 ribbons): first pass 34 -> 26 ms per frame, replay 25 -> 8 ms, scrubbing
+        26 -> 9 ms, simulation at load 1.2 -> 0.5 s; `tests/corpus/sim_all.py` 49 -> 19 s. What's left of a first pass is
+        spread over Python per-point work (ribbon vertices, particle states). Test: `tests/blender/test_frame_cache.py`.
+        `frame_change_pre` sees objects' matrices before the new frame is evaluated (a camera made by script has
+        none until the scene updates), as before.
     - Game frame = (scene frame - `root['efl_start_frame']`) x 60 / scene fps (the start marker, see Timeline).
     - Particles move in the generator's local frame, so they follow the bone (in the game they're
       world-space after spawn).
@@ -803,8 +827,23 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
     the Add applies (`Particle.keyed_or`). The generator's Range keyframe replaces Range (s and r) at spawn; rope
     keyframes (Length = total, Rot / BlendRot = re-derived pull directions, BlendRate) use the generator timer for
     PathChain and the particle timer for CHAIN trails.
-  - Polyline/Line particles (`RIBBON_TYPES`, simulation only) are camera-facing ribbons whose mesh is rebuilt
-    in world space every frame (`effect_sim._update_lines`); there is no GN group for them.
+  - Polyline/Line particles (`RIBBON_TYPES`, simulation only) are camera-facing ribbons. Since 2026-10-13 the line
+    object's mesh holds only each ribbon's **points** as an edge chain (`_update_lines` -> `_write_line_points`:
+    positions in object space, point attributes `half`, `uv_l` / `uv_r` (FLOAT2), `EdgeAlpha`), and the Geometry
+    Nodes group `ALBAM_EFL_Ribbons_v1` (`_ribbon_node_group`) builds the strip: Mesh to Curve, the tangent from the
+    chain's previous / next point (Offset Point in Curve + Sample Index: the central difference the Python code
+    used, not Blender's Curve Tangent, which averages unit segment directions), normal = normalize(tangent x (Eye -
+    point)) as a free curve normal, radius = half, Curve to Mesh with a 2-point profile along X (its point index
+    picks uv_l / uv_r for the corner UV map `UVMap`), then Set Material from the group's `Material` input (Curve to
+    Mesh carries none: without it the strips rendered as pale untextured quads). Inputs set by Python:
+    `Eye` = the camera (or the followed viewport) in object space, on every update (`_set_eye`), and `Material` =
+    the mesh's first material (`_ensure_ribbon_modifier`, which also adds the modifier to line objects from older
+    .blend files). Ribbons therefore leave the camera out of their frame-cache signature unless they have a culling
+    fade, so orbiting with Face Viewport only moves `Eye` instead of recomputing them in Python. Sword trails
+    (`_update_strips`) still build their quads in Python (`_write_ribbons`). Net per-frame cost is about the same
+    (`ec024_60v2`: first pass 26 -> 25 ms, replay 8 -> 9 ms: Python saved ~2.6 ms, Blender's evaluation of the 72
+    node groups costs ~2 ms). `tests/blender/test_ribbon_nodes.py` checks the strips against the Python formula
+    (190 systems, worst deviation 1e-7 m), UVs, colours, the material, and that strips turn with the camera.
   - Particle types and their Blender objects:
     - Billboard / Polygon / PrimModel: GN instances (`ALBAM_EFL_Particles_v6`).
     - Model: GN collection instances (`ALBAM_EFL_Models_v4`); the `.mod` is imported once off-scene, in game
@@ -866,7 +905,10 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
       to pull along the generator's -Y.
     - **Model particles** are drawn like the game's renderModel (sub_A38780: particle colour, intensity, the record's
       blending): copies of the model with effect materials on its Diffuse BM textures, tinted and faded per particle
-      through `EdgeAlpha` (Models node group v4).
+      through `EdgeAlpha` (Models node group v4). The texture is found by walking upstream from the material's
+      "Diffuse BM" input (`_model_base_image`): materials with a detail map / vertex colour feed it through a Vector
+      Math node, and until 2026-10-13 those meshes got no texture and drew as solid shapes of the particle colour
+      (`ee008_60v0`: a big purple fan from `ee099_01`'s second material). Flipbook meshes (`EAN_`) don't render.
   - Path moves (3-6) ride the generator until released. Each `ParticleState.anchor` says which generator
     frame places it: None = the current frame.
   - Headless test: import `arctool\uPlayerNero-vanilla\model\game\pl000\pl000.mod`, pick its armature, then import

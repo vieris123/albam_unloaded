@@ -17,6 +17,7 @@ Frame 0 of the effect is the scene frame stored as root['efl_start_frame']; game
 """
 import base64
 import math
+from array import array
 
 import bpy
 from bpy.app.handlers import persistent
@@ -37,7 +38,10 @@ UV_STRIDE = 8                           # per pattern: a, b, off_u, c, d, off_v,
 GAME_FPS = 60.0
 SCALE = 0.01
 SIM_KEY = "efl_sim"
-LINE_KINDS = (1, 3, 4, 12, 13, 14)   # Polyline, Texline, Line + cloth variants: ribbons rebuilt per frame
+LINE_KINDS = (1, 3, 4, 12, 13, 14)   # Polyline, Texline, Line + cloth variants: ribbons (points + Geometry Nodes)
+LINE_NODE_GROUP = "ALBAM_EFL_Ribbons_v1"   # camera-facing strips from point chains (effect_sim._ribbon_node_group)
+LINE_EYE = "Eye"                           # its input: the eye position in the object's space (set every update)
+LINE_MATERIAL = "Material"                 # its input: the ribbon material (Curve to Mesh carries none)
 STRIP_KINDS = (15,)                  # PolygonStrip sword trails
 HAIRLINE_KINDS = (3, 4, 13, 14)      # 1-pixel strips in the game
 MODEL_KIND, LIGHT_KIND = 5, 10
@@ -50,17 +54,26 @@ LINE_HALF_WIDTH = 0.25       # cm; Line particles are 1-pixel strips in the game
 EDGE_ALPHA_ATTR = "EdgeAlpha"
 _cache = {}     # object name -> list of efl.sim.Particle
 _history = {}   # object name -> {scene frame: generator world Matrix}
+_window = {}    # object name -> (first birth, last end) game frames of its particles, or None (it has none)
+_topology = {}  # object name -> ribbon layout (point count per ribbon) its mesh was last built with
+_frames = {}    # object name -> {scene frame: (inputs signature, mesh payload)}: replays and scrubbing reuse them
+MAX_CACHED_FRAMES = 1200   # per object; past it the object's cache starts over
 
 
 def invalidate():
     """Forget simulated particles (after the stored .efl bytes changed); they're rebuilt on the next frame."""
     _cache.clear()
+    _window.clear()
+    _frames.clear()
 
 
 def forget(name):
     """Drop cached state of an object that is about to be removed."""
     _cache.pop(name, None)
     _history.pop(name, None)
+    _window.pop(name, None)
+    _topology.pop(name, None)
+    _frames.pop(name, None)
 
 
 def forget_history(root):
@@ -68,6 +81,7 @@ def forget_history(root):
     for ob in bpy.data.objects:
         if ob.get("efl_root") == root:
             _history.pop(ob.name, None)
+            _frames.pop(ob.name, None)
 
 
 def store_source(root, efl_bytes, start_frame):
@@ -212,7 +226,9 @@ def create_light_object(collection, name, generator, root, record_index, info):
 
 
 def create_line_object(collection, name, generator, root, record_index, info, material):
-    """Ribbon object for Polyline/Line particles; its mesh is rebuilt every frame in world space."""
+    """Ribbon object for Polyline/Line particles: its mesh holds each ribbon's points as an edge chain (positions,
+    half widths, UVs, colours per point, written every frame), and the Ribbons node group turns them into
+    camera-facing strips."""
     mesh = bpy.data.meshes.new(f"{name}_ribbons")
     if material is not None:
         mesh.materials.append(material)
@@ -221,8 +237,38 @@ def create_line_object(collection, name, generator, root, record_index, info, ma
     ob["efl_root"] = root
     ob["efl_generator"] = generator
     ob[SIM_KEY] = dict(info, record=record_index, uv_stride=UV_STRIDE)
+    _ensure_ribbon_modifier(ob)
     update_object(ob, bpy.context.scene)
     return ob
+
+
+def _ensure_ribbon_modifier(ob):
+    """The Ribbons node group on a line object (added to objects from before it existed too)."""
+    modifier = next((m for m in ob.modifiers if m.type == "NODES" and m.node_group is not None
+                     and m.node_group.name == LINE_NODE_GROUP), None)
+    if modifier is None:
+        for old in [m for m in ob.modifiers if m.type == "NODES"]:
+            ob.modifiers.remove(old)
+        modifier = ob.modifiers.new("EFL Ribbons", "NODES")
+        modifier.node_group = _ribbon_node_group()
+        _topology.pop(ob.name, None)   # the mesh holds points now, not strips
+    material = ob.data.materials[0] if ob.data.materials else None
+    for item in modifier.node_group.interface.items_tree:
+        if getattr(item, "in_out", None) == "INPUT" and item.name == LINE_MATERIAL:
+            if modifier[item.identifier] != material:
+                modifier[item.identifier] = material
+            break
+    return modifier
+
+
+def _set_eye(ob, eye):
+    """The eye position (object space) the ribbons face, on the modifier."""
+    modifier = _ensure_ribbon_modifier(ob)
+    for item in modifier.node_group.interface.items_tree:
+        if getattr(item, "in_out", None) == "INPUT" and item.name == LINE_EYE:
+            if tuple(modifier[item.identifier]) != tuple(eye):
+                modifier[item.identifier] = tuple(eye)
+            break
 
 
 def frame_tables(anim, image, anim_flag, ean_module):
@@ -327,6 +373,8 @@ def _particles(ob):
     for particle in particles:   # life window, to skip state_at for particles not alive at a frame
         particle.end = particle.birth + particle.lifetime()
     _cache[ob.name] = (key, particles)
+    _frames.pop(ob.name, None)   # results of the previous simulation
+    _window[ob.name] = (min(p.birth for p in particles), max(p.end for p in particles)) if particles else None
     return particles
 
 
@@ -342,8 +390,12 @@ def _unflatten(flat, sizes):
 def _alive_states(ob, frame):
     if frame < 0:
         return []
+    particles = _particles(ob)
+    window = _window.get(ob.name)
+    if window is None or not window[0] <= frame < window[1]:   # nothing of this system is alive now
+        return []
     out = []
-    for p in _particles(ob):
+    for p in particles:
         if p.birth <= frame < p.end:
             s = state_at(p, frame)
             if s is not None:
@@ -367,6 +419,7 @@ def refresh_root(root, scene):
     for ob in _sim_objects(scene):
         if ob.get("efl_root") == root:
             _cache.pop(ob.name, None)
+            _frames.pop(ob.name, None)
             update_object(ob, scene)
 
 
@@ -405,17 +458,72 @@ def _birth_matrix(ob, scene, birth, current):
     return history[max(earlier)] if earlier else current
 
 
+def _idle(ob, scene):
+    """True when nothing of a mesh-drawn system is alive at this frame and its mesh is already empty: the update
+    can be skipped (long timelines with many effects mostly hold idle systems)."""
+    if ob.type != "MESH" or len(ob.data.vertices):
+        return False
+    _particles(ob)
+    window = _window.get(ob.name)
+    frame = _game_frame(ob, scene)
+    return window is None or not window[0] <= frame < window[1]
+
+
+def _signature(ob, scene, info):
+    """What a system's mesh at the current frame depends on besides its simulation: the game frame, the generator's
+    and the object's transforms, and the camera for camera-facing systems (the recorded emitter motion is handled
+    where it's recorded). Two visits with the same signature draw the same mesh. The matrices are compared exactly
+    (mathutils' own comparison: rounding them in Python was a third of a replayed frame)."""
+    generator = ob.get("efl_generator")
+    # ribbons face the eye through their node group (the Eye input is set on every update), so without a culling
+    # fade their payload doesn't depend on the camera
+    depends = _camera_dependent(ob) and not (info["kind"] in LINE_KINDS and info.get("culling") is None)
+    camera = _camera_matrix(scene) if depends else None
+    return (_game_frame(ob, scene), generator.matrix_world if generator is not None else None,
+            ob.matrix_world, ob.matrix_parent_inverse.copy(), camera)
+
+
 def update_object(ob, scene):
     info = ob[SIM_KEY]
+    if info["kind"] != LIGHT_KIND and _idle(ob, scene):
+        return
     if info["kind"] == LIGHT_KIND:
         _update_lights(ob, scene, info)
         return
-    if info["kind"] in STRIP_KINDS:
-        _update_strips(ob, scene, info)
-        return
+    if info["kind"] not in LINE_KINDS + STRIP_KINDS and info.get("space", SPACE_FOLLOW) == SPACE_FOLLOW:
+        generator = ob.get("efl_generator")   # keeps matrix_parent_inverse right on cache hits too
+        _cancel_generator_scale(ob, generator, generator.matrix_world.copy() if generator is not None
+                                else ob.matrix_world.copy())
+    _particles(ob)   # a new simulation drops the object's cached frames
+    signature = _signature(ob, scene, info)
+    cached = _frames.setdefault(ob.name, {})
+    hit = cached.get(scene.frame_current)
+    if hit is not None and hit[0] == signature:
+        payload = hit[1]
+    else:
+        if info["kind"] in STRIP_KINDS:
+            payload = _update_strips(ob, scene, info)
+        elif info["kind"] in LINE_KINDS:
+            payload = _update_lines(ob, scene, info)
+        else:
+            payload = _point_payload(ob, scene, info)
+        if len(cached) >= MAX_CACHED_FRAMES:
+            cached.clear()
+        cached[scene.frame_current] = (signature, payload)
     if info["kind"] in LINE_KINDS:
-        _update_lines(ob, scene, info)
-        return
+        _write_line_points(ob, payload)
+        camera = _camera_matrix(scene)
+        to_local = ob.matrix_world.inverted()
+        _set_eye(ob, to_local @ (camera.translation if camera is not None else Vector((0.0, 0.0, 1.0e6))))
+    elif info["kind"] in STRIP_KINDS:
+        _write_ribbons(ob, *payload)
+    else:
+        _write_points(ob, payload)
+
+
+def _point_payload(ob, scene, info):
+    """The point attributes of an instanced system (Billboard / Polygon / PrimModel / Model) at the current frame:
+    {attribute: (domain type, array)} plus "co" and the point count."""
     rows, seq_offsets, seq_counts, sized = _tables(info, ob)
     v3 = ob.modifiers and ob.modifiers[0].type == "NODES" and ob.modifiers[0].node_group is not None and \
         ob.modifiers[0].node_group.name.startswith(TINT_GROUPS)
@@ -518,25 +626,35 @@ def update_object(ob, scene):
         off.extend((ou, ov, 0.0))   # v1 node groups: axis-aligned cells only
         sc.extend((a, d, 1.0))
 
+    floats = lambda values: array("f", values)   # noqa: E731 (compact: the payload may be cached per frame)
+    attributes = [(name, kind_, floats(values)) for name, kind_, values in (
+        ("rot", "FLOAT_VECTOR", rot), ("scale3", "FLOAT_VECTOR", scale), ("tint", "FLOAT_VECTOR", tint),
+        ("uv_u", "FLOAT_VECTOR", uv_u), ("uv_v", "FLOAT_VECTOR", uv_v),
+        ("uv_off", "FLOAT_VECTOR", off), ("uv_scale", "FLOAT_VECTOR", sc),
+        ("alpha", "FLOAT", alpha), ("shape", "FLOAT_VECTOR", shape),
+        ("shape_w", "FLOAT", shape_w), ("shape_on", "FLOAT", shape_on),
+        ("uv_scroll", "FLOAT_VECTOR", scroll), ("scale_after", "FLOAT_VECTOR", after),
+        ("after_rot", "FLOAT_VECTOR", after_rot),
+        ("place_tint", "FLOAT_VECTOR", place_tint), ("place_alpha", "FLOAT", place_alpha))]
+    co = floats(co)
+    attributes.append(("p_center", "FLOAT_VECTOR", co))
+    return {"count": len(alive), "co": co, "attributes": attributes,
+            "part": array("i", part) if groups else None}
+
+
+def _write_points(ob, payload):
+    """Write an instanced system's points from a payload (_point_payload)."""
     mesh = ob.data
-    mesh.clear_geometry()
-    mesh.vertices.add(len(alive))
-    mesh.vertices.foreach_set("co", co)
-    for name, kind_, values in (("rot", "FLOAT_VECTOR", rot), ("scale3", "FLOAT_VECTOR", scale),
-                                ("tint", "FLOAT_VECTOR", tint),
-                                ("uv_u", "FLOAT_VECTOR", uv_u), ("uv_v", "FLOAT_VECTOR", uv_v),
-                                ("uv_off", "FLOAT_VECTOR", off), ("uv_scale", "FLOAT_VECTOR", sc),
-                                ("alpha", "FLOAT", alpha), ("shape", "FLOAT_VECTOR", shape),
-                                ("shape_w", "FLOAT", shape_w), ("shape_on", "FLOAT", shape_on),
-                                ("uv_scroll", "FLOAT_VECTOR", scroll), ("scale_after", "FLOAT_VECTOR", after),
-                                ("after_rot", "FLOAT_VECTOR", after_rot),
-                                ("place_tint", "FLOAT_VECTOR", place_tint), ("place_alpha", "FLOAT", place_alpha),
-                                ("p_center", "FLOAT_VECTOR", co)):
+    if len(mesh.vertices) != payload["count"]:
+        mesh.clear_geometry()
+        mesh.vertices.add(payload["count"])
+    mesh.vertices.foreach_set("co", payload["co"])
+    for name, kind_, values in payload["attributes"]:
         attr = mesh.attributes.get(name) or mesh.attributes.new(name, kind_, "POINT")
         attr.data.foreach_set("vector" if kind_ == "FLOAT_VECTOR" else "value", values)
-    if groups:
+    if payload["part"] is not None:
         attr = mesh.attributes.get("instance_index") or mesh.attributes.new("instance_index", "INT", "POINT")
-        attr.data.foreach_set("value", part)
+        attr.data.foreach_set("value", payload["part"])
     mesh.update()
 
 
@@ -570,7 +688,10 @@ def _update_lights(holder, scene, info):
 
 
 def _update_lines(ob, scene, info):
-    """Camera-facing ribbons, two vertices per point; UV across x along; EdgeAlpha = colour gradient x alpha."""
+    """The ribbons' points at this frame (object space), one edge chain per ribbon, with per point the half width,
+    the UVs of the left and right edge (u across the strip, v along it: head v = 1; Texline keeps u fixed, its
+    texture runs along the line) and the colour (gradient x alpha). The Ribbons node group builds the camera-facing
+    strip: each point moves +/- half along normalize((next - previous) x (eye - point))."""
     rows, seq_offsets, seq_counts, _sized = _tables(info, ob)
     frame = _game_frame(ob, scene)
     space = info.get("space", SPACE_FOLLOW)
@@ -581,10 +702,11 @@ def _update_lines(ob, scene, info):
     cam = camera.translation if camera is not None else None
     unit = info["particle_scale"] * _world_scale(info, gen_now)
     hairline = info["kind"] in HAIRLINE_KINDS
-    across = 0.0 if info["kind"] in (3, 13) else None   # Texline: u fixed, texture runs along the line
+    across = 0.0 if info["kind"] in (3, 13) else None
 
-    verts, faces, uvs, colors = [], [], [], []
+    verts, edges, halves, uv_l, uv_r, colors, layout = [], [], [], [], [], [], []
     culling = _Culling(info, gen_now, cam)
+    u_left, u_right = (0.0, 1.0) if across is None else (across, across)
     for p, s in _alive_states(ob, frame):
         if not s.line:
             continue
@@ -594,40 +716,49 @@ def _update_lines(ob, scene, info):
             if span is None:
                 continue
             line = line[span[0]:span[1] + 1]
-        pts = []
-        for q, anchor, width, rgba in line:
-            m = gen_now if space == SPACE_FOLLOW or anchor is None else _birth_matrix(ob, scene, anchor, gen_now)
-            pts.append((m @ (Vector(q) * SCALE), LINE_HALF_WIDTH * SCALE if hairline else width * SCALE * unit, rgba))
-        last = len(pts) - 1
+        last = len(line) - 1
         if last < 1:
             continue
         a, b, ou, c, d, ov = _frame_row(rows, seq_offsets, seq_counts, s)[:6]
-        fade = culling.fade(pts[0][0])
-        base = len(verts)
-        for i, (pw, half, rgba) in enumerate(pts):
-            tangent = (pts[min(i + 1, last)][0] - pts[max(i - 1, 0)][0])
-            view = (cam - pw) if cam is not None else Vector((0.0, 0.0, 1.0))
-            side = tangent.cross(view)
-            if side.length < 1e-9:
-                side = tangent.orthogonal() if tangent.length > 1e-9 else Vector((1.0, 0.0, 0.0))
-            side = side.normalized() * half
-            for k, offset in enumerate((-side, side)):
-                verts.append(to_local @ (pw + offset))
-                u, v = (float(k) if across is None else across), 1.0 - i / last   # across, along (head v = 1)
-                uvs.append((a * u + b * v + ou, c * u + d * v + ov))
-                colors.append((rgba[0], rgba[1], rgba[2], rgba[3] * s.alpha * fade))
+        first = gen_now if space == SPACE_FOLLOW or line[0][1] is None else _birth_matrix(ob, scene, line[0][1], gen_now)
+        fade = culling.fade(first @ (Vector(line[0][0]) * SCALE))
+        base = len(halves)
+        layout.append(len(line))
+        for i, (q, anchor, width, rgba) in enumerate(line):
+            m = gen_now if space == SPACE_FOLLOW or anchor is None else _birth_matrix(ob, scene, anchor, gen_now)
+            verts.extend(to_local @ (m @ (Vector(q) * SCALE)))
+            halves.append(LINE_HALF_WIDTH * SCALE if hairline else width * SCALE * unit)
+            v = 1.0 - i / last
+            uv_l.extend((a * u_left + b * v + ou, c * u_left + d * v + ov))
+            uv_r.extend((a * u_right + b * v + ou, c * u_right + d * v + ov))
+            colors.extend((rgba[0], rgba[1], rgba[2], rgba[3] * s.alpha * fade))
             if i:
-                j = base + 2 * i
-                faces.append((j - 2, j - 1, j + 1, j))
+                edges.append((base + i - 1, base + i))
+    return (array("f", verts), edges, array("f", halves), array("f", uv_l), array("f", uv_r), array("f", colors),
+            ("line", tuple(layout)))
 
+
+def _write_line_points(ob, payload):
+    """Write a line object's points (_update_lines): the chains are rebuilt when the layout changed, else every
+    attribute is written in place."""
+    verts, edges, halves, uv_l, uv_r, colors, layout = payload
     mesh = ob.data
-    mesh.clear_geometry()
-    mesh.from_pydata(verts, [], faces)
-    _set_loop_uvs(mesh, uvs)
-    attr = mesh.color_attributes.get(EDGE_ALPHA_ATTR) or \
-        mesh.color_attributes.new(name=EDGE_ALPHA_ATTR, type="FLOAT_COLOR", domain="POINT")
-    if colors:
-        attr.data.foreach_set("color", [c for col in colors for c in col])
+    count = len(halves)
+    if _topology.get(ob.name) != layout or len(mesh.vertices) != count or len(mesh.edges) != len(edges):
+        mesh.clear_geometry()
+        mesh.from_pydata([verts[i:i + 3] for i in range(0, len(verts), 3)], edges, [])
+        _topology[ob.name] = layout
+    elif count:
+        mesh.vertices.foreach_set("co", verts)
+    if count:
+        attr = mesh.attributes.get("half") or mesh.attributes.new("half", "FLOAT", "POINT")
+        attr.data.foreach_set("value", halves)
+        for name, values in (("uv_l", uv_l), ("uv_r", uv_r)):
+            attr = mesh.attributes.get(name) or mesh.attributes.new(name, "FLOAT2", "POINT")
+            attr.data.foreach_set("vector", values)
+        attr = mesh.color_attributes.get(EDGE_ALPHA_ATTR) or \
+            mesh.color_attributes.new(name=EDGE_ALPHA_ATTR, type="FLOAT_COLOR", domain="POINT")
+        attr.data.foreach_set("color", colors)
     mesh.update()
 
 
@@ -654,14 +785,35 @@ def _world_scale(info, gen_now):
     return sum(gen_now.to_scale()) / 3.0
 
 
-def _set_loop_uvs(mesh, uvs):
-    """Per-vertex UVs onto the loops in one bulk call."""
+def _ribbon_payload(verts, faces, uvs, colors, layout):
+    """A ribbon / trail mesh as compact arrays (cached per frame by update_object). The UVs are per loop, in the
+    order the faces list their vertices (from_pydata keeps it), so a write needs no lookup of the mesh's loops."""
+    return (array("f", [c for v in verts for c in v]), faces,
+            array("f", [c for face in faces for i in face for c in uvs[i]]),
+            array("f", [c for col in colors for c in col]), layout)
+
+
+def _write_ribbons(ob, verts, faces, uvs, colors, layout):
+    """Write a ribbon / trail mesh (_ribbon_payload). When its layout (the point count of every ribbon) is the one
+    the mesh already has, only the positions, UVs and colours change: they're written in place instead of
+    rebuilding the mesh."""
+    mesh = ob.data
+    count = len(verts) // 3
+    same = _topology.get(ob.name) == layout and len(mesh.vertices) == count and len(mesh.polygons) == len(faces)
+    if same:
+        mesh.vertices.foreach_set("co", verts)
+    else:
+        mesh.clear_geometry()
+        mesh.from_pydata([verts[i:i + 3] for i in range(0, len(verts), 3)], [], faces)
+        _topology[ob.name] = layout
     uv_layer = mesh.uv_layers.get("UVMap") or mesh.uv_layers.new(name="UVMap")
-    if not uvs or not len(mesh.loops):
-        return
-    vertex_index = [0] * len(mesh.loops)
-    mesh.loops.foreach_get("vertex_index", vertex_index)
-    uv_layer.data.foreach_set("uv", [c for i in vertex_index for c in uvs[i]])
+    if len(uvs) and len(uvs) == 2 * len(mesh.loops):   # per-loop UVs (_ribbon_payload)
+        uv_layer.data.foreach_set("uv", uvs)
+    attr = mesh.color_attributes.get(EDGE_ALPHA_ATTR) or \
+        mesh.color_attributes.new(name=EDGE_ALPHA_ATTR, type="FLOAT_COLOR", domain="POINT")
+    if len(colors):
+        attr.data.foreach_set("color", colors)
+    mesh.update()
 
 
 def _catmull_rom(points, divisions):
@@ -690,7 +842,7 @@ def _update_strips(ob, scene, info):
     gen_now = generator.matrix_world.copy() if generator is not None else Matrix.Identity(4)
     to_local = ob.matrix_world.inverted()
 
-    verts, faces, uvs, colors = [], [], [], []
+    verts, faces, uvs, colors, layout = [], [], [], [], []
     camera = _camera_matrix(scene)
     culling = _Culling(info, gen_now, camera.translation if camera is not None else None)
     orient = info.get("orient") or {}
@@ -722,6 +874,7 @@ def _update_strips(ob, scene, info):
         ra, rb, ou, rc, rd, ov = _frame_row(rows, seq_offsets, seq_counts, s)[:6]
         fade = culling.fade((a_pts[0] + b_pts[0]) / 2)
         base = len(verts)
+        layout.append(len(a_pts))
         for i, (pa, pb) in enumerate(zip(a_pts, b_pts)):
             t = lengths[i] / total
             color = tuple(h + (tl - h) * t for h, tl in zip(head, tail))
@@ -734,15 +887,7 @@ def _update_strips(ob, scene, info):
                 j = base + 2 * i
                 faces.append((j - 2, j, j + 1, j - 1))
 
-    mesh = ob.data
-    mesh.clear_geometry()
-    mesh.from_pydata(verts, [], faces)
-    _set_loop_uvs(mesh, uvs)
-    attr = mesh.color_attributes.get(EDGE_ALPHA_ATTR) or \
-        mesh.color_attributes.new(name=EDGE_ALPHA_ATTR, type="FLOAT_COLOR", domain="POINT")
-    if colors:
-        attr.data.foreach_set("color", [c for col in colors for c in col])
-    mesh.update()
+    return _ribbon_payload(verts, faces, uvs, colors, ("strip", tuple(layout)))
 
 
 # -- facing the viewport ----------------------------------------------------------------------------------
@@ -854,12 +999,20 @@ def _on_frame_change_post(scene, depsgraph=None):
             continue
         generator = ob.get("efl_generator")
         if generator is not None:
-            _history.setdefault(ob.name, {})[scene.frame_current] = generator.matrix_world.copy()
+            history = _history.setdefault(ob.name, {})
+            frame, matrix = scene.frame_current, generator.matrix_world.copy()
+            if history.get(frame) != matrix:   # later frames computed without (or with another) motion are stale
+                cached = _frames.get(ob.name)
+                if cached:
+                    for later in [f for f in cached if f > frame]:
+                        del cached[later]
+            history[frame] = matrix
 
 
 @persistent
 def _on_load(_dummy=None):
     _cache.clear()
+    _window.clear()
     _table_cache.clear()
     _history.clear()
     _view["on"], _view["matrix"] = False, None
@@ -1082,6 +1235,115 @@ def _move_direction(ob, scene, p, s, frame, gen_now, world_m, space):
         m = gen_now if s.anchor is None else world_m
         d = m.to_3x3() @ delta
     return d.normalized() if d.length > 1e-9 else None
+
+
+def _ribbon_node_group():
+    """Camera-facing strips from point chains (the line objects' meshes): each point moves +/- its `half` along
+    normalize((next - previous) x (Eye - point)) (next / previous within its chain, the point itself at an end), the
+    UVs come from the points' uv_l / uv_r, EdgeAlpha rides along. Curve to Mesh with a free normal: the profile's
+    X axis (-1 .. 1, scaled by the point's radius) follows the normal, and its point attributes propagate."""
+    ng = bpy.data.node_groups.get(LINE_NODE_GROUP)
+    if ng is not None:
+        return ng
+    ng = bpy.data.node_groups.new(LINE_NODE_GROUP, "GeometryNodeTree")
+    ng.interface.new_socket("Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
+    eye = ng.interface.new_socket(LINE_EYE, in_out="INPUT", socket_type="NodeSocketVector")
+    eye.default_value = (0.0, 0.0, 1.0e6)
+    ng.interface.new_socket(LINE_MATERIAL, in_out="INPUT", socket_type="NodeSocketMaterial")
+    ng.interface.new_socket("Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+    nodes, links = ng.nodes, ng.links
+    group_in, group_out = nodes.new("NodeGroupInput"), nodes.new("NodeGroupOutput")
+
+    def attr(name, data_type):
+        n = nodes.new("GeometryNodeInputNamedAttribute")
+        n.data_type = data_type
+        n.inputs["Name"].default_value = name
+        return n.outputs["Attribute"]
+
+    def vmath(op, a, b=None):
+        n = nodes.new("ShaderNodeVectorMath")
+        n.operation = op
+        links.new(a, n.inputs[0])
+        if b is not None:
+            links.new(b, n.inputs[1])
+        return n.outputs["Value" if op == "LENGTH" else "Vector"]
+
+    def switch(kind, condition, when_false, when_true):
+        n = nodes.new("GeometryNodeSwitch")
+        n.input_type = kind
+        links.new(condition, n.inputs["Switch"])
+        links.new(when_false, n.inputs["False"])
+        links.new(when_true, n.inputs["True"])
+        return n.outputs["Output"]
+
+    def less(value, limit):
+        n = nodes.new("FunctionNodeCompare")
+        n.data_type, n.operation = "FLOAT", "LESS_THAN"
+        links.new(value, n.inputs["A"])
+        n.inputs["B"].default_value = limit
+        return n.outputs["Result"]
+
+    curve = nodes.new("GeometryNodeMeshToCurve")
+    links.new(group_in.outputs["Geometry"], curve.inputs["Mesh"])
+    index = nodes.new("GeometryNodeInputIndex").outputs["Index"]
+    position = nodes.new("GeometryNodeInputPosition").outputs["Position"]
+    neighbours = []
+    for offset in (1, -1):   # the next / previous point of the same chain, or the point itself at a chain end
+        step = nodes.new("GeometryNodeOffsetPointInCurve")
+        links.new(index, step.inputs["Point Index"])
+        step.inputs["Offset"].default_value = offset
+        at = switch("INT", step.outputs["Is Valid Offset"], index, step.outputs["Point Index"])
+        sample = nodes.new("GeometryNodeSampleIndex")
+        sample.data_type, sample.domain = "FLOAT_VECTOR", "POINT"
+        links.new(curve.outputs["Curve"], sample.inputs["Geometry"])
+        links.new(position, sample.inputs["Value"])
+        links.new(at, sample.inputs["Index"])
+        neighbours.append(sample.outputs["Value"])
+    tangent = vmath("SUBTRACT", neighbours[0], neighbours[1])
+    view = vmath("SUBTRACT", group_in.outputs[LINE_EYE], position)
+    side = vmath("CROSS_PRODUCT", tangent, view)
+    up = nodes.new("FunctionNodeInputVector")
+    up.vector = (0.0, 0.0, 1.0)
+    fallback = vmath("CROSS_PRODUCT", tangent, up.outputs["Vector"])   # eye along the tangent: any side will do
+    side = switch("VECTOR", less(vmath("LENGTH", side), 1e-12), side, fallback)
+    right = nodes.new("FunctionNodeInputVector")
+    right.vector = (1.0, 0.0, 0.0)
+    side = switch("VECTOR", less(vmath("LENGTH", side), 1e-12), side, right.outputs["Vector"])
+    normal = nodes.new("GeometryNodeSetCurveNormal")
+    normal.mode = "FREE"
+    links.new(curve.outputs["Curve"], normal.inputs["Curve"])
+    links.new(vmath("NORMALIZE", side), normal.inputs["Normal"])
+    radius = nodes.new("GeometryNodeSetCurveRadius")
+    links.new(normal.outputs["Curve"], radius.inputs["Curve"])
+    links.new(attr("half", "FLOAT"), radius.inputs["Radius"])
+    profile = nodes.new("GeometryNodeCurvePrimitiveLine")
+    profile.inputs["Start"].default_value = (-1.0, 0.0, 0.0)
+    profile.inputs["End"].default_value = (1.0, 0.0, 0.0)
+    side_k = nodes.new("GeometryNodeStoreNamedAttribute")   # 0 on the profile's first point, 1 on its second
+    side_k.data_type, side_k.domain = "FLOAT", "POINT"
+    side_k.inputs["Name"].default_value = "side_k"
+    links.new(profile.outputs["Curve"], side_k.inputs["Geometry"])
+    links.new(nodes.new("GeometryNodeInputIndex").outputs["Index"], side_k.inputs["Value"])
+    strip = nodes.new("GeometryNodeCurveToMesh")
+    links.new(radius.outputs["Curve"], strip.inputs["Curve"])
+    links.new(side_k.outputs["Geometry"], strip.inputs["Profile Curve"])
+    # UVs: left edge uv_l, right edge uv_r (point attributes of the chain, carried to both strip vertices)
+    span = vmath("SUBTRACT", attr("uv_r", "FLOAT_VECTOR"), attr("uv_l", "FLOAT_VECTOR"))
+    scaled = nodes.new("ShaderNodeVectorMath")
+    scaled.operation = "SCALE"
+    links.new(span, scaled.inputs[0])
+    links.new(attr("side_k", "FLOAT"), scaled.inputs["Scale"])
+    uv = vmath("ADD", attr("uv_l", "FLOAT_VECTOR"), scaled.outputs["Vector"])
+    store = nodes.new("GeometryNodeStoreNamedAttribute")
+    store.data_type, store.domain = "FLOAT2", "CORNER"
+    store.inputs["Name"].default_value = "UVMap"
+    links.new(strip.outputs["Mesh"], store.inputs["Geometry"])
+    links.new(uv, store.inputs["Value"])
+    material = nodes.new("GeometryNodeSetMaterial")   # the strip is new geometry: it needs the ribbon material
+    links.new(store.outputs["Geometry"], material.inputs["Geometry"])
+    links.new(group_in.outputs[LINE_MATERIAL], material.inputs["Material"])
+    links.new(material.outputs["Geometry"], group_out.inputs["Geometry"])
+    return ng
 
 
 def _model_node_group():

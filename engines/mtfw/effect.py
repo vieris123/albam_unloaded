@@ -875,12 +875,25 @@ def _chain_option(record):
 
 
 def _model_base_image(material):
-    """The base texture of an imported .mod material (the image feeding Albam's "Diffuse BM" input), or None."""
+    """The base texture of an imported .mod material: the image feeding Albam's "Diffuse BM" input, directly or
+    through other nodes (a material with a detail map or vertex colours mixes it in a Vector Math / Mix node first:
+    effect\\mod\\ene\\ee099\\ee099_01's second material), or None."""
     if material is None or not material.use_nodes:
         return None
-    for link in material.node_tree.links:
-        if link.to_socket.name == "Diffuse BM" and link.from_node.type == "TEX_IMAGE":
-            return link.from_node.image
+    links = material.node_tree.links
+    feeding = {}   # node -> the nodes linked into it
+    for link in links:
+        feeding.setdefault(link.to_node, []).append(link.from_node)
+    start = [link.from_node for link in links if link.to_socket.name == "Diffuse BM"]
+    seen, queue = set(), list(start)
+    while queue:   # breadth first: the nearest image upstream of the input
+        node = queue.pop(0)
+        if node in seen:
+            continue
+        seen.add(node)
+        if node.type == "TEX_IMAGE" and node.image is not None:
+            return node.image
+        queue.extend(feeding.get(node, ()))
     return None
 
 

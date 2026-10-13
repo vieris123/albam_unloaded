@@ -145,6 +145,7 @@ def create_ean_object(name, anim, data, collection, image=None):
     mesh.materials.append(_material(name, image))
     ob = bpy.data.objects.new(f"EAN_{name}", mesh)
     ob.display_type = "WIRE"
+    ob.hide_render = True   # an editing helper (frames laid out like the sheet), never part of the effect's look
     collection.objects.link(ob)
     ob[SIZE_KEY] = list(size)
     set_data(ob, {"version": anim.version, "option_flag": anim.option_flag,

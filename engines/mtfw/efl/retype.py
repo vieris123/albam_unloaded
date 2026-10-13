@@ -150,6 +150,30 @@ def _extension_names(block):
     return words | fields, bits
 
 
+def refit_fix_points(old, count):
+    """A FIX line block (LineType 1) storing `count` points instead of its LineOfsNum: the points it has stay, new
+    ones continue the line by its last step (10 cm along +Y for a single point); keyframes and collision / culling
+    data come along. Returns (block, notes)."""
+    if variant_of(old) != 1 or old.type not in schema.LINE_PTCL_TYPES:
+        raise RetypeError("only FIX lines store points")
+    width = old.struct.bits_by_name["LineOfsNum"].width
+    if not 1 <= count < 1 << width:
+        raise RetypeError(f"a FIX line stores 1 to {(1 << width) - 1} points")
+    have = old.get("LineOfsNum")
+    points = [list(old.get(f"FixPoint{i}")) for i in range(have) if old.has(f"FixPoint{i}")]
+    probe = Block(old.kind, old.type, struct_bytes(old))
+    probe.set("LineOfsNum", count)
+    size = schema.extended_struct(schema.struct_for(old.kind, old.type), ("line", 1, count)).size
+    template = Block(old.kind, old.type, bytes(probe.data[:size]) + bytes(max(size - len(probe.data), 0)))
+    step = [b - a for a, b in zip(points[-2], points[-1])] if len(points) >= 2 else [0.0, 10.0, 0.0]
+    last = points[-1] if points else [0.0, 0.0, 0.0]
+    for i in range(count):
+        k = i - len(points) + 1
+        template.set(f"FixPoint{i}", points[i] if i < len(points) else [c + s * k for c, s in zip(last, step)])
+    new, notes = retype(old, old.type, template, 1)
+    return new, [f"{have} -> {count} stored points"] + notes[2:]
+
+
 def retype(old, new_type, template=None, variant=None):
     """New Block of new_type for old's slot. template: a Block of that type (and variant), or None for DEFAULTS.
     Returns (block, notes)."""

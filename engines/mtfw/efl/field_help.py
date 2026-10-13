@@ -316,8 +316,8 @@ HELP = {
     'ptcl:ClothType': (
         'Shape of a cloth line (cloth particle types, LineType 5): 0 CHAIN, a rope from the particle to a tail point '
         'that sags under a constant pull; 1 CURVE, a smooth bend between the two ends; 2 ZIGZAG, the bend plus random'
-        ' jitter that looks like lightning. Each type has its own extra settings after the block, so switching only '
-        'works if that data is there.'
+        ' jitter that looks like lightning. Each type has its own extra settings after the block: changing it rebuilds '
+        'the block with that type\'s settings from a game example (as Change Type does), keeping the shared fields.'
     ),
     'ptcl:Color0': (
         'Tint colour and alpha of the particle; the texture is multiplied by it. Lower the alpha to make the particle'
@@ -517,7 +517,8 @@ HELP = {
     'ptcl:LineOfsNum': (
         'Number of points in each line, or in a PolygonStrip trail. For FOLLOW trails and sword trails one point is '
         'added per frame, so this is the trail length in frames; more points give a longer, smoother line. For FIX '
-        'lines it is the number of stored points.'
+        'lines it is the number of stored points (FixPoint0, 1 ...): changing it adds points continuing the line, or '
+        'drops the last ones.'
     ),
     'ptcl:LineRot': (
         'Direction of the stick (LineType LENGTH): angles in radians that turn the LineRotAxisType axis, applied in '
@@ -544,8 +545,9 @@ HELP = {
     'ptcl:LineType': (
         "How the line's points are placed. 0 FOLLOW: a trail of the particle's last positions; 1 FIX: a fixed shape "
         'stored in the file; 2 FIX_END: the trail pulled back toward the spawn point; 3 CHAIN: a hanging rope; 4 '
-        'LENGTH: a rigid stick; 5 CLOTH: used by the cloth types. FIX, CHAIN and LENGTH need their own extra settings'
-        ' after the block, so switching a record to one of them only works if that data is there.'
+        'LENGTH: a rigid stick; 5 CLOTH: used by the cloth types. FIX, CHAIN and LENGTH have their own extra settings'
+        ' after the block: changing the type rebuilds the block with them, taken from a game example (as Change Type '
+        'does), keeping the shared fields and keyframes.'
     ),
     'ptcl:MaskMapPath': (
         'Probably a mask texture (game path without extension). Almost never used; leave it empty unless the original'

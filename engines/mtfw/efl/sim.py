@@ -1158,24 +1158,45 @@ class Rope:
         return tuple(x * wa + y * (1 - wa) for x, y in zip(a, b))
 
     def _step(self):
+        """One root-to-tip pass (moveChain 0x994C20). Written out per component, with every operation in the order
+        of the original tuple form (_accel and the per-axis expressions), so the results are bit-identical; it is
+        the hot loop of rope-heavy effects (`tests/corpus/sim_all.py`, ropes on every CHAIN line)."""
         seg = self.length * self.scale
         frame_inf, vertex_inf = self.p["frame_inf"], self.p["vertex_inf"]
+        acc_k = self.p["acc"]
+        ax, ay, az = self._pull(0)
+        ax, ay, az = ax * acc_k, ay * acc_k, az * acc_k
+        blend = self.p["blend_rate"]
+        if blend:
+            bx, by, bz = self._pull(1)
+            bx, by, bz = bx * acc_k, by * acc_k, bz * acc_k
+            last = self.n - 1
         pos, vel = list(self.pos), list(self.vel)
+        px, py, pz = pos[0]
         for i in range(1, self.n):
-            acc = self._accel(i)
-            v = tuple(x * frame_inf + a for x, a in zip(vel[i], acc))
-            d = tuple(a - b for a, b in zip(pos[i - 1], pos[i]))
-            length = math.sqrt(sum(c * c for c in d))
+            if blend:
+                wa = self._weight(i / last)
+                wb = 1 - wa
+                gx, gy, gz = ax * wa + bx * wb, ay * wa + by * wb, az * wa + bz * wb
+            else:
+                gx, gy, gz = ax, ay, az
+            vx, vy, vz = vel[i]
+            vx, vy, vz = vx * frame_inf + gx, vy * frame_inf + gy, vz * frame_inf + gz
+            qx, qy, qz = pos[i]
+            dx, dy, dz = px - qx, py - qy, pz - qz
+            length = math.sqrt(dx * dx + dy * dy + dz * dz)
             if length > seg and length > 1e-8:
-                v = tuple(x + c * ((length - seg) / length) * vertex_inf for x, c in zip(v, d))
-            q = tuple(a + b for a, b in zip(pos[i], v))
-            d = tuple(a - b for a, b in zip(pos[i - 1], q))
-            length = math.sqrt(sum(c * c for c in d))
+                k = (length - seg) / length
+                vx, vy, vz = vx + dx * k * vertex_inf, vy + dy * k * vertex_inf, vz + dz * k * vertex_inf
+            qx, qy, qz = qx + vx, qy + vy, qz + vz
+            dx, dy, dz = px - qx, py - qy, pz - qz
+            length = math.sqrt(dx * dx + dy * dy + dz * dz)
             if length > 1e-8:
                 k = (length - seg) / length
-                q = tuple(a + c * k for a, c in zip(q, d))
-                v = tuple(x + c * k * vertex_inf for x, c in zip(v, d))
-            pos[i], vel[i] = q, v
+                qx, qy, qz = qx + dx * k, qy + dy * k, qz + dz * k
+                vx, vy, vz = vx + dx * k * vertex_inf, vy + dy * k * vertex_inf, vz + dz * k * vertex_inf
+            pos[i], vel[i] = (qx, qy, qz), (vx, vy, vz)
+            px, py, pz = qx, qy, qz
         self.pos, self.vel = pos, vel
 
     def advance(self, root_delta, move_dir=None):
@@ -1476,13 +1497,16 @@ def _line_points(p, n, pos, anchor, scale, rgba, intensity):
             end = p.pos
             points = [(tuple(h * (1 - t * t) + e * t * t for h, e in zip(q, end)), None)
                       for q, t in ((q, k / last) for k, (q, _a) in enumerate(points))]
+    factors = L.get("_factors")
+    if factors is None or len(factors) != len(points):   # size / colour gradient per point: the same every frame
+        factors = L["_factors"] = [(_gradient(i, last, *L["size_place"]), _gradient(i, last, *L["color_place"]))
+                                   for i in range(len(points))]
+    r0, g0, b0, a0 = rgba
+    r1, g1, b1, a1 = place_rgba
     out = []
-    for i, (q, a) in enumerate(points):
-        fs = _gradient(i, last, *L["size_place"])
-        fc = _gradient(i, last, *L["color_place"])
-        width = (head + (place - head) * fs) * scale
-        color = tuple(h + (pl - h) * fc for h, pl in zip(rgba, place_rgba))
-        out.append((q, a, width, color))
+    for (q, a), (fs, fc) in zip(points, factors):
+        out.append((q, a, (head + (place - head) * fs) * scale,
+                    (r0 + (r1 - r0) * fc, g0 + (g1 - g0) * fc, b0 + (b1 - b0) * fc, a0 + (a1 - a0) * fc)))
     return out
 
 

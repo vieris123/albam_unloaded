@@ -117,6 +117,14 @@ The game behaviour is known; Blender only approximates it. The other preview gap
   fps isn't a divisor of 60.
 - [x] **Timeline integration for effects.** Done 2026-10-11: start and end markers per effect (drag the start marker
   to move the effect, keys included), the simulated length follows the scene's End frame.
+- [ ] **Faster first pass for ribbon-heavy effects.** Done 2026-10-13: per-frame cache (replay / scrubbing), a
+  scalar rope step, cached gradient factors, cheaper cache signature: `ec024_60v2` first pass 34 -> 26 ms per frame,
+  replay 25 -> 8 ms, load simulation 1.2 -> 0.5 s. Ribbon strips moved to a Geometry Nodes group the same day
+  (`ALBAM_EFL_Ribbons_v1`): Python only writes the points, and orbiting with Face Viewport no longer recomputes
+  ribbons; the per-frame total stayed about the same (Blender's evaluation of the node groups costs what Python
+  saved). What's left of a first pass is particle state evaluation in `sim.state_at` (about half) spread over many
+  small per-particle steps: no single hotspot remains, so further gains need a different approach (evaluating a
+  record's particles in bulk with numpy, or caching line points per particle across frames).
 - [ ] **Keyframe UX leftovers.** A record's custom-property tracks share the Empty's action with its transform keys,
   so the Dope Sheet shows them under the object; a channel group per track is set. Possible next steps: an
   "Animate" entry in the field's right-click menu (needs the editor's items to be real RNA paths), showing the Rand

@@ -312,10 +312,35 @@ def _struct_of(ob, slot):
     return schema.struct_for_props(slot, int(props["type"]), props) if props is not None else None
 
 
-def write_field_to(ob, item, value):
+def _guard_extension(context, ob, before):
+    """After a particle field write: if it changed which extension the block needs (LineType / ClothType, a FIX
+    line's LineOfsNum, or their packed word), undo the bare write and rebuild the block for the new layout instead
+    (effect_retype.change_extension): the block would otherwise keep its old size. Returns the rebuild's notes, or
+    None when the layout didn't change; raises RetypeError / AlbamCheckFailure (the write is undone)."""
+    from .effect_retype import change_extension, extension_key_of
+    after_props = ob.get("efl_ptcl")
+    if before is None or after_props is None:
+        return None
+    after = after_props.to_dict()
+    if extension_key_of(before) == extension_key_of(after):
+        return None
+    ob["efl_ptcl"] = before
+    return change_extension(context, ob, lambda name: after.get(name))
+
+
+def write_field_to(ob, item, value, context=None):
     """Write an editor item's value into another record object, if its block has the same field (same name and
-    type, or for a bit-field the same bits of the same word); the word and its bit-fields stay in step. Returns True
-    when written."""
+    type, or for a bit-field the same bits of the same word); the word and its bit-fields stay in step, and a change
+    of the block's layout rebuilds it (_guard_extension). Returns True when written."""
+    props = ob.get("efl_ptcl") if item.slot == "ptcl" else None
+    before = props.to_dict() if props is not None else None
+    if not _write_field_raw(ob, item, value):
+        return False
+    _guard_extension(context or bpy.context, ob, before)
+    return True
+
+
+def _write_field_raw(ob, item, value):
     block_slot, _, sub_field = item.slot.partition(":")
     struct = _struct_of(ob, block_slot)
     if struct is None:
@@ -385,9 +410,17 @@ KF_HEADER = ("InpType", "RefType", "LoopFlag", "InitOnlyFlag")
 def _propagate(state, context, item, value, source):
     """All Selected: write the edit into the other selected records; note what happened in the panel."""
     others = selected_records(context, source)
-    written = [ob for ob in others if write_field_to(ob, item, value)]
+    written, failed = [], []
+    for ob in others:
+        try:
+            if write_field_to(ob, item, value, context):
+                written.append(ob)
+        except Exception as err:   # e.g. no example of the new line type: that record keeps its value
+            failed.append(f"{ob.name}: {getattr(err, 'message', err)}")
+    skipped = len(others) - len(written) - len(failed)
     state.multi_report = (f"{item.label}: written to {len(written)} more record(s)"
-                          + (f", {len(others) - len(written)} without it" if len(others) > len(written) else ""))
+                          + (f", {skipped} without it" if skipped else "")
+                          + (f", {len(failed)} failed ({failed[0]})" if failed else ""))
     roots = {effect_root(ob) for ob in written} - {None}
     if item.slot == "gen" and item.label in ("GroupFlag", "MaterialFlag"):
         for root in roots:
@@ -410,6 +443,7 @@ def _on_item_edit(item, context):
         return
     item.error = ""
     container = _container(ob, item.slot)
+    before = container.to_dict() if item.slot == "ptcl" else None   # for _guard_extension
     container[item.label] = value
     _loading = True
     try:
@@ -433,6 +467,18 @@ def _on_item_edit(item, context):
             item.image = _loaded_image(value)
     finally:
         _loading = False
+    state.edit_note = ""
+    try:
+        notes = _guard_extension(context, ob, before)
+    except Exception as err:   # the layout change can't be made: the bare write was undone
+        state.live_error = f"{item.label}: {getattr(err, 'message', err)}"
+        _queue.append(("reload", ob))
+        _schedule_timer()
+        return
+    if notes is not None:   # the block was rebuilt for its new layout: show the new fields
+        state.edit_note = f"{item.label}: the block was rebuilt for its new layout ({'; '.join(notes)})"
+        _queue.append(("reload", ob))
+        _schedule_timer()
     root = effect_root(ob)
     if item.slot == "gen" and item.label in ("GroupFlag", "MaterialFlag") and root is not None:
         effect_filter.apply_filter(root)
@@ -1024,6 +1070,7 @@ class AlbamEflEditor(bpy.types.PropertyGroup):
         name="Unverified", description="Also show fields whose meaning isn't verified in the DX9 code")
     show_notes: bpy.props.BoolProperty(name="Notes", description="Show the reverse-engineering note of each field")
     multi_report: bpy.props.StringProperty()   # what the last edit of several selected records did
+    edit_note: bpy.props.StringProperty()      # what the last edit did besides writing the value (a block rebuilt)
     show_records: bpy.props.BoolProperty(name="Records", default=True,
                                          description="Show the list of the effect's records")
     show_filter: bpy.props.BoolProperty(
@@ -1321,6 +1368,11 @@ def _run_job(job, state):
     elif kind == "material":
         for root in _material_image_changed(job[1]):
             schedule_live_apply(root)
+    elif kind == "reload":   # after an edit rebuilt a record's block: show its fields as they are now
+        ob = job[1]
+        if ob.name in bpy.data.objects and state.target == ob:
+            _kf_items.pop(ob.name, None)
+            load_record(state, ob)
     elif kind == "ean_join":
         ob = job[1]
         if ob.name in bpy.data.objects:
@@ -1917,6 +1969,8 @@ class _EflEditorDraw:
             return
 
         layout.row().prop(state, "tab", expand=True)
+        if state.edit_note:
+            layout.label(text=state.edit_note[:160], icon="INFO")
         if state.tab == "keys":
             self.draw_keys(layout, state)
             return
