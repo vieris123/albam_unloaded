@@ -35,9 +35,7 @@ try:
     bpy.ops.mesh.primitive_cube_add(size=2.0)
     cube = bpy.context.active_object
     cube.hide_set(True)
-    mod = pts.modifiers.new("GN", "NODES")
-    mod.node_group = effect_sim._node_group()
-    mod["Socket_1"] = cube
+    effect_sim._wrapped_modifier(pts, "GN", effect_sim._node_group(), instance_from=("OBJECT", cube))
     for name, value in (("rot", (0.0, 0.0, math.pi / 2)), ("scale3", (1.0, 1.0, 1.0)), ("scale_after", (2.0, 1.0, 1.0)),
                         ("p_center", (0.0, 0.0, 0.0)), ("uv_u", (1, 0, 0)), ("uv_v", (0, 1, 0)), ("tint", (1, 1, 1))):
         a = me.attributes.new(name, "FLOAT_VECTOR", "POINT")
@@ -111,7 +109,7 @@ try:
         check(max(counts) > 0, f"{rel}: particles play ({max(counts)} at most)")
         if flag == "after":
             check(sa and any(v != (1.0, 1.0, 1.0) for v in sa), f"{rel}: scale_after carries ModelScale ({sa[:1]})")
-        check(ob.modifiers[0].node_group.name == effect_sim.NODE_GROUP, f"{rel}: uses {effect_sim.NODE_GROUP}")
+        check(effect_sim.node_group_of(ob).name == effect_sim.NODE_GROUP, f"{rel}: uses {effect_sim.NODE_GROUP}")
 except Exception:
     traceback.print_exc()
     failures.append("exception")

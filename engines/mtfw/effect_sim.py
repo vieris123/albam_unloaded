@@ -30,23 +30,25 @@ from .efl.ean import ANIM_FLIP_U, ANIM_FLIP_V, flip_affine_row
 from .efl.sim import (CULL_PER_PARTICLE, ROT_ORDERS, ext_line_range, SPACE_FOLLOW, SPACE_FOLLOW_TRANSLATION, culling_fade, simulate,
                       state_at)
 
-NODE_GROUP = "ALBAM_EFL_Particles_v6"   # v1: uv_off/uv_scale; v2: affine uv_u/uv_v; v3: + tint; v4: + shape;
+NODE_GROUP = "ALBAM_EFL_Particles_v7"   # v1: uv_off/uv_scale; v2: affine uv_u/uv_v; v3: + tint; v4: + shape;
                                         # v5: + scale_after; v6: + PrimModel colour gradient (efl_grad, place_*)
 TINT_GROUPS = ("ALBAM_EFL_Particles_v3", "ALBAM_EFL_Particles_v4", "ALBAM_EFL_Particles_v5",
-               "ALBAM_EFL_Particles_v6", "ALBAM_EFL_Models_v4")   # alpha = colour alpha
+               "ALBAM_EFL_Particles_v6", "ALBAM_EFL_Particles_v7", "ALBAM_EFL_Models_v4",
+               "ALBAM_EFL_Models_v5")   # alpha = colour alpha
+WRAP_PREFIX = "ALBAM_EFL_Wrap_"   # per-object wrapper groups holding the IDs the shared groups work on (see _wrapped_modifier)
 GRADIENT_ATTR = "efl_grad"   # PrimModel source vertices: factor toward colour B (efl/primmodel.py)
 UV_STRIDE = 8                           # per pattern: a, b, off_u, c, d, off_v, width px, height px
 GAME_FPS = 60.0
 SCALE = 0.01
 SIM_KEY = "efl_sim"
 LINE_KINDS = (1, 3, 4, 12, 13, 14)   # Polyline, Texline, Line + cloth variants: ribbons (points + Geometry Nodes)
-LINE_NODE_GROUP = "ALBAM_EFL_Ribbons_v1"   # camera-facing strips from point chains (effect_sim._ribbon_node_group)
+LINE_NODE_GROUP = "ALBAM_EFL_Ribbons_v2"   # camera-facing strips from point chains (effect_sim._ribbon_node_group)
 LINE_EYE = "Eye"                           # its input: the eye position in the object's space (set every update)
-LINE_MATERIAL = "Material"                 # its input: the ribbon material (Curve to Mesh carries none)
+LINE_MATERIAL = "Material"                 # v1 took the ribbon material as an input; v2's wrapper sets it (Curve to Mesh carries none)
 STRIP_KINDS = (15,)                  # PolygonStrip sword trails
 HAIRLINE_KINDS = (3, 4, 13, 14)      # 1-pixel strips in the game
 MODEL_KIND, LIGHT_KIND = 5, 10
-MODEL_NODE_GROUP = "ALBAM_EFL_Models_v4"   # v2: + UV scroll on "uv1"; v3: + scale_after; v4: + EdgeAlpha tint
+MODEL_NODE_GROUP = "ALBAM_EFL_Models_v5"   # v2: + UV scroll on "uv1"; v3: + scale_after; v4: + EdgeAlpha tint; v5: instances in
 GAME_TO_BLENDER = Matrix(((1.0, 0.0, 0.0), (0.0, 0.0, -1.0), (0.0, 1.0, 0.0)))   # game Y-up -> Blender Z-up
 BLENDER_TO_GAME = GAME_TO_BLENDER.transposed()
 MODEL_UV = "uv1"                           # Albam's first .mod UV layer
@@ -174,9 +176,7 @@ def create_sim_object(collection, name, generator, source, root, record_index, i
     ob["efl_root"] = root
     ob["efl_generator"] = generator
     ob[SIM_KEY] = dict(info, record=record_index, uv_stride=UV_STRIDE)
-    modifier = ob.modifiers.new("EFL Particles", "NODES")
-    modifier.node_group = _node_group()
-    compat.set_node_input(modifier, "Source", source)
+    _wrapped_modifier(ob, "EFL Particles", _node_group(), instance_from=("OBJECT", source))
     source.hide_viewport = True
     source.hide_render = True
     update_object(ob, bpy.context.scene)
@@ -193,9 +193,7 @@ def create_model_object(collection, name, generator, root, record_index, info, s
     ob["efl_root"] = root
     ob["efl_generator"] = generator
     ob[SIM_KEY] = dict(info, record=record_index, uv_stride=UV_STRIDE)
-    modifier = ob.modifiers.new("EFL Model Particles", "NODES")
-    modifier.node_group = _model_node_group()
-    compat.set_node_input(modifier, "Collection", source_collection)
+    _wrapped_modifier(ob, "EFL Model Particles", _model_node_group(), instance_from=("COLLECTION", source_collection))
     update_object(ob, bpy.context.scene)
     return ob
 
@@ -239,28 +237,103 @@ def create_line_object(collection, name, generator, root, record_index, info, ma
     return ob
 
 
+def _wrapped_modifier(ob, label, inner, instance_from=None, material=None):
+    """A node-group modifier running `inner` through a wrapper group of this object's own, which holds the
+    per-object values as node defaults: `instance_from` = ("OBJECT", source) or ("COLLECTION", collection) feeds
+    the inner group's "Instance" geometry (Object / Collection Info, original space, separate children),
+    `material` is set on the result, and the inner group's other inputs (the ribbons' Eye) are the Group node's
+    socket defaults (`_wrapper_call`). Why not modifier inputs: on Blender 5.4 (2026-10-14) a modifier input set
+    from Python (`properties.inputs`) never reaches the evaluation, and an Object / Collection / Material one hangs
+    the depsgraph for good (a trivial Object Info group hangs the same way), while node defaults work there and on
+    4.2. The wrapper is named after the object (WRAP_PREFIX) and orphaned with it."""
+    wrapper = bpy.data.node_groups.new(WRAP_PREFIX + ob.name, "GeometryNodeTree")
+    wrapper.interface.new_socket("Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
+    wrapper.interface.new_socket("Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+    nodes, links = wrapper.nodes, wrapper.links
+    group_in, group_out = nodes.new("NodeGroupInput"), nodes.new("NodeGroupOutput")
+    group_in.location, group_out.location = (-600, 0), (400, 0)
+    call = nodes.new("GeometryNodeGroup")
+    call.node_tree = inner
+    links.new(group_in.outputs["Geometry"], call.inputs["Geometry"])
+    if instance_from is not None:
+        kind, value = instance_from
+        if kind == "OBJECT":
+            info = nodes.new("GeometryNodeObjectInfo")
+            info.inputs["Object"].default_value = value
+            out = info.outputs["Geometry"]
+        else:
+            info = nodes.new("GeometryNodeCollectionInfo")
+            info.inputs["Separate Children"].default_value = True
+            info.inputs["Reset Children"].default_value = False
+            info.inputs["Collection"].default_value = value
+            out = info.outputs["Instances"]
+        info.transform_space = "ORIGINAL"
+        info.location = (-600, -250)
+        links.new(out, call.inputs["Instance"])
+    result = call.outputs["Geometry"]
+    if material is not None:
+        setm = nodes.new("GeometryNodeSetMaterial")
+        setm.location = (200, 0)
+        setm.inputs["Material"].default_value = material
+        links.new(result, setm.inputs["Geometry"])
+        result = setm.outputs["Geometry"]
+    links.new(result, group_out.inputs["Geometry"])
+    modifier = ob.modifiers.new(label, "NODES")
+    modifier.node_group = wrapper
+    return modifier
+
+
+def inner_group(group):
+    """The shared Albam group a modifier's node group runs (through its wrapper), or the group itself."""
+    if group is not None and group.name.startswith(WRAP_PREFIX):
+        call = next((n for n in group.nodes if n.type == "GROUP" and n.node_tree is not None), None)
+        return call.node_tree if call is not None else group
+    return group
+
+
+def node_group_of(ob):
+    """The shared Albam group behind an effect object's first node-group modifier, or None."""
+    modifier = ob.modifiers[0] if ob.modifiers else None
+    if modifier is None or modifier.type != "NODES":
+        return None
+    return inner_group(modifier.node_group)
+
+
+def _wrapper_material(modifier):
+    if modifier.node_group is None or not modifier.node_group.name.startswith(WRAP_PREFIX):
+        return None
+    return next((n for n in modifier.node_group.nodes if n.type == "SET_MATERIAL"), None)
+
+
+def _wrapper_call(modifier):
+    """The Group node running the shared group inside a wrapper modifier (its inputs hold per-object values)."""
+    if modifier.node_group is None or not modifier.node_group.name.startswith(WRAP_PREFIX):
+        return None
+    return next((n for n in modifier.node_group.nodes if n.type == "GROUP" and n.node_tree is not None), None)
+
+
 def _ensure_ribbon_modifier(ob):
-    """The Ribbons node group on a line object (added to objects from before it existed too)."""
-    modifier = next((m for m in ob.modifiers if m.type == "NODES" and m.node_group is not None
-                     and m.node_group.name == LINE_NODE_GROUP), None)
+    """The Ribbons node group on a line object (added to objects from before it existed, or from before its
+    wrapper, too)."""
+    modifier = next((m for m in ob.modifiers if m.type == "NODES" and inner_group(m.node_group) is not None
+                     and inner_group(m.node_group).name == LINE_NODE_GROUP and _wrapper_material(m) is not None), None)
+    material = ob.data.materials[0] if ob.data.materials else None
     if modifier is None:
         for old in [m for m in ob.modifiers if m.type == "NODES"]:
             ob.modifiers.remove(old)
-        modifier = ob.modifiers.new("EFL Ribbons", "NODES")
-        modifier.node_group = _ribbon_node_group()
+        modifier = _wrapped_modifier(ob, "EFL Ribbons", _ribbon_node_group(), material=material)
         _topology.pop(ob.name, None)   # the mesh holds points now, not strips
-    material = ob.data.materials[0] if ob.data.materials else None
-    if compat.get_node_input(modifier, LINE_MATERIAL) != material:
-        compat.set_node_input(modifier, LINE_MATERIAL, material)
+    setm = _wrapper_material(modifier)
+    if setm.inputs["Material"].default_value != material:
+        setm.inputs["Material"].default_value = material
     return modifier
 
 
 def _set_eye(ob, eye):
-    """The eye position (object space) the ribbons face, on the modifier."""
-    modifier = _ensure_ribbon_modifier(ob)
-    current = compat.get_node_input(modifier, LINE_EYE)
-    if current is None or tuple(current) != tuple(eye):
-        compat.set_node_input(modifier, LINE_EYE, tuple(eye))
+    """The eye position (object space) the ribbons face: the Eye socket of the wrapper's Group node."""
+    socket = _wrapper_call(_ensure_ribbon_modifier(ob)).inputs[LINE_EYE]
+    if tuple(socket.default_value) != tuple(eye):
+        socket.default_value = tuple(eye)
 
 
 def frame_tables(anim, image, anim_flag, ean_module):
@@ -517,8 +590,8 @@ def _point_payload(ob, scene, info):
     """The point attributes of an instanced system (Billboard / Polygon / PrimModel / Model) at the current frame:
     {attribute: (domain type, array)} plus "co" and the point count."""
     rows, seq_offsets, seq_counts, sized = _tables(info, ob)
-    v3 = ob.modifiers and ob.modifiers[0].type == "NODES" and ob.modifiers[0].node_group is not None and \
-        ob.modifiers[0].node_group.name.startswith(TINT_GROUPS)
+    group = node_group_of(ob)
+    v3 = group is not None and group.name.startswith(TINT_GROUPS)
     frame = _game_frame(ob, scene)
     alive = _alive_states(ob, frame)
 
@@ -1241,7 +1314,6 @@ def _ribbon_node_group():
     ng.interface.new_socket("Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
     eye = ng.interface.new_socket(LINE_EYE, in_out="INPUT", socket_type="NodeSocketVector")
     eye.default_value = (0.0, 0.0, 1.0e6)
-    ng.interface.new_socket(LINE_MATERIAL, in_out="INPUT", socket_type="NodeSocketMaterial")
     ng.interface.new_socket("Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
     nodes, links = ng.nodes, ng.links
     group_in, group_out = nodes.new("NodeGroupInput"), nodes.new("NodeGroupOutput")
@@ -1319,6 +1391,8 @@ def _ribbon_node_group():
     strip = nodes.new("GeometryNodeCurveToMesh")
     links.new(radius.outputs["Curve"], strip.inputs["Curve"])
     links.new(side_k.outputs["Geometry"], strip.inputs["Profile Curve"])
+    if "Scale" in strip.inputs:   # Blender 5: the profile is scaled by this input, not by the curve radius
+        links.new(attr("half", "FLOAT"), strip.inputs["Scale"])
     # UVs: left edge uv_l, right edge uv_r (point attributes of the chain, carried to both strip vertices)
     span = vmath("SUBTRACT", attr("uv_r", "FLOAT_VECTOR"), attr("uv_l", "FLOAT_VECTOR"))
     scaled = nodes.new("ShaderNodeVectorMath")
@@ -1331,10 +1405,7 @@ def _ribbon_node_group():
     store.inputs["Name"].default_value = "UVMap"
     links.new(strip.outputs["Mesh"], store.inputs["Geometry"])
     links.new(uv, store.inputs["Value"])
-    material = nodes.new("GeometryNodeSetMaterial")   # the strip is new geometry: it needs the ribbon material
-    links.new(store.outputs["Geometry"], material.inputs["Geometry"])
-    links.new(group_in.outputs[LINE_MATERIAL], material.inputs["Material"])
-    links.new(material.outputs["Geometry"], group_out.inputs["Geometry"])
+    links.new(store.outputs["Geometry"], group_out.inputs["Geometry"])   # the wrapper sets the ribbon material
     return ng
 
 
@@ -1345,19 +1416,14 @@ def _model_node_group():
         return ng
     ng = bpy.data.node_groups.new(MODEL_NODE_GROUP, "GeometryNodeTree")
     ng.interface.new_socket("Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
-    ng.interface.new_socket("Collection", in_out="INPUT", socket_type="NodeSocketCollection")
-    ng.interface.new_socket("Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+    ng.interface.new_socket("Instance", in_out="INPUT", socket_type="NodeSocketGeometry")   # the collection's
+    ng.interface.new_socket("Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")   # children (wrapper)
     nodes, links = ng.nodes, ng.links
     group_in, group_out = nodes.new("NodeGroupInput"), nodes.new("NodeGroupOutput")
-    info = nodes.new("GeometryNodeCollectionInfo")
-    info.transform_space = "ORIGINAL"
-    info.inputs["Separate Children"].default_value = True
-    info.inputs["Reset Children"].default_value = False
-    links.new(group_in.outputs["Collection"], info.inputs["Collection"])
     instance = nodes.new("GeometryNodeInstanceOnPoints")
     instance.inputs["Pick Instance"].default_value = True
     links.new(group_in.outputs["Geometry"], instance.inputs["Points"])
-    links.new(info.outputs["Instances"], instance.inputs["Instance"])
+    links.new(group_in.outputs["Instance"], instance.inputs["Instance"])
 
     def attr(name, data_type):
         n = nodes.new("GeometryNodeInputNamedAttribute")
@@ -1406,8 +1472,8 @@ def _node_group():
         return ng
     ng = bpy.data.node_groups.new(NODE_GROUP, "GeometryNodeTree")
     ng.interface.new_socket("Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
-    ng.interface.new_socket("Source", in_out="INPUT", socket_type="NodeSocketObject")
-    ng.interface.new_socket("Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+    ng.interface.new_socket("Instance", in_out="INPUT", socket_type="NodeSocketGeometry")   # the source shape
+    ng.interface.new_socket("Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")   # (from the wrapper)
     nodes, links = ng.nodes, ng.links
 
     def node(kind, x, y, **props):
@@ -1424,12 +1490,9 @@ def _node_group():
 
     group_in = node("NodeGroupInput", -900, 0)
     group_out = node("NodeGroupOutput", 1500, 0)
-    info = node("GeometryNodeObjectInfo", -700, -200, transform_space="ORIGINAL")
-    links.new(group_in.outputs["Source"], info.inputs["Object"])
-
     instance = node("GeometryNodeInstanceOnPoints", -400, 0)
     links.new(group_in.outputs["Geometry"], instance.inputs["Points"])
-    links.new(info.outputs["Geometry"], instance.inputs["Instance"])
+    links.new(group_in.outputs["Instance"], instance.inputs["Instance"])
     links.new(attr("rot", "FLOAT_VECTOR", -700, -400).outputs["Attribute"], instance.inputs["Rotation"])
     links.new(attr("scale3", "FLOAT_VECTOR", -700, -550).outputs["Attribute"], instance.inputs["Scale"])
     realize = node("GeometryNodeRealizeInstances", -200, 0)

@@ -6,6 +6,9 @@
   Every action Albam makes has one slot, so the helpers take the action and use the owner's slot when the owner is
   given and plays it, else the action's first slot (made with id type OBJECT when `ensure`).
 - Geometry Nodes modifier inputs: `modifier["Socket_n"]` in 4.2, `modifier.properties.inputs["Socket_n"]` in 5.
+  On the 5.4 build installed on 2026-10-14 the latter is unusable (a value set this way never reaches the
+  evaluation; an ID value hangs the depsgraph), so the effect code keeps per-object values as node defaults in a
+  wrapper group instead (`effect_sim._wrapped_modifier`) and these helpers are kept for simple cases only.
 - Set Curve Normal: the mode is a node property in 4.2 and a menu socket "Mode" in 5 ("Minimum Twist" / "Z Up" /
   "Free").
 """

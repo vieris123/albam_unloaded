@@ -1,12 +1,15 @@
 from ctypes import Structure, Union, c_ulonglong, c_double, c_uint64, c_uint8
 from enum import Enum
 
+import base64
 import ctypes
+import json
 import math
 import io
 import struct
 import numpy as np
 import bpy
+from bpy.app.handlers import persistent
 from kaitaistruct import KaitaiStream
 from mathutils import Euler, Matrix, Vector, Quaternion
 from io import BytesIO
@@ -58,13 +61,13 @@ def load_lmt(file_item, context):
     lmt = Lmt(KaitaiStream(io.BytesIO(lmt_bytes)))
     lmt._read()
     armature = context.scene.albam.import_options_lmt.armature
-    renamed_bone_flag = context.scene.albam.import_options_lmt.renamed_bone_flag
     mapping = _create_bone_mapping(armature)
 
     lmt_group = context.scene.albam.lmt_groups.add(file_item.display_name)
     lmt_group.num_slots = lmt.num_block_offsets
     lmt_group.armature = armature
     lmt_group.export_path = getattr(file_item, "absolute_path", "")
+    kept_joints, kept_usages = set(), set()
 
     context.scene.render.fps = FRAMERATE
 
@@ -101,20 +104,22 @@ def load_lmt(file_item, context):
 
         action.use_fake_user = True
         #context.scene.albam.import_options_lmt.armature.animation_data.action = action
-        
+
+        kept = []   # tracks that don't become curves, written back as they are on export (keep_track)
         for track_index, track in enumerate(block.block_header.tracks):
             bone_index = mapping.get(str(track.bone_index))
 
-            if bone_index is None and track.bone_index == ROOT_MOTION_BONE_ID:
+            if bone_index is None and track.bone_index == ROOT_MOTION_BONE_ID and track.usage in (3, 4):
                 bone_index = _get_or_create_root_motion_bone(armature)
 
-            elif bone_index is None and track.bone_index == ROOT_UNK_BONE_ID:
-                # Probably some kind of object tracker bone (weapon?)
-                # TODO: do something with this
-                continue
             elif bone_index is None:
-                # TODO: better stats
-                print(f"bone_index not found!: [{track.bone_index}]")
+                # a joint the armature doesn't have: one of the character's other models (pl000_01.lmt animates
+                # joints 155-164 of Nero's other models), or joint 254
+                kept.append(keep_track(track, track_index))
+                if track.bone_index == ROOT_MOTION_BONE_ID:
+                    kept_usages.add(f"usage {track.usage}")
+                else:
+                    kept_joints.add(track.bone_index)
                 continue
             # if track.bone_index in HACKY_BONE_INDICES_IK_FOOT:
             #     bone_index = _get_or_create_ik_bone(armature, track.bone_index, bone_index)
@@ -123,13 +128,13 @@ def load_lmt(file_item, context):
                 TRACK_MODE = "rotation_quaternion"  # TODO: improve naming
                 action_type = 'rotation'
                 decoded_frames = decode_type_6(track.data)
-                decoded_frames = _parent_space_to_local_rot(decoded_frames, armature, bone_index)
+                decoded_frames = _parent_space_to_local_rot(decoded_frames, armature, bone_index, track.bone_index)
 
             elif track.buffer_type == 4:
                 TRACK_MODE = "rotation_quaternion"
                 action_type = 'rotation'
                 decoded_frames = decode_type_4(track.data)
-                decoded_frames = _parent_space_to_local_rot(decoded_frames, armature, bone_index)
+                decoded_frames = _parent_space_to_local_rot(decoded_frames, armature, bone_index, track.bone_index)
 
             elif track.buffer_type == 2:
                 print(f'Buffer type 2 track type {track.usage}')
@@ -137,7 +142,7 @@ def load_lmt(file_item, context):
                     TRACK_MODE = 'location'
                     action_type = 'location'
                     decoded_frames = decode_type_2(track.data)
-                    decoded_frames = _parent_space_to_local(decoded_frames, armature, bone_index)
+                    decoded_frames = _parent_space_to_local(decoded_frames, armature, bone_index, track.bone_index)
                 elif track.usage == 2:
                     TRACK_MODE = 'scale'
                     action_type = 'scale'
@@ -149,6 +154,9 @@ def load_lmt(file_item, context):
                     decoded_frames = decode_type_2(track.data)
                     world_pos_fix(decoded_frames)
                 else:
+                    # usage 5: 68 constant joint-255 tracks in the m20_100s cutscene LMTs, meaning unknown
+                    kept.append(keep_track(track, track_index))
+                    kept_usages.add(f"usage {track.usage}")
                     continue
 
             elif track.buffer_type == 9:
@@ -157,7 +165,7 @@ def load_lmt(file_item, context):
                     TRACK_MODE = 'location'
                     action_type = 'location'
                     decoded_frames = decode_type_9(track.data)
-                    decoded_frames = _parent_space_to_local(decoded_frames, armature, bone_index)
+                    decoded_frames = _parent_space_to_local(decoded_frames, armature, bone_index, track.bone_index)
 
                 elif track.usage == 2:
                     TRACK_MODE = 'scale'
@@ -171,25 +179,25 @@ def load_lmt(file_item, context):
                     decoded_frames = decode_type_9(track.data)
                     world_pos_fix(decoded_frames)
                 else:
+                    kept.append(keep_track(track, track_index))
+                    kept_usages.add(f"usage {track.usage}")
                     continue
 
             else:
-                # TODO: print statistics of missing tracks
-                # print("Unknown buffer_type, skipping", track.buffer_type)
+                kept.append(keep_track(track, track_index))
+                kept_usages.add(f"buffer type {track.buffer_type}")
                 continue
             
             # group_name = f"{track.bone_index}.{bone_index}.{action_type}"
             # group = action.groups.get(group_name) or action.groups.new(group_name)
 
-            #TOGGLE RENAMED BONES
-            if renamed_bone_flag:
-                data_path = f"pose.bones[\"{armature.data.bones[bone_index].name}\"].{TRACK_MODE}"
-                group_name = f"{track.bone_index}.{armature.data.bones[bone_index].name}.{action_type}"
-                group = compat.group_ensure(action, group_name)
-            else:
-                data_path = f"pose.bones[\"{bone_index}\"].{TRACK_MODE}"
-                group_name = f"{track.bone_index}.{bone_index}.{action_type}"
-                group = compat.group_ensure(action, group_name)
+            # the bone's own name: bone_index is its position in the armature, which equals its name only while
+            # the bones keep their import names and order (a retargeted rig with an extra root first shifted every
+            # track one bone over)
+            bone_name = armature.data.bones[bone_index].name
+            data_path = f"pose.bones[\"{bone_name}\"].{TRACK_MODE}"
+            group_name = f"{track.bone_index}.{bone_name}.{action_type}"
+            group = compat.group_ensure(action, group_name, owner=armature)
             try:
                 num_curv = len(decoded_frames[0])
             except IndexError:
@@ -199,10 +207,12 @@ def load_lmt(file_item, context):
 
             print(f"Block {block_index}, track {track_index}, bone {track.bone_index}: {num_curv}")
             curves = []
+            # owner: on Blender 5 the action's slot is named after the armature (OB<name>), so picking the
+            # action in Blender's own Action editor finds it
             for i in range(num_curv):
                 try:
                     #action.fcurves.new(data_path=data_path, index=i, action_group=group_name)
-                    curve = compat.fcurve_new(action, data_path, index=i, group=group_name)
+                    curve = compat.fcurve_new(action, data_path, index=i, group=group_name, owner=armature)
                     curves.append(curve)
                     if is_cyclic:
                         mod = curve.modifiers.new('CYCLES')
@@ -211,7 +221,7 @@ def load_lmt(file_item, context):
 
                 except KeyError as err:
                     print('unknown error:', err)
-                    curves.append(compat.fcurve_new(action, data_path + '[1]', index=i, group=group_name))
+                    curves.append(compat.fcurve_new(action, data_path + '[1]', index=i, group=group_name, owner=armature))
 
             # stored keys start at frame 0, the game's frames (see decode_type_6)
             for frame_index, frame_data in enumerate(decoded_frames):
@@ -221,7 +231,11 @@ def load_lmt(file_item, context):
                     curve.keyframe_points.add(1)
                     curve.keyframe_points[-1].co = (frame_index, frame_data[curve_idx])
                     curve.keyframe_points[-1].interpolation = 'LINEAR'
-                        
+        set_kept_tracks(action, kept)
+
+    if kept_joints or kept_usages:
+        print(f"LMT {file_item.display_name}: tracks kept as they are (written back on export): joints "
+              f"{armature.name} doesn't have {sorted(kept_joints)}, other kinds {sorted(kept_usages)}")
     lmt_groups = context.scene.albam.lmt_groups
     lmt_groups.active_group_id = len(lmt_groups.anim_group) - 1
     lmt_groups.anim_group[-1].active_id = 0
@@ -514,55 +528,58 @@ def _get_or_create_root_motion_bone(armature):
     return bone_name
 
 
-def _parent_space_to_local(decoded_frames, armature, bone_index):
-    local_space_frames = []
-    for frame in decoded_frames:
-        if frame is None:
-            local_space_frames.append(None)
-            continue
-
-        bone = armature.data.bones[bone_index]
-        if bone.parent:
-            parent_space = bone.parent.matrix_local.inverted() @ bone.matrix_local #child - parent matrix
-
-        elif bone_index == 255:
-            parent_space = Matrix([[1.0, 0.0, 0.0, 0.0],
-                                    [0.0, 0.0, 1.0, 0.0],
-                                    [0.0, -1.0, 0.0, 0.0],
-                                    [0.0, 0.0, 0.0, 1.0]])
-            
-        else:
-            parent_space = Matrix([[1.0, 0.0, 0.0, 0.0],
-                                    [0.0, 1.0, 0.0, 0.0],
-                                    [0.0, 0.0, 1.0, 0.0],
-                                    [0.0, 0.0, 0.0, 1.0]])
-        transform_mat = Matrix.Translation(frame)
-    
-        local_space_frame = (parent_space.inverted() @ transform_mat).to_translation()
-        local_space_frames.append(local_space_frame)
-    return local_space_frames
+# the game's model space (Y up, cm) in Blender's armature space (Z up): the frame a joint without a parent is
+# placed in. A rotation of +90 degrees about X, the rest frame of an imported model's root joint
+GAME_FRAME = Matrix(((1.0, 0.0, 0.0, 0.0),
+                     (0.0, 0.0, -1.0, 0.0),
+                     (0.0, 1.0, 0.0, 0.0),
+                     (0.0, 0.0, 0.0, 1.0)))
 
 
-def _parent_space_to_local_rot(decoded_frames, armature, bone_index):
-    local_space_frames = []
-    for frame in decoded_frames:
-        if frame is None:
-            local_space_frames.append(None)
-            continue
+def rest_in_parent(bone, joint):
+    """
+    The bone's rest transform in its parent's frame, which is the frame its LMT tracks are stored in, or None for
+    root motion (joint 255, stored as it is). A joint without a parent is relative to the game's model space
+    (GAME_FRAME): its location track is its full position, which replaces the rest position in the game (a joint
+    without a track keeps its rest value, `motion_runtime_findings.md`). Until 2026-10-14 such bones used the track
+    as an offset from the rest head, so a game model's root (joint 0) stood its rest height (1.22 m on pl006) too high
+    """
+    if bone.parent:
+        return bone.parent.matrix_local.inverted() @ bone.matrix_local
+    if joint == ROOT_MOTION_BONE_ID:
+        return None
+    return GAME_FRAME.inverted() @ bone.matrix_local
 
-        #bone = armature.data.bones[bone_index]
-        bone = armature.data.bones[bone_index]
-        parent = bone.parent
 
-        if parent is None:
-            local_space_frames.append(frame)
-            continue
+def _rest_rotation(bone, joint):
+    """The rotation of rest_in_parent, None for root motion. For a bone without a parent, None when it's the identity
+    (an imported root's rest frame is GAME_FRAME up to float noise, which would otherwise change every key's bits
+    on a round trip; bones with a parent always applied theirs and round-trip exactly with it)"""
+    rest = rest_in_parent(bone, joint)
+    if rest is None:
+        return None
+    quat = rest.to_quaternion()
+    if bone.parent is None and quat.rotation_difference(Quaternion()).angle < 1e-6:
+        return None
+    return quat
 
-        parent_mat = parent.matrix_local.inverted() @ bone.matrix_local
-        parent_quat = parent_mat.inverted().to_quaternion()
-        local_space_frame = parent_quat @ Quaternion([frame[0], frame[1], frame[2], frame[3]])
-        local_space_frames.append(local_space_frame)
-    return local_space_frames
+
+def _parent_space_to_local(decoded_frames, armature, bone_index, joint):
+    rest = rest_in_parent(armature.data.bones[bone_index], joint)
+    if rest is None:
+        return list(decoded_frames)
+    to_local = rest.inverted()
+    return [None if frame is None else (to_local @ Matrix.Translation(frame)).to_translation()
+            for frame in decoded_frames]
+
+
+def _parent_space_to_local_rot(decoded_frames, armature, bone_index, joint):
+    bone = armature.data.bones[bone_index]
+    if _rest_rotation(bone, joint) is None:
+        return list(decoded_frames)
+    to_local = rest_in_parent(bone, joint).inverted().to_quaternion()   # this order: the old results, bit for bit
+    return [None if frame is None else to_local @ Quaternion([frame[0], frame[1], frame[2], frame[3]])
+            for frame in decoded_frames]
 
 
 def world_pos_fix(decoded_frames):
@@ -819,6 +836,7 @@ def _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size, timing, notes
     tracks = []
     armature = lmt_group.armature
     export_tracks = _get_export_tracks(action, armature, notes)
+    table_start = cml_size
     cml_size += len(export_tracks) * 32
     for bone_name, action_type, channels in export_tracks:
         track = dst_lmt.Track49(_parent=block, _root=dst_lmt._root)
@@ -871,7 +889,63 @@ def _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size, timing, notes
         track.ofs_data = cml_size
         cml_size += bf_size
         tracks.append(track)
+
+    # tracks import kept as they were, unless curves now animate the same joint and channel
+    covered = {(t.bone_index, TRACK_KIND.get(t.usage)) for t in tracks}
+    kept = [k for k in get_kept_tracks(action) if (k["joint"], TRACK_KIND.get(k["usage"], k["usage"])) not in covered]
+    if kept and abs(timing.scale - 1.0) >= 1e-9 and any(k["buffer_type"] not in (2, 4) for k in kept):
+        notes.append(f"{action.name}: {len(kept)} tracks kept from the source file (joints the armature doesn't "
+                     f"have) aren't converted to {FRAMERATE} fps")
+    for k in kept:
+        track = dst_lmt.Track49(_parent=block, _root=dst_lmt._root)
+        track.buffer_type, track.usage, track.joint_type = k["buffer_type"], k["usage"], k["joint_type"]
+        track.bone_index, track.weight = k["joint"], k["weight"]
+        track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
+        track.ref_data.x, track.ref_data.y, track.ref_data.z, track.ref_data.w = k["ref"]
+        data = base64.b64decode(k["data"])
+        track.data = data
+        track.len_data = len(data)
+        track.ofs_data = cml_size
+        cml_size += len(data)
+        # root-motion tracks stay with the others of joint 255 at the start, the rest go last
+        position = next((i for i, t in enumerate(tracks) if t.bone_index != ROOT_MOTION_BONE_ID), len(tracks)) \
+            if k["joint"] == ROOT_MOTION_BONE_ID else len(tracks)
+        tracks.insert(position, track)
+    if kept:
+        # headers first (32 bytes each, now more of them), then the data in track order
+        cml_size = table_start + len(tracks) * 32
+        for t in tracks:
+            t.ofs_data = cml_size
+            cml_size += t.len_data
     return tracks, cml_size
+
+
+# usage -> the channel a track animates (0 / 3 rotation, 1 / 4 location, 2 scale), to tell kept tracks that curves
+# now cover
+TRACK_KIND = {0: 'rotation', 3: 'rotation', 1: 'location', 4: 'location', 2: 'scale'}
+KEPT_TRACKS_PROP = "_lmt_kept_tracks"   # leading _: hidden from Custom Properties
+
+
+def keep_track(track, index):
+    """A track as JSON-able data, to write back as it is"""
+    ref = track.ref_data
+    return {"index": index, "joint": track.bone_index, "usage": track.usage, "buffer_type": track.buffer_type,
+            "joint_type": track.joint_type, "weight": track.weight, "ref": [ref.x, ref.y, ref.z, ref.w],
+            "data": base64.b64encode(bytes(track.data)).decode("ascii")}
+
+
+def set_kept_tracks(action, kept):
+    if kept:
+        action[KEPT_TRACKS_PROP] = json.dumps(kept)
+    elif KEPT_TRACKS_PROP in action:
+        del action[KEPT_TRACKS_PROP]
+
+
+def get_kept_tracks(action):
+    try:
+        return json.loads(action.get(KEPT_TRACKS_PROP, "[]"))
+    except ValueError:
+        return []
 
 
 def _serialize_events(dst_lmt, dst_action, action, timing):
@@ -989,10 +1063,7 @@ def _key_durations(keys):
 
 
 def _serialize_bone_rotation(dst_lmt, bone, track, keys):
-    parent_quat = None
-    if bone.parent:
-        parent_mat = bone.parent.matrix_local.inverted() @ bone.matrix_local
-        parent_quat = parent_mat.to_quaternion() #convert back to bone space
+    parent_quat = _rest_rotation(bone, track.bone_index)   # back to the parent's frame
 
     # to the game's space, which is what the file stores (keys and ref_data alike)
     keys = [(frame, _normalized_rotation(parent_quat @ quat if parent_quat is not None else quat))
@@ -1022,9 +1093,8 @@ def _serialize_bone_rotation(dst_lmt, bone, track, keys):
 def _serialize_bone_location(dst_lmt, bone, track, keys):
     kf_num = len(keys)
     track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
-    parent_space = None
-    if bone.parent:
-        parent_space = bone.parent.matrix_local.inverted() @ bone.matrix_local
+    # the same frame for one key and many (one key used to be written with y / z swapped on bones without a parent)
+    parent_space = rest_in_parent(bone, track.bone_index)
 
     if kf_num == 1:
         buffer = KaitaiStream(BytesIO(bytearray(12)))
@@ -1034,16 +1104,11 @@ def _serialize_bone_location(dst_lmt, bone, track, keys):
         if parent_space is not None:
             parent_space_frame = (parent_space @ Matrix.Translation([x, y, z])).to_translation()
             x, y, z = parent_space_frame.x, parent_space_frame.y, parent_space_frame.z
-            written = (x, y, z)
-        elif track.bone_index == ROOT_MOTION_BONE_ID:
-            written = (x, y, z)
-        else:
-            written = (x, z, -y)
         track.ref_data.x = x * 100.0
         track.ref_data.y = y * 100.0
         track.ref_data.z = z * 100.0
         track.ref_data.w = 1.0
-        buffer.write_bytes(struct.pack('fff', *(v * 100.0 for v in written)))
+        buffer.write_bytes(struct.pack('fff', x * 100.0, y * 100.0, z * 100.0))
         return buffer, 12
 
     buffer = KaitaiStream(BytesIO(bytearray(kf_num * 16)))
@@ -1267,7 +1332,141 @@ def _on_active_anim_changed(self, context):
         return
     link_legacy_events(action)
     if self.armature:
+        _keep_outgoing_action(self.armature, action)
+        follow_action(self.armature, action)
         compat.assign_action(self.armature, action)
+        _last_action[self.armature.session_uid] = action.as_pointer()
+
+
+def is_lmt_action(action):
+    return action is not None and action.albam_asset.app_id == "dmc4"
+
+
+def follow_action(armature, action):
+    """Get the armature ready to play an action: each bone's rotation mode follows the action's rotation curves
+    (LMT import keys quaternions, while retargeted animations often key Euler angles: a bone plays only the curves
+    of its own mode, so the other kind would leave it where the last animation put it), and an LMT animation starts
+    from the rest pose (`_clear_pose`)"""
+    if action is None:
+        return
+    if is_lmt_action(action):
+        _clear_pose(armature)
+    modes = {}
+    for fc in compat.action_fcurves(action):
+        data_path = fc.data_path
+        if not data_path.startswith('pose.bones["'):
+            continue
+        end = data_path.find('"].')
+        prop = data_path[end + 3:]
+        if prop in ROTATION_PROPS:
+            modes.setdefault(data_path[len('pose.bones["'):end], set()).add(prop)
+    for bone_name, props in modes.items():
+        pose_bone = armature.pose.bones.get(bone_name)
+        if pose_bone is None or len(props) != 1:
+            continue
+        prop = next(iter(props))
+        mode = pose_bone.rotation_mode
+        if prop == 'rotation_quaternion' and mode != 'QUATERNION':
+            pose_bone.rotation_mode = 'QUATERNION'
+        elif prop == 'rotation_euler' and mode not in EULER_ORDERS:
+            pose_bone.rotation_mode = 'XYZ'
+        elif prop == 'rotation_axis_angle' and mode != 'AXIS_ANGLE':
+            pose_bone.rotation_mode = 'AXIS_ANGLE'
+
+
+# the action each armature played when last seen (session_uid -> action pointer), so an action picked in Blender's
+# own Action editor gets follow_action too
+_last_action = {}
+_follow_pending = [False]
+
+
+def follow_changed_actions(scene):
+    """follow_action for every armature of the scene whose action changed since it was last seen (an armature seen
+    for the first time is only recorded: opening a file mustn't touch its pose); True when one changed"""
+    changed = False
+    for ob in scene.objects:
+        if ob.type != 'ARMATURE':
+            continue
+        ad = ob.animation_data
+        action = ad.action if ad else None
+        pointer = action.as_pointer() if action else 0
+        last = _last_action.get(ob.session_uid)
+        _last_action[ob.session_uid] = pointer
+        if last is None or last == pointer or action is None:
+            continue
+        follow_action(ob, action)
+        changed = True
+    if changed:
+        scene.frame_set(scene.frame_current)   # replay the action over the cleared pose
+    return changed
+
+
+def _follow_timer():
+    _follow_pending[0] = False
+    try:
+        follow_changed_actions(bpy.context.scene)
+    except Exception as err:                # noqa: BLE001 - never break editing
+        print(f"LMT follow action: {err}")
+    return None
+
+
+@persistent
+def _on_depsgraph(scene, depsgraph):
+    for update in depsgraph.updates:
+        ob = update.id.original if isinstance(update.id, bpy.types.Object) else None
+        if ob is None or ob.type != 'ARMATURE':
+            continue
+        ad = ob.animation_data
+        pointer = ad.action.as_pointer() if ad and ad.action else 0
+        if ob.session_uid not in _last_action:
+            _last_action[ob.session_uid] = pointer
+        elif _last_action[ob.session_uid] != pointer:
+            if not _follow_pending[0]:
+                _follow_pending[0] = True
+                bpy.app.timers.register(_follow_timer, first_interval=0.0)
+            return
+
+
+@persistent
+def _on_load(_):
+    _last_action.clear()
+
+
+def register_handlers():
+    for handlers, fn in ((bpy.app.handlers.depsgraph_update_post, _on_depsgraph),
+                         (bpy.app.handlers.load_post, _on_load)):
+        if fn not in handlers:
+            handlers.append(fn)
+
+
+def unregister_handlers():
+    for handlers, fn in ((bpy.app.handlers.depsgraph_update_post, _on_depsgraph),
+                         (bpy.app.handlers.load_post, _on_load)):
+        for handler in list(handlers):
+            if getattr(handler, "__name__", "") == fn.__name__ and \
+                    getattr(handler, "__module__", "") == fn.__module__:
+                handlers.remove(handler)
+
+
+def _clear_pose(armature):
+    """Back to the rest pose: LMTs don't key every channel (pl000_01: no location track on most bones), Blender
+    leaves channels the new action doesn't animate where the previous one put them, and the game uses the bind
+    pose for them"""
+    for pb in armature.pose.bones:
+        pb.location = (0.0, 0.0, 0.0)
+        pb.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+        pb.rotation_euler = (0.0, 0.0, 0.0)
+        pb.rotation_axis_angle = (0.0, 0.0, 1.0, 0.0)
+        pb.scale = (1.0, 1.0, 1.0)
+
+
+def _keep_outgoing_action(armature, action):
+    """The armature's current action would lose its last user (and be dropped on save) when another one is
+    assigned: give it a fake user, as LMT animations have"""
+    ad = armature.animation_data
+    old = ad.action if ad else None
+    if old is not None and old != action and not old.use_fake_user and old.users <= 1:
+        old.use_fake_user = True
 
 
 @blender_registry.register_blender_prop
@@ -1404,15 +1603,12 @@ def _import_events(action, custom_property, events, ev_type):
 @blender_registry.register_blender_prop_albam(name='import_options_lmt')
 class ImportOptionsLMT(bpy.types.PropertyGroup):
     armature: bpy.props.PointerProperty(type=bpy.types.Object, poll=filter_armatures)
-    renamed_bone_flag: bpy.props.BoolProperty(name = 'Renamed bones',
-                                              description='Check this box when bones are auto-renamed so import works properly')
 
 
 @blender_registry.register_import_options_custom_draw_func(extension='lmt')
 def draw_lmt_options(panel_instance, context):
     panel_instance.bl_label = "LMT Options"
     panel_instance.layout.prop(context.scene.albam.import_options_lmt, 'armature')
-    panel_instance.layout.prop(context.scene.albam.import_options_lmt, 'renamed_bone_flag')
 
 
 @blender_registry.register_import_options_custom_poll_func(extension='lmt')

@@ -83,8 +83,11 @@ try:
     cam.rotation_euler = (1.3, 0.0, 0.2)
     bpy.context.view_layer.update()
     lines = [o for o in effect_sim._sim_objects(scene) if o[effect_sim.SIM_KEY]["kind"] in effect_sim.LINE_KINDS]
-    check(all(any(m.type == "NODES" and m.node_group and m.node_group.name == effect_sim.LINE_NODE_GROUP
+    check(all(any(m.type == "NODES" and effect_sim.inner_group(m.node_group) is not None
+                  and effect_sim.inner_group(m.node_group).name == effect_sim.LINE_NODE_GROUP
                   for m in o.modifiers) for o in lines), f"every line object ({len(lines)}) has the Ribbons modifier")
+    check(all(m.node_group.name.startswith(effect_sim.WRAP_PREFIX) for o in lines for m in o.modifiers
+              if m.type == "NODES"), "the Ribbons group runs inside a per-object wrapper holding the material")
 
     checked = worst = 0
     bad_uv = bad_col = bad_faces = 0

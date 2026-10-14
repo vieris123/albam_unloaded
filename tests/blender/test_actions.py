@@ -43,6 +43,22 @@ try:
     if arm.name not in scene.collection.objects:
         scene.collection.objects.link(arm)
 
+    # the user's own animation, playing when the LMT is imported: Euler rotations (as retargeted animations have),
+    # a scale left on a bone the LMT doesn't scale
+    own = compat.ensure_action(arm, "MyAnim")
+    euler_bone = arm.pose.bones[3]
+    euler_bone.rotation_mode = "XYZ"
+    euler_bone.rotation_euler = (0.3, 0.2, 0.1)
+    euler_bone.keyframe_insert("rotation_euler", frame=0)
+    arm.pose.bones[1].keyframe_insert("location", frame=0)
+    arm.pose.bones[1].scale = (1.5, 1.5, 1.5)
+    arm.pose.bones[1].keyframe_insert("scale", frame=0)
+    scene.frame_set(0)
+    # a renamed bone: tracks go by joint number, whatever the bone is called (import used to write
+    # pose.bones["<index>"])
+    renamed = arm.data.bones[5]
+    renamed.name = "renamed_spine"
+
     # -- LMT import: curves on every animation ------------------------------------------------------------
     scene.albam.import_options_lmt.armature = arm
     lmt_item, lmt_bytes = item(common.NERO, LMT)
@@ -50,6 +66,27 @@ try:
     lmt = scene.albam.lmt_groups.anim_group[scene.albam.lmt_groups.active_group_id]
     actions = [row.action for row in lmt.actions if row.action is not None]
     check(len(actions) > 1, f"{len(actions)} animations imported from {LMT}")
+    check(arm.animation_data.action != own and own.use_fake_user and own.users >= 1,
+          "the action the armature played before the import keeps a user (it would be dropped on save)")
+    if not compat.LEGACY_ACTIONS:
+        # slots named after the armature: picking the action in Blender's own Action editor finds its slot
+        check(all(s.identifier == f"OB{arm.name}" for a in actions for s in a.slots),
+              "imported actions' slots are named after the armature")
+        arm.animation_data.action = actions[1]
+        check(arm.animation_data.action_slot is not None, "a plain action assignment finds the slot")
+    animated = {fc.data_path.split('"')[1] for fc in compat.action_fcurves(actions[0])}
+    check("renamed_spine" in animated and "5" not in animated, "a renamed bone gets its tracks")
+    check(euler_bone.rotation_mode == "QUATERNION", "a bone in Euler mode switches to quaternions for the LMT")
+    check(tuple(arm.pose.bones[1].scale) == (1.0, 1.0, 1.0) or any(
+        fc.data_path == f'pose.bones["{arm.pose.bones[1].name}"].scale' for fc in compat.action_fcurves(actions[0])),
+        "channels the LMT doesn't key start from rest, not from the previous animation")
+    # back to the user's animation the plain way (Action editor): the handler restores its rotation mode
+    arm.animation_data.action = own
+    bpy.context.view_layer.update()
+    animation._follow_timer()       # timers don't run headless; the depsgraph handler queued it
+    check(euler_bone.rotation_mode in animation.EULER_ORDERS, "switching back in Blender's UI restores Euler mode")
+    scene.frame_set(0)
+    check(abs(euler_bone.rotation_euler.x - 0.3) < 1e-6, "the user's animation plays its Euler keys again")
     empty = [a.name for a in actions if not compat.action_has_curves(a)]
     check(not empty, f"every animation has F-curves (without: {empty[:5]})")
     first = actions[0]
@@ -75,6 +112,13 @@ try:
             moved = True
             break
     check(moved, "the armature moves while the animation plays")
+    # joint 0's location track is its position in model space, not an offset from the rest head (the whole body
+    # used to stand bone 0's rest height too high)
+    scene.frame_set(0)
+    lowest = min(pb.head.z for pb in arm.pose.bones if pb.name != animation.ROOT_MOTION_BONE_NAME)
+    rest_height = arm.data.bones["0"].head_local.z
+    print(f"lowest bone at frame 0: {lowest:.3f} m (bone 0 rest height {rest_height:.3f})")
+    check(-0.1 < lowest < 0.3, f"the feet are near the floor ({lowest:.3f} m)")
 
     # -- LMT export reads the curves back ----------------------------------------------------------------
     notes = []
@@ -86,12 +130,30 @@ try:
     out_lmt._read()
     shape = lambda lmt_: [b.block_header.num_frames if b.offset else None for b in lmt_.block_offsets]  # noqa: E731
     check(shape(out_lmt) == shape(src_lmt), "re-export has the source's blocks and frame counts")
-    # every (bone, property) with curves becomes a track (the source has a few more: 4 per block of pl000_01
-    # don't come back through import, on every Blender)
+    # every source track comes back: tracks of joints pl000.mod doesn't have (155-165, Nero's other models) are kept
+    # as they are and written back
+    track_ids = lambda lmt_: [sorted((t.bone_index, t.usage) for t in b.block_header.tracks)  # noqa: E731
+                              for b in lmt_.block_offsets if b.offset]
+    check(track_ids(out_lmt) == track_ids(src_lmt), "re-export has every track of the source")
+    joints = {int(b_['mtfw.anim_retarget']) for b_ in arm.data.bones if 'mtfw.anim_retarget' in b_} | {255}
+    kept_same = [bytes(o.data) == bytes(s.data) for sb, ob in zip(src_lmt.block_offsets, out_lmt.block_offsets)
+                 if sb.offset for s in sb.block_header.tracks if s.bone_index not in joints
+                 for o in ob.block_header.tracks if (o.bone_index, o.usage) == (s.bone_index, s.usage)]
+    check(kept_same and all(kept_same), f"kept tracks are written back byte-identical ({len(kept_same)})")
+    # joint 0's location: one-key tracks used to be written with y / z swapped
+    root_loc = [(s, o) for sb, ob in zip(src_lmt.block_offsets, out_lmt.block_offsets) if sb.offset
+                for s in sb.block_header.tracks if (s.bone_index, s.usage) == (0, 1)
+                for o in ob.block_header.tracks if (o.bone_index, o.usage) == (0, 1)]
+    worst = max(max(abs(a - b) for a, b in zip(animation.decode_type_2(s.data)[0], animation.decode_type_2(o.data)[0]))
+                for s, o in root_loc if s.buffer_type == o.buffer_type == 2)
+    check(worst < 1e-5, f"joint 0's constant location round-trips ({worst:.2e} m)")
+    # every (bone, property) with curves becomes a track, and the tracks import kept are written back
     tracks = animation._get_export_tracks(first, arm, [])
     written = len(out_lmt.block_offsets[0].block_header.tracks)
-    check(written == len(tracks) > 80, f"block 0 exports one track per animated bone property ({written} of "
-          f"{len(tracks)}; source {len(src_lmt.block_offsets[0].block_header.tracks)})")
+    kept = len(animation.get_kept_tracks(first))
+    check(written == len(tracks) + kept and len(tracks) > 80, f"block 0 exports one track per animated bone "
+          f"property plus the kept ones ({written} = {len(tracks)} + {kept}; source "
+          f"{len(src_lmt.block_offsets[0].block_header.tracks)})")
     check(animation.game_length(first) > 0, f"game_length reads the curves ({animation.game_length(first)})")
 
     # -- foot IK ghost plays the same action --------------------------------------------------------------

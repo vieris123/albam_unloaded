@@ -99,6 +99,8 @@ def register():
     register_col_handlers()
     from albam.blender_ui.export_panel import register_handlers as register_export_handlers
     register_export_handlers()
+    from albam.engines.mtfw.animation import register_handlers as register_anim_handlers
+    register_anim_handlers()
     from albam.engines.mtfw.effect_editor import register_editor
     register_editor()
 
@@ -119,6 +121,8 @@ def unregister():
     unregister_col_handlers()
     from albam.blender_ui.export_panel import unregister_handlers as unregister_export_handlers
     unregister_export_handlers()
+    from albam.engines.mtfw.animation import unregister_handlers as unregister_anim_handlers
+    unregister_anim_handlers()
     from albam.engines.mtfw.effect_editor import unregister_editor
     unregister_editor()
 

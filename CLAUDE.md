@@ -19,12 +19,18 @@ The addon imports and exports models (.mod), textures (.tex/.rtex), collision (.
   `fcurves_of(action, owner)`, `action_fcurves`, `fcurve_new / find / remove`, `group_ensure`), Geometry Nodes modifier
   inputs (`modifier["Socket_n"]` became `modifier.properties.inputs[...]`: `set_node_input / get_node_input` by socket
   name), and the Set Curve Normal mode (a menu socket in 5: `set_curve_normal_free`). `ShaderNodeSeparateRGB` /
-  `CombineRGB` no longer exist (material.py uses Separate / Combine Color). Don't call the legacy attributes
-  directly in new code. `tests/blender/test_actions.py` covers LMT / SDL / foot IK actions on whichever Blender runs it.
-  **The installed 5.4 build (a PR build) hangs in the depsgraph update after a Geometry Nodes modifier gets an
-  Object / Collection input and anything else changes** (a trivial Object Info group hangs too, headless; not Albam's
-  doing), so effect previews and every effect test hang there. Run effect tests on 4.2 (`run_tests.py --timeout`
-  kills a hung Blender) and re-check with a newer 5.x build.
+  `CombineRGB` no longer exist (material.py uses Separate / Combine Color), and the 5.4 build gives
+  `ShaderNodeVectorTransform` / `ShaderNodeAttribute` a first `LightIndex` input, so address sockets by name, not
+  `inputs[0]` (the refraction material's `camera_axis` failed that way on every refracting effect, e.g.
+  `ec005_99v0`). Don't call the legacy attributes directly in new code. `tests/blender/test_actions.py` covers LMT / SDL / foot IK actions on whichever Blender runs it.
+  **Geometry Nodes modifier inputs set from Python don't work on the installed 5.4 build**: a vector set through
+  `properties.inputs` never reaches the evaluation, and an Object / Collection / Material one hangs the depsgraph
+  for good (a trivial Object Info group hangs the same way, headless; not Albam's doing). So the effect node groups
+  take no modifier inputs: each sim object runs the shared group through its own wrapper group
+  (`effect_sim._wrapped_modifier`, `ALBAM_EFL_Wrap_<object>`) whose node defaults hold the source object /
+  collection, the ribbon material and the Eye (`_wrapper_call`); `node_group_of(ob)` / `inner_group` look through
+  it. 5.4's Curve to Mesh scales the profile by its new `Scale` input, not the curve radius (wired when present).
+  `run_tests.py --timeout` kills a hung Blender.
 - Tests: `tests/` (2026-10-12; see `tests/README.md`): `python tests/run_tests.py [words]` runs the Blender tests
   (`tests/blender/test_*.py`, headless) and the plain-Python corpus tests (`tests/corpus/`), 4 at a time, and
   reports each; data paths come from `tests/common.py` (`ALBAM_DMC4_DATA`, default `E:\DMC mod stuffs`). Add a test
@@ -217,7 +223,33 @@ This reproduces the game's player foot planting (`cLegIkCtrl` + `cCnsIK`, see `V
   are `SBCÿ` too). See [SBC (collision)](#sbc-collision).
 - **.lmt**: v49 is written; 51 and 67 are parse-only. Import works for re5 and dmc4; export is dmc4 only.
   - Coordinates: positions are ÷100 on import and ×100 on export. Meshes are converted from Y-up cm to Z-up m: `(x*.01, -z*.01, y*.01)`. Quaternions are `(w,x,y,z)`.
-  - Bones map through the bone property `bone['mtfw.anim_retarget']`. Index 255 is root motion and creates a `root_motion` bone; 254 is skipped.
+  - Bones map through the bone property `bone['mtfw.anim_retarget']`. Index 255 is root motion and creates a `root_motion` bone (unless a bone already has joint number 255); 254 is skipped.
+    Curves address the bone by its **name** (until 2026-10-14 they used its position in the armature, which put
+    every track one bone over on a retargeted rig with an extra root first; the "Renamed bones" option that
+    worked around it is gone).
+  - **Track frames** (`rest_in_parent`, import and export): a track is the joint's local transform in its parent's
+    frame and replaces the rest value (a joint without a track keeps its rest, `motion_runtime_findings.md`), so
+    pose = rest_in_parent^-1 x track. A bone without a parent is relative to the game's model space (`GAME_FRAME`,
+    +90 deg about X, the rest frame of an imported root); root motion (joint 255) is stored as it is. Until
+    2026-10-14 a bone without a parent took its track as an offset from the rest head, so a game model stood joint
+    0's rest height (1.22 m on pl006) too high, and one-key location tracks were exported with y / z swapped.
+    **Breaking:** actions imported (or keyed by eye) on game-model rigs before then export with the hips that much
+    higher: re-import them. Rigs whose joint 0 hangs under a joint-255 bone at the origin were right before and
+    still are.
+  - **Tracks import can't turn into curves are kept** (`keep_track` -> `_lmt_kept_tracks` JSON on the action, hidden):
+    joints the armature doesn't have (pl000_01.lmt animates joints 155-165 of Nero's other models), joint 254, and
+    usage 5 (68 constant joint-255 tracks in the m20_100s cutscenes; DX9 `uModel::setupMotionParam` 0x9F9060 binds
+    usages 0-4 only, so the game ignores them). Export writes them back byte-identical (root-motion ones after the
+    other joint-255 tracks, the rest last) unless curves now animate that joint and channel; they aren't converted
+    when the animation is re-timed (a note says so). Checked: pl000_01, pl006_01 and m20_100s_cut10 re-export every
+    source track; no track lost byte identity and 895 gained it.
+  - **Putting an animation on the armature** (the LMT list, import; `follow_action`): the outgoing action gets a
+    fake user if it would lose its last one, an LMT action starts from the rest pose (LMTs don't key every channel,
+    and Blender keeps the last animation's values on unkeyed ones), and each bone's rotation mode follows the
+    action's rotation curves (LMT = quaternions; retargeted animations often key Euler angles, and a bone ignores
+    curves of the other mode). A depsgraph handler (`_on_depsgraph` -> `follow_changed_actions`, timer) does the
+    same when the action is changed in Blender's own Action editor. On Blender 5 imported actions' slots are named
+    after the armature (`OB<name>`) so the Action editor finds them.
   - **Key timing** (see [LMT key timing](#lmt-key-timing-confirmed-in-ida-fixed-2026-10-05)):
     - Stored keys start at frame 0.
     - A key's duration is the number of frames to the next key, and 0 marks the last key, which holds.
@@ -847,20 +879,23 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
     chain's previous / next point (Offset Point in Curve + Sample Index: the central difference the Python code
     used, not Blender's Curve Tangent, which averages unit segment directions), normal = normalize(tangent x (Eye -
     point)) as a free curve normal, radius = half, Curve to Mesh with a 2-point profile along X (its point index
-    picks uv_l / uv_r for the corner UV map `UVMap`), then Set Material from the group's `Material` input (Curve to
-    Mesh carries none: without it the strips rendered as pale untextured quads). Inputs set by Python:
-    `Eye` = the camera (or the followed viewport) in object space, on every update (`_set_eye`), and `Material` =
-    the mesh's first material (`_ensure_ribbon_modifier`, which also adds the modifier to line objects from older
-    .blend files). Ribbons therefore leave the camera out of their frame-cache signature unless they have a culling
+    picks uv_l / uv_r for the corner UV map `UVMap`); the per-object wrapper group then sets the material (Curve to
+    Mesh carries none: without it the strips rendered as pale untextured quads). Per-object values live in the
+    wrapper (see Runtime: modifier inputs are unusable on 5.4): `Eye` = the camera (or the followed viewport) in
+    object space, the wrapper's Group-node socket, on every update (`_set_eye`), and the material on its Set
+    Material node (`_ensure_ribbon_modifier`, which also rebuilds the modifier on line objects from older .blend
+    files). Since 2026-10-14 the group is `ALBAM_EFL_Ribbons_v2` (no Material input). Ribbons therefore leave the camera out of their frame-cache signature unless they have a culling
     fade, so orbiting with Face Viewport only moves `Eye` instead of recomputing them in Python. Sword trails
     (`_update_strips`) still build their quads in Python (`_write_ribbons`). Net per-frame cost is about the same
     (`ec024_60v2`: first pass 26 -> 25 ms, replay 8 -> 9 ms: Python saved ~2.6 ms, Blender's evaluation of the 72
     node groups costs ~2 ms). `tests/blender/test_ribbon_nodes.py` checks the strips against the Python formula
     (190 systems, worst deviation 1e-7 m), UVs, colours, the material, and that strips turn with the camera.
   - Particle types and their Blender objects:
-    - Billboard / Polygon / PrimModel: GN instances (`ALBAM_EFL_Particles_v6`).
-    - Model: GN collection instances (`ALBAM_EFL_Models_v4`); the `.mod` is imported once off-scene, in game
-      axes, and copied per blending with effect materials (`_EffectBuilder.model_variant`).
+    - Billboard / Polygon / PrimModel: GN instances (`ALBAM_EFL_Particles_v7`; v7 takes the source shape as an
+      `Instance` geometry from the object's wrapper group instead of an Object input, 2026-10-14).
+    - Model: GN collection instances (`ALBAM_EFL_Models_v5`, likewise fed by the wrapper's Collection Info); the
+      `.mod` is imported once off-scene, in game axes, and copied per blending with effect materials
+      (`_EffectBuilder.model_variant`).
     - Light: a pool of point lights under a holder Empty.
     - Polyline / Texline / Line and the cloth variants (1, 3, 4, 12-14), and PolygonStrip (15): meshes rebuilt
       per frame.

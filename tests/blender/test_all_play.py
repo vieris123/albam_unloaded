@@ -39,7 +39,7 @@ except Exception:
 builtins.print = real_print
 print("FILES", len(files), "IMPORT FAILURES", bad[:5], "PLAY ERRORS", errors[:5])
 models = [ob for ob in scene.objects if ob.get("efl_sim", {}).get("kind") == 5]
-print("model particle objects", len(models), [ob.modifiers[0].node_group.name for ob in models[:1]])
+print("model particle objects", len(models), [effect_sim.node_group_of(ob).name for ob in models[:1]])
 mats = {m.name for c in bpy.data.collections if c.name.startswith("EFL_model_") and "_" in c.name[10:] for o in c.objects for m in [s.material for s in o.material_slots] if m}
 print("variant mats", sorted(mats)[:5])
 from albam.engines.mtfw import effect_sim

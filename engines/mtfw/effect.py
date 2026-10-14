@@ -1176,8 +1176,8 @@ def _build_refract_material(name, image, src, dst, op, intensity=0.0, rim=None):
         def camera_axis(vector, y):
             n = node("ShaderNodeVectorTransform", -250, y, vector_type="VECTOR", convert_from="CAMERA",
                      convert_to="WORLD")
-            n.inputs[0].default_value = vector
-            return n.outputs[0]
+            n.inputs["Vector"].default_value = vector   # by name: Blender 5.4 puts a LightIndex input first
+            return n.outputs["Vector"]
 
         geometry = node("ShaderNodeNewGeometry", -250, -150)
         bend_u = vmath("SCALE", camera_axis((1.0, 0.0, 0.0), -450), (0.0, 0.0, 0.0), -50, -450)

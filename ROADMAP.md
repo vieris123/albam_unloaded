@@ -59,6 +59,21 @@ in the DX9 code before trusting one.
   and 2 LensFlare blocks 656, reached by no known offset (LensFlare is probably its element table). Read
   `initParticleMassBillboard` 0x97D860 / `initParticleLensFlare` 0x97D2A0.
 
+## LMT
+
+- [x] **Bone 0's location off by its rest position on game-model rigs.** Done 2026-10-14: a bone without a parent
+  is relative to the game's model space (`rest_in_parent`, `GAME_FRAME`) on import and export; the single-key
+  location y / z swap is gone. Breaking for actions imported or keyed before (see CLAUDE.md). Clean pl006 and the
+  user's joint-255-parented retarget rig now pose identically, feet on the floor.
+- [x] **Tracks for joints the armature lacks, and usage 5 tracks, are kept.** Done 2026-10-14: import stores them
+  on the action (`_lmt_kept_tracks`) and export writes them back byte-identical unless curves now animate that
+  joint and channel. Usage 5 (68 constant joint-255 tracks in the m20_100s cutscene LMTs) is never read by DX9
+  (`uModel::setupMotionParam` binds usages 0-4 only).
+- [ ] **Kept tracks don't follow re-timing:** an animation exported at another frame rate writes them unconverted
+  (a note says so). Converting the durations of type 6 / 9 data would fix it.
+- [ ] **Scene frame rate:** import forces the scene to 60 fps, so other animations in the scene play at the wrong
+  speed. Proposed: leave it alone when the scene already has other animation, and say so in a note.
+
 ## Preview gaps
 
 The game behaviour is known; Blender only approximates it. The other preview gaps were closed on 2026-10-10 (see
@@ -186,4 +201,4 @@ Suggested order: finish 1, then Edit as XML for XFS (unlocks every plain-XML cla
 
 Recorded under "Known bugs and gotchas" in `CLAUDE.md`, not fixed yet: texture slots don't round-trip,
 the SBC21 (other games) export bugs in `collision.py`, the detail-map driver path, `world_pos_fix` being a no-op, stale state after hot-reload,
-LMT code that will break with Blender 4.4+ slotted actions, and others.
+and others. (Slotted actions on Blender 4.4+ / 5 are handled since 2026-10-14, `lib/blender_compat.py`.)
