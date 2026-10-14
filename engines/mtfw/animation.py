@@ -14,6 +14,7 @@ import mathutils
 import numpy as np
 
 from albam.exceptions import AlbamCheckFailure
+from albam.lib import blender_compat as compat
 from albam.registry import blender_registry
 from .structs.lmt import Lmt
 
@@ -184,11 +185,11 @@ def load_lmt(file_item, context):
             if renamed_bone_flag:
                 data_path = f"pose.bones[\"{armature.data.bones[bone_index].name}\"].{TRACK_MODE}"
                 group_name = f"{track.bone_index}.{armature.data.bones[bone_index].name}.{action_type}"
-                group = action.groups.get(group_name) or action.groups.new(group_name)
+                group = compat.group_ensure(action, group_name)
             else:
                 data_path = f"pose.bones[\"{bone_index}\"].{TRACK_MODE}"
                 group_name = f"{track.bone_index}.{bone_index}.{action_type}"
-                group = action.groups.get(group_name) or action.groups.new(group_name)
+                group = compat.group_ensure(action, group_name)
             try:
                 num_curv = len(decoded_frames[0])
             except IndexError:
@@ -201,7 +202,7 @@ def load_lmt(file_item, context):
             for i in range(num_curv):
                 try:
                     #action.fcurves.new(data_path=data_path, index=i, action_group=group_name)
-                    curve = action.fcurves.new(data_path=data_path, index=i, action_group=group_name)
+                    curve = compat.fcurve_new(action, data_path, index=i, group=group_name)
                     curves.append(curve)
                     if is_cyclic:
                         mod = curve.modifiers.new('CYCLES')
@@ -210,7 +211,7 @@ def load_lmt(file_item, context):
 
                 except KeyError as err:
                     print('unknown error:', err)
-                    curves.append(action.fcurves.new(data_path=data_path+'[1]', index=i, action_group=group_name))
+                    curves.append(compat.fcurve_new(action, data_path + '[1]', index=i, group=group_name))
 
             # stored keys start at frame 0, the game's frames (see decode_type_6)
             for frame_index, frame_data in enumerate(decoded_frames):
@@ -599,7 +600,7 @@ class ExportTiming:
     def __init__(self, action):
         self.fps = get_lmt_props(action).source_fps
         self.scale = FRAMERATE / self.fps
-        key_frames = [kp.co[0] for fc in action.fcurves if fc.data_path.startswith('pose.bones["')
+        key_frames = [kp.co[0] for fc in compat.action_fcurves(action) if fc.data_path.startswith('pose.bones["')
                       for kp in fc.keyframe_points]
         # events count too: an LMT block with only constant tracks has its keys on frame 1
         # but its first events on frame 0
@@ -774,7 +775,7 @@ def _get_export_tracks(action, armature, notes):
     """
     tracks = {}
     ignored = {}
-    for fc in action.fcurves:
+    for fc in compat.action_fcurves(action):
         data_path = fc.data_path
         if not data_path.startswith('pose.bones["') or not fc.keyframe_points:
             continue
@@ -1266,8 +1267,7 @@ def _on_active_anim_changed(self, context):
         return
     link_legacy_events(action)
     if self.armature:
-        self.armature.animation_data_create()
-        self.armature.animation_data.action = action
+        compat.assign_action(self.armature, action)
 
 
 @blender_registry.register_blender_prop

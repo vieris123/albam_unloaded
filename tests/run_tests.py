@@ -25,7 +25,7 @@ import common  # noqa: E402
 DEFAULT_BLENDER = os.environ.get("ALBAM_BLENDER", r"C:\Program Files\Blender Foundation\Blender 4.2\blender.exe")
 
 
-def run(test, blender, logs):
+def run(test, blender, logs, timeout):
     name = os.path.splitext(os.path.basename(test))[0]
     kind = os.path.basename(os.path.dirname(test))
     if kind == "blender":
@@ -33,16 +33,25 @@ def run(test, blender, logs):
     else:
         cmd = [sys.executable, test]
     start = time.time()
-    proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
-    output = proc.stdout + proc.stderr
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout)
+        output, returncode = proc.stdout + proc.stderr, proc.returncode
+    except subprocess.TimeoutExpired as err:   # the process is killed; a hung Blender shouldn't block the run
+        output = (err.stdout or b"").decode("utf-8", "replace") + (err.stderr or b"").decode("utf-8", "replace") \
+            if isinstance(err.stdout, bytes) else (err.stdout or "") + (err.stderr or "")
+        output += f"\nTIMED OUT after {timeout} s\n"
+        returncode = None
     log = os.path.join(logs, f"{kind}_{name}.txt")
     with open(log, "w", encoding="utf-8") as f:
         f.write(output)
     fails = [line for line in output.splitlines() if line.startswith("FAIL ")]
     summary = re.findall(r"^FAILURES: (.*)$", output, re.M)
-    ok = proc.returncode == 0 and not fails and summary == ["[]"]
-    reason = "" if ok else (fails[0][5:] if fails else summary[-1] if summary else f"exit code {proc.returncode}, "
-                            "no FAILURES line")
+    ok = returncode == 0 and not fails and summary == ["[]"]
+    if returncode is None:
+        reason = f"timed out after {timeout} s"
+    else:
+        reason = "" if ok else (fails[0][5:] if fails else summary[-1] if summary else f"exit code {returncode}, "
+                                "no FAILURES line")
     return name, kind, ok, time.time() - start, reason, log
 
 
@@ -51,6 +60,7 @@ def main():
     parser.add_argument("words", nargs="*", help="only tests whose file name contains one of these")
     parser.add_argument("-j", "--jobs", type=int, default=4, help="tests run at once (Blender uses ~1 GB each)")
     parser.add_argument("--blender", default=DEFAULT_BLENDER, help="blender executable (or ALBAM_BLENDER)")
+    parser.add_argument("--timeout", type=float, default=1800, help="seconds before a test is killed and fails")
     args = parser.parse_args()
     tests = sorted(glob.glob(os.path.join(HERE, "blender", "test_*.py"))) + \
         sorted(glob.glob(os.path.join(HERE, "corpus", "*.py")))
@@ -68,7 +78,7 @@ def main():
     print(f"{len(tests)} tests, {args.jobs} at a time; logs in {logs}", flush=True)
     results = []
     with ThreadPoolExecutor(max_workers=max(args.jobs, 1)) as pool:   # results print as each test finishes
-        futures = [pool.submit(run, t, args.blender, logs) for t in tests]
+        futures = [pool.submit(run, t, args.blender, logs, args.timeout) for t in tests]
         for future in as_completed(futures):
             name, kind, ok, seconds, reason, log = future.result()
             results.append(ok)

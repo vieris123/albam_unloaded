@@ -2,6 +2,7 @@ import os
 
 import bpy
 
+from albam.lib import blender_compat
 from albam.registry import blender_registry
 
 
@@ -345,7 +346,7 @@ def _get_action_items(self, context):
 
 def _action_length(action, context):
     """Length in game frames (60 fps, starting at 0), see animation.ExportTiming"""
-    if action.fcurves:
+    if blender_compat.action_has_curves(action):
         return _animation().game_length(action)
     scene = context.scene
     return int(round((scene.frame_end - scene.frame_start) * 60 / get_lmt_props(action).source_fps))

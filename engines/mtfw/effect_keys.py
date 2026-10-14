@@ -26,6 +26,7 @@ import math
 
 import bpy
 
+from albam.lib import blender_compat as compat
 from .efl import keyframe as kfm
 from .efl import schema
 from .efl.edit import KF_FLAGS, as_list, keyframe_value_type, kf_from_prop, kf_same, kf_to_prop
@@ -318,29 +319,25 @@ def _value_of(ob, name, size):
 # -- curves -----------------------------------------------------------------------------------------
 
 def _action(ob, create=False):
+    if create:
+        return compat.ensure_action(ob, f"{ob.name}_keys")
     ad = ob.animation_data
-    if ad is None:
-        if not create:
-            return None
-        ad = ob.animation_data_create()
-    if ad.action is None and create:
-        ad.action = bpy.data.actions.new(f"{ob.name}_keys")
-    return ad.action
+    return ad.action if ad is not None else None
 
 
 def _curves(ob, data_path):
     action = _action(ob)
     if action is None:
         return {}
-    return {fc.array_index: fc for fc in action.fcurves if fc.data_path == data_path}
+    return {fc.array_index: fc for fc in compat.fcurves_of(action, ob) if fc.data_path == data_path}
 
 
 def _remove_curves(ob, data_path):
     action = _action(ob)
     if action is None:
         return
-    for fc in [fc for fc in action.fcurves if fc.data_path == data_path]:
-        action.fcurves.remove(fc)
+    for fc in [fc for fc in compat.fcurves_of(action, ob) if fc.data_path == data_path]:
+        compat.fcurve_remove(action, fc, ob)
 
 
 def _write_curves(ob, data_path, size, frames, values, interpolation, loop, group):
@@ -348,7 +345,7 @@ def _write_curves(ob, data_path, size, frames, values, interpolation, loop, grou
     _remove_curves(ob, data_path)
     action = _action(ob, create=True)
     for index in range(size):
-        fc = action.fcurves.new(data_path, index=index, action_group=group)
+        fc = compat.fcurve_new(action, data_path, index=index, group=group, owner=ob)
         fc.keyframe_points.add(len(frames))
         for kp, frame, value in zip(fc.keyframe_points, frames, values):
             kp.co = (frame, value[index] if size > 1 else value)
@@ -687,7 +684,7 @@ def select_track(ob, slot, field):
         action = _action(target)
         if action is None:
             continue
-        for fc in action.fcurves:
+        for fc in compat.fcurves_of(action, target):
             fc.select = fc.data_path in (value_path, rand_path) and (target is owner or fc.data_path == rand_path)
             fc.hide = False
 
@@ -697,7 +694,7 @@ def shift(ob, delta):
     action = _action(ob)
     if action is None or not delta:
         return
-    for fc in action.fcurves:
+    for fc in compat.fcurves_of(action, ob):
         for kp in fc.keyframe_points:
             kp.co.x += delta
             kp.handle_left.x += delta

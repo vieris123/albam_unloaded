@@ -12,6 +12,7 @@ see ROADMAP.md "Check in the game".
 python tests/run_tests.py              # everything, 4 at a time
 python tests/run_tests.py keys wait    # tests whose file name contains one of these words
 python tests/run_tests.py -j 2 --blender "C:/Program Files/Blender Foundation/Blender 4.2/blender.exe"
+python tests/run_tests.py --timeout 600 actions   # a test still running after that many seconds is killed and fails (default 1800)
 ```
 
 A test passes when it prints `FAILURES: []`, no line starting with `FAIL `, and exits with 0; one that lacks an
@@ -31,7 +32,7 @@ The tests only read game files, never write them.
 | `ALBAM_DMC4_DATA` | `E:\DMC mod stuffs` | the folder holding `arctool` (extracted DX9 arcs; Nero is `arctool\uPlayerNero-vanilla`) |
 | `ALBAM_DMC4_MODS` | `D:\DMC4 mods` | mod packs; DanteJDC's `ec002_00v0` is used by `test_missing` and `test_billboard_modes` |
 | `ALBAM_TEST_OUT` | `<temp>/albam_tests` | where tests write (exports, Save to Game Folder output, logs) |
-| `ALBAM_BLENDER` | Blender 4.2's default path | the Blender the runner starts |
+| `ALBAM_BLENDER` | Blender 4.2's default path | the Blender the runner starts (`--blender` too; the suite also runs on 5.4 alpha) |
 
 `tests/common.py` holds these paths; tests use `common.DATA`, `common.NERO`, `common.out_dir(name)` and
 `common.skip_unless(path)`.
@@ -54,6 +55,7 @@ The tests only read game files, never write them.
 | `test_efs_ean`, `test_efs_curve`, `test_efs_join` | strips: round trip, edits, a strip converted to a curve, a mesh joined into a strip |
 | `test_ean_uv`, `test_ean_mesh`, `test_ean_hidden` | flipbooks: UV editing, joining meshes / frames from a mesh, hidden state over rebuilds |
 | `test_game_folder` | Save to Game Folder |
+| `test_actions` | (not effects) actions on this Blender's API, 4.2 or 5: LMT import plays and re-exports, the foot IK ghost plays the same action, an SDL round-trips and follows a key edit |
 | `test_frame_cache` | the per-frame playback cache: replays, scrubbing and fresh computation draw the same; camera moves redraw |
 | `test_ribbon_nodes` | line ribbons built by the Ribbons node group match the points' camera-facing strips, UVs, colours and material |
 | `test_missing` | missing textures |

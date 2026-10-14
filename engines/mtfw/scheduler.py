@@ -30,6 +30,7 @@ from dmc4xml import sdl as sdl_codec
 from dmc4xml.dti import dti_id as _dti_id, dti_name as _dti_name
 
 from albam.exceptions import AlbamCheckFailure
+from albam.lib import blender_compat as compat
 from albam.registry import blender_registry
 from albam.vfs import VirtualFileData
 from .placement import ordered_children, own_collection
@@ -217,18 +218,14 @@ def _key_numeric(ob, t, key):
     ob[key] = _prop_value(t.type, t.keys[0].value) if t.keys else _prop_value(t.type, (0.0,) * 4 if t.type == sdl_codec.VECTOR else 0)
     if not t.keys:
         return
-    if ob.animation_data is None:
-        ob.animation_data_create()
-    if ob.animation_data.action is None:
-        ob.animation_data.action = bpy.data.actions.new(f"{ob.name}_sdl")
-    action = ob.animation_data.action
+    action = compat.ensure_action(ob, f"{ob.name}_sdl")
     channels = 4 if t.type == sdl_codec.VECTOR else 1
     path = _data_path(key)
     # a track can hold two keys on one frame (an instant jump); an F-curve can't, so it gets the later one and
     # export puts both back while that keyframe is unchanged
     keys = sorted({k.frame: k for k in t.keys}.values(), key=lambda k: k.frame)
     for ch in range(channels):
-        fc = action.fcurves.new(path, index=ch, action_group=ob.name)
+        fc = compat.fcurve_new(action, path, index=ch, group=ob.name, owner=ob)
         fc.keyframe_points.add(len(keys))
         values = [k.value[ch] if t.type == sdl_codec.VECTOR else
                   (_signed(k.value) if t.type == sdl_codec.INT else float(k.value)) for k in keys]
@@ -264,7 +261,7 @@ def _fcurves(ob, key, channels):
     if ad is None or ad.action is None:
         return None
     path = _data_path(key)
-    curves = [ad.action.fcurves.find(path, index=ch) for ch in range(channels)]
+    curves = [compat.fcurve_find(ad.action, path, index=ch, owner=ob) for ch in range(channels)]
     return curves if any(c is not None and len(c.keyframe_points) for c in curves) else None
 
 

@@ -28,6 +28,8 @@ import bpy
 from bpy.app.handlers import persistent
 from mathutils import Matrix, Vector
 
+from albam.lib import blender_compat
+
 from albam.registry import blender_registry
 
 PREFIX = "IKP_"
@@ -253,7 +255,7 @@ def build_rig(armature, ground):
         keep.subtarget = foot
 
     errors = _calibrate_poles(armature, ghost, legs)
-    ghost.animation_data.action = armature.animation_data.action if armature.animation_data else None
+    blender_compat.assign_action(ghost, armature.animation_data.action if armature.animation_data else None)
     ghost.hide_set(True)
     update_rig(bpy.context.scene, armature)
     return errors
@@ -335,7 +337,7 @@ def _calibrate_poles(armature, ghost, legs):
     for pb in armature.pose.bones:
         pb.matrix_basis = main_pose[pb.name]
     if armature.animation_data:
-        armature.animation_data.action = main_action
+        blender_compat.assign_action(armature, main_action)
     view_layer.update()
     return errors
 
@@ -391,7 +393,7 @@ def update_rig(scene, armature):
         return
     action = armature.animation_data.action if armature.animation_data else None
     if ghost.animation_data and ghost.animation_data.action != action:
-        ghost.animation_data.action = action
+        blender_compat.assign_action(ghost, action)
     legs = _leg_bones(armature)
     if legs is None:
         return

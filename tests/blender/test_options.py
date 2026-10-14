@@ -16,18 +16,28 @@ def check(cond, msg):
         failures.append(msg)
 
 try:
-    # refraction count over the DX9 files with the corrected occlusion bit
-    n = total = 0
+    # refraction over the DX9 files: ParticleOptionFlag 0x10 unless the u8 CullingFlag has 0x2 OCCLUSION (before
+    # 2026-10-08 the check used 0x200 of the old u16 CullingFlag, i.e. a VolumeBlendRate bit, and 324 of 1,304
+    # refracting particles were missed). The folder holds duplicates and mod packs, so compare rules, not a count.
+    n = total = old_rule = 0
     for path in glob.glob(common.DATA + r"\arctool\**\*.efl", recursive=True):
         try:
             e = EffectList.from_bytes(open(path, "rb").read())
         except Exception:
             continue
         for r in e.records:
-            if r.ptcl is not None:
-                total += 1
-                n += sim.refracts(r.ptcl)
-    check(n == 1304, f"{n} of {total} particles refract (all 1,304 with the option; 980 before the fix)")
+            p = r.ptcl
+            if p is None or not p.has("ParticleOptionFlag") or not p.has("CullingFlag"):
+                continue
+            total += 1
+            expected = bool(p.get("ParticleOptionFlag") & 0x10) and not (p.get("CullingFlag") & 0x2)
+            check(sim.refracts(p) == expected, f"{os.path.basename(path)} record {e.records.index(r)}: refracts "
+                  f"{sim.refracts(p)}, expected {expected}") if sim.refracts(p) != expected else None
+            n += expected
+            volume = p.get("VolumeBlendRate") if p.has("VolumeBlendRate") else 0
+            old_rule += bool(p.get("ParticleOptionFlag") & 0x10) and not ((p.get("CullingFlag") | (volume << 8)) & 0x200)
+    print(f"{n} of {total} particles refract ({old_rule} under the old u16 rule)")
+    check(n > old_rule > 0, "the u8 OCCLUSION rule keeps more refracting particles than the old u16 one")
 
     ROOT = common.DATA + r"\arctool\uPlayerNero-vanilla"
     REL = r"effect\efl\com\ec000_00v2"

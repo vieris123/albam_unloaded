@@ -19,6 +19,7 @@ import bpy
 from mathutils import Matrix, Quaternion
 
 from albam.exceptions import AlbamCheckFailure
+from albam.lib import blender_compat as compat
 from albam.registry import blender_registry
 from albam.vfs import VirtualFileData
 from .efl import EffectList, schema
@@ -348,7 +349,7 @@ def _short(value):
 
 def _animated_paths(ob):
     action = ob.animation_data.action if ob.animation_data else None
-    return {fc.data_path for fc in action.fcurves} if action else set()
+    return {fc.data_path for fc in compat.fcurves_of(action, ob)} if action else set()
 
 
 def _parent_frame(ob, root):
@@ -596,7 +597,7 @@ def adopt_duplicate(ob, source):
         return None
     source_action = source.animation_data.action if source.animation_data is not None else None
     if source_action is not None and ob.animation_data is not None and ob.animation_data.action == source_action:
-        ob.animation_data.action = source_action.copy()   # generator keyframes of its own
+        compat.assign_action(ob, source_action.copy())   # generator keyframes of its own
     _make_new_record(ob, source, root)
     if root != effect_root(source):   # pasted into another effect: live in its collection
         for collection in list(ob.users_collection):

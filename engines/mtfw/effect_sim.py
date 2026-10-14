@@ -23,6 +23,7 @@ import bpy
 from bpy.app.handlers import persistent
 from mathutils import Euler, Matrix, Quaternion, Vector
 
+from albam.lib import blender_compat as compat
 from albam.registry import blender_registry
 from .efl import EffectList
 from .efl.ean import ANIM_FLIP_U, ANIM_FLIP_V, flip_affine_row
@@ -175,9 +176,7 @@ def create_sim_object(collection, name, generator, source, root, record_index, i
     ob[SIM_KEY] = dict(info, record=record_index, uv_stride=UV_STRIDE)
     modifier = ob.modifiers.new("EFL Particles", "NODES")
     modifier.node_group = _node_group()
-    for item in modifier.node_group.interface.items_tree:
-        if getattr(item, "in_out", None) == "INPUT" and item.name == "Source":
-            modifier[item.identifier] = source
+    compat.set_node_input(modifier, "Source", source)
     source.hide_viewport = True
     source.hide_render = True
     update_object(ob, bpy.context.scene)
@@ -196,9 +195,7 @@ def create_model_object(collection, name, generator, root, record_index, info, s
     ob[SIM_KEY] = dict(info, record=record_index, uv_stride=UV_STRIDE)
     modifier = ob.modifiers.new("EFL Model Particles", "NODES")
     modifier.node_group = _model_node_group()
-    for item in modifier.node_group.interface.items_tree:
-        if getattr(item, "in_out", None) == "INPUT" and item.name == "Collection":
-            modifier[item.identifier] = source_collection
+    compat.set_node_input(modifier, "Collection", source_collection)
     update_object(ob, bpy.context.scene)
     return ob
 
@@ -253,22 +250,17 @@ def _ensure_ribbon_modifier(ob):
         modifier.node_group = _ribbon_node_group()
         _topology.pop(ob.name, None)   # the mesh holds points now, not strips
     material = ob.data.materials[0] if ob.data.materials else None
-    for item in modifier.node_group.interface.items_tree:
-        if getattr(item, "in_out", None) == "INPUT" and item.name == LINE_MATERIAL:
-            if modifier[item.identifier] != material:
-                modifier[item.identifier] = material
-            break
+    if compat.get_node_input(modifier, LINE_MATERIAL) != material:
+        compat.set_node_input(modifier, LINE_MATERIAL, material)
     return modifier
 
 
 def _set_eye(ob, eye):
     """The eye position (object space) the ribbons face, on the modifier."""
     modifier = _ensure_ribbon_modifier(ob)
-    for item in modifier.node_group.interface.items_tree:
-        if getattr(item, "in_out", None) == "INPUT" and item.name == LINE_EYE:
-            if tuple(modifier[item.identifier]) != tuple(eye):
-                modifier[item.identifier] = tuple(eye)
-            break
+    current = compat.get_node_input(modifier, LINE_EYE)
+    if current is None or tuple(current) != tuple(eye):
+        compat.set_node_input(modifier, LINE_EYE, tuple(eye))
 
 
 def frame_tables(anim, image, anim_flag, ean_module):
@@ -1310,7 +1302,7 @@ def _ribbon_node_group():
     right.vector = (1.0, 0.0, 0.0)
     side = switch("VECTOR", less(vmath("LENGTH", side), 1e-12), side, right.outputs["Vector"])
     normal = nodes.new("GeometryNodeSetCurveNormal")
-    normal.mode = "FREE"
+    compat.set_curve_normal_free(normal)
     links.new(curve.outputs["Curve"], normal.inputs["Curve"])
     links.new(vmath("NORMALIZE", side), normal.inputs["Normal"])
     radius = nodes.new("GeometryNodeSetCurveRadius")
