@@ -232,7 +232,8 @@ def create_line_object(collection, name, generator, root, record_index, info, ma
     ob["efl_root"] = root
     ob["efl_generator"] = generator
     ob[SIM_KEY] = dict(info, record=record_index, uv_stride=UV_STRIDE)
-    _ensure_ribbon_modifier(ob)
+    if info["kind"] in LINE_KINDS:   # sword trails (STRIP_KINDS) are written as finished quads: no node group
+        _ensure_ribbon_modifier(ob)
     update_object(ob, bpy.context.scene)
     return ob
 
@@ -581,6 +582,8 @@ def update_object(ob, scene):
         to_local = ob.matrix_world.inverted()
         _set_eye(ob, to_local @ (camera.translation if camera is not None else Vector((0.0, 0.0, 1.0e6))))
     elif info["kind"] in STRIP_KINDS:
+        for modifier in [m for m in ob.modifiers if m.type == "NODES"]:   # a Ribbons group from an older file
+            ob.modifiers.remove(modifier)                                   # would rebuild the finished quads
         _write_ribbons(ob, *payload)
     else:
         _write_points(ob, payload)

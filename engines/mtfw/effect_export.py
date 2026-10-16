@@ -467,6 +467,7 @@ def apply_to_scene(context, root, rebuild=False):
     selected_keys = {key for key in (_object_key(ob, root, order) for ob in view_objects if _is_selected(ob)) if key}
     from .effect import rebuild_effect
     new_root = rebuild_effect(context, root, data)
+    context.view_layer.update()   # the new objects join view_layer.objects on a sync (Blender 5.4 doesn't sync by itself here)
     new_objects = _objects_by_key(new_root)
     for key in selected_keys:
         ob = new_objects.get(key)

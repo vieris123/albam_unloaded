@@ -30,7 +30,10 @@ The addon imports and exports models (.mod), textures (.tex/.rtex), collision (.
   (`effect_sim._wrapped_modifier`, `ALBAM_EFL_Wrap_<object>`) whose node defaults hold the source object /
   collection, the ribbon material and the Eye (`_wrapper_call`); `node_group_of(ob)` / `inner_group` look through
   it. 5.4's Curve to Mesh scales the profile by its new `Scale` input, not the curve radius (wired when present).
-  `run_tests.py --timeout` kills a hung Blender.
+  Objects linked by script join `view_layer.objects` only on a sync; 4.2 happened to sync during a rebuild, 5.4
+  doesn't, so `apply_to_scene` calls `view_layer.update()` before restoring the selection (else the editor lost its
+  effect after a rebuild: test_filter). `run_tests.py --timeout` kills a hung Blender. The full Blender suite was
+  green on 5.4 on 2026-10-16.
 - Tests: `tests/` (2026-10-12; see `tests/README.md`): `python tests/run_tests.py [words]` runs the Blender tests
   (`tests/blender/test_*.py`, headless) and the plain-Python corpus tests (`tests/corpus/`), 4 at a time, and
   reports each; data paths come from `tests/common.py` (`ALBAM_DMC4_DATA`, default `E:\DMC mod stuffs`). Add a test
@@ -908,7 +911,10 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
     wrapper (see Runtime: modifier inputs are unusable on 5.4): `Eye` = the camera (or the followed viewport) in
     object space, the wrapper's Group-node socket, on every update (`_set_eye`), and the material on its Set
     Material node (`_ensure_ribbon_modifier`, which also rebuilds the modifier on line objects from older .blend
-    files). Since 2026-10-14 the group is `ALBAM_EFL_Ribbons_v2` (no Material input). Ribbons therefore leave the camera out of their frame-cache signature unless they have a culling
+    files). Since 2026-10-14 the group is `ALBAM_EFL_Ribbons_v2` (no Material input). **Sword-trail objects
+    (STRIP_KINDS) carry no node group**: their quads are final (`_write_ribbons`), and `update_object` removes a
+    Ribbons modifier left on them by older files (with it, 5.4 scaled the rebuilt strips by the missing `half`
+    attribute to zero width: "the polygonstrips in ec005_31v0 aren't rendering", 2026-10-16). Ribbons therefore leave the camera out of their frame-cache signature unless they have a culling
     fade, so orbiting with Face Viewport only moves `Eye` instead of recomputing them in Python. Sword trails
     (`_update_strips`) still build their quads in Python (`_write_ribbons`). Net per-frame cost is about the same
     (`ec024_60v2`: first pass 26 -> 25 ms, replay 8 -> 9 ms: Python saved ~2.6 ms, Blender's evaluation of the 72
