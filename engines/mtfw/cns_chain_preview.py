@@ -584,10 +584,8 @@ def _on_frame_change_pre(scene, depsgraph=None):
 
 @persistent
 def _on_frame_change_post(scene, depsgraph=None):
-    try:
-        col_shapes.update_visibility(scene)
-    except Exception as err:                # noqa: BLE001 - never break playback
-        print(f"COL visibility: {err}")
+    # not hide_set here: changing the view layer's bases inside the frame update crashes Blender 5.4 during playback
+    col_shapes.queue_visibility()
     frame = scene.frame_current
     chains_by_arm = preview_chains(scene)
     for arm_name in [n for n in _runners if n not in {a.name for a in chains_by_arm}]:

@@ -360,6 +360,11 @@ def _parent_frame(ob, root):
             return root.matrix_world, None, f"parent bone {ob.parent_bone!r} not found"
         joint = pose_bone.bone.get("mtfw.anim_retarget")
         if joint is None:
+            from albam.engines.mtfw.joints import ensure_joint_numbers, is_game_armature, is_helper
+            if is_game_armature(ob.parent) and not is_helper(pose_bone.bone):
+                ensure_joint_numbers(ob.parent)     # a bone added in Blender gets its joint number now
+                joint = pose_bone.bone.get("mtfw.anim_retarget")
+        if joint is None:
             return (ob.parent.matrix_world @ pose_bone.matrix, None,
                     f"bone {ob.parent_bone!r} has no mtfw.anim_retarget (not a game joint)")
         return ob.parent.matrix_world @ pose_bone.matrix, int(joint), None

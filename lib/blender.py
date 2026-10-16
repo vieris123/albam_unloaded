@@ -196,9 +196,11 @@ def get_mesh_vertex_groups(bl_mesh):
     return vertex_groups
 
 
-def get_bone_indices_and_weights_per_vertex(blender_object):
+def get_bone_indices_and_weights_per_vertex(blender_object, bone_index=None):
     """
-    Return {vertex_index: [(bone_index, weight_value), ...]}
+    Return {vertex_index: [(bone_index, weight_value), ...]}. bone_index: bone name -> index to use (the .mod
+    bone table's, which differs from the armature's order once bones are added); without it, the armature's order.
+    Vertex groups that aren't bones are skipped
     """
     vertex_groups = blender_object.vertex_groups
     modifiers = {m.type: m for m in blender_object.modifiers}
@@ -208,7 +210,7 @@ def get_bone_indices_and_weights_per_vertex(blender_object):
     if not vertex_groups or 'ARMATURE' not in modifiers:
         return weights_per_vertex
     armature = modifiers['ARMATURE'].object.data
-    bone_names_to_index = {b.name: i for i, b in enumerate(armature.bones)}
+    bone_names_to_index = bone_index if bone_index is not None else {b.name: i for i, b in enumerate(armature.bones)}
     # https://www.blender.org/api/blender_python_api_current/bpy.types.VertexGroupElement.html
     vertex_groups = blender_object.vertex_groups
     for vertex in blender_object.data.vertices:
@@ -219,8 +221,10 @@ def get_bone_indices_and_weights_per_vertex(blender_object):
             # avoiding list comprehensions for readability
             # bones in blender are matched to vertex group only by name
             vgroup_name = vertex_groups[group.group].name
-            bone_index = bone_names_to_index[vgroup_name]
-            pair = (bone_index, group.weight)
+            index = bone_names_to_index.get(vgroup_name)
+            if index is None:
+                continue
+            pair = (index, group.weight)
             weights_per_vertex[vertex.index].append(pair)
     return weights_per_vertex
 

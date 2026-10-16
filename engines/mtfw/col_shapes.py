@@ -774,6 +774,27 @@ def update_visibility(scene):
                     ob.hide_set(hidden)
 
 
+_visibility_pending = [False]
+
+
+def _visibility_timer():
+    _visibility_pending[0] = False
+    try:
+        update_visibility(bpy.context.scene)
+    except Exception as err:                # noqa: BLE001 - never break playback
+        print(f"COL visibility: {err}")
+    return None
+
+
+def queue_visibility():
+    """update_visibility on the next main-loop turn. Frame-change handlers use this: hide_set changes the view
+    layer's bases, and doing that inside the frame update makes Blender 5.4 read a stale base and crash during
+    playback (deg_check_base_in_depsgraph; an LMT with hitbox events playing on the shapes' armature)"""
+    if not _visibility_pending[0]:
+        _visibility_pending[0] = True
+        bpy.app.timers.register(_visibility_timer, first_interval=0.0)
+
+
 # ---- import and new files ------------------------------------------------------------------------------------------
 
 def _new_root(context, stem, app_id, relative_path, data, armature=None):
@@ -909,6 +930,8 @@ class ALBAM_OT_ColAddShape(bpy.types.Operator):
         if shapes_armature(root) is None:
             root[ARMATURE_PROP] = arm
             root.parent = arm
+        from albam.engines.mtfw.joints import ensure_joint_numbers
+        ensure_joint_numbers(arm)       # bones added in Blender get their joint numbers now
         bone = arm.data.bones.active
         if bone.get(JOINT_PROP) is None:
             self.report({"ERROR"}, f"bone {bone.name} has no joint number (mtfw.anim_retarget)")

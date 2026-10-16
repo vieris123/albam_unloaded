@@ -123,6 +123,10 @@ The game behaviour is known; Blender only approximates it. The other preview gap
     groups to attack / defend entries; not decoded yet.
   - Plan: codecs for atk / dfd / idx in dmc4xml (byte-exact on the corpus), then Albam: the attack / defend entries
     editable alongside the `.col` groups.
+- [x] **Bones added in Blender export to the `.mod`.** Done 2026-10-16 (`joints.py`, see CLAUDE.md): new bones get
+  joint numbers and go after the model's own; renamed / reordered bones are fine. Check in the game: a model with a
+  new bone weighted to some vertices, animated by an LMT track and driving a chain. Still refused: deleting a model's
+  own bones (needs remapping every LMT / chain / .col / effect that refers to them).
 - [ ] **Editable `.mod` model settings beyond the light group** (`model_info`: middist, lowdist, strip type).
 - [x] **Particle keyframes as F-curves.** Done 2026-10-11 (`effect_keys.py`): tracks are custom properties on the
   record Empty with F-curves ("… Rand" / "… B" for the random part), generator keys are transform keys, loop is a
@@ -199,6 +203,6 @@ Suggested order: finish 1, then Edit as XML for XFS (unlocks every plain-XML cla
 
 ## Inherited bugs (from upstream Albam)
 
-Recorded under "Known bugs and gotchas" in `CLAUDE.md`, not fixed yet: texture slots don't round-trip,
-the SBC21 (other games) export bugs in `collision.py`, the detail-map driver path, `world_pos_fix` being a no-op, stale state after hot-reload,
+Recorded under "Known bugs and gotchas" in `CLAUDE.md`, not fixed yet: re5 texture slots,
+the SBC21 (other games) export bugs in `collision.py`, `world_pos_fix` being a no-op, stale state after hot-reload,
 and others. (Slotted actions on Blender 4.4+ / 5 are handled since 2026-10-14, `lib/blender_compat.py`.)

@@ -350,6 +350,8 @@ def new_chain(context, armature, bones, path, settings=None):
         raise AlbamCheckFailure("No chain file to build on", details="A new chain uses the layout of an existing one.",
                                 solution="Add a Game Files folder that has a .phs (e.g. a player's model folder), or "
                                          "import any chain first.")
+    from albam.engines.mtfw.joints import ensure_joint_numbers
+    ensure_joint_numbers(armature)      # bones added in Blender get their joint numbers now
     joints = slots_from_bones(armature, bones)
     if not joints:
         raise AlbamCheckFailure("No joints for the chain", details="The selected bones have no joint numbers.",

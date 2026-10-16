@@ -147,6 +147,27 @@ try:
     worst = max(max(abs(a - b) for a, b in zip(animation.decode_type_2(s.data)[0], animation.decode_type_2(o.data)[0]))
                 for s, o in root_loc if s.buffer_type == o.buffer_type == 2)
     check(worst < 1e-5, f"joint 0's constant location round-trips ({worst:.2e} m)")
+    # ref_data = the loop-start sample (the track's value at the loop frame) in looping animations, which the game
+    # interpolates toward when it wraps: it used to be the first key, so a run whose loop frame isn't 0 snapped
+    # back every loop. Rotations within compression precision, vectors within 0.1 cm (constant location tracks
+    # store a stale ref the game doesn't read)
+    bad_ref = []
+    for bi, (sb, ob) in enumerate(zip(src_lmt.block_offsets, out_lmt.block_offsets)):
+        if not sb.offset:
+            continue
+        exported = {(t.bone_index, t.usage): t for t in ob.block_header.tracks}
+        for s in sb.block_header.tracks:
+            o = exported.get((s.bone_index, s.usage))
+            if o is None or s.buffer_type == 2:
+                continue
+            a = [getattr(s.ref_data, c) for c in "xyz"]
+            b = [getattr(o.ref_data, c) for c in "xyz"]
+            d = max(abs(p - q) for p, q in zip(a, b))
+            if s.buffer_type in (4, 6):
+                d = min(d, max(abs(p + q) for p, q in zip(a, b)))
+            if d > (0.01 if s.buffer_type in (4, 6) else 0.1):
+                bad_ref.append((bi, s.bone_index, s.usage, round(d, 3)))
+    check(not bad_ref, f"every track's ref_data matches the source ({len(bad_ref)} off: {bad_ref[:4]})")
     # every (bone, property) with curves becomes a track, and the tracks import kept are written back
     tracks = animation._get_export_tracks(first, arm, [])
     written = len(out_lmt.block_offsets[0].block_header.tracks)

@@ -30,6 +30,7 @@ from albam.lib.blender import (
 from albam.exceptions import AlbamCheckFailure
 from albam.lib.misc import chunks
 from albam.registry import blender_registry
+from albam.engines.mtfw import joints
 from albam.vfs import VirtualFileData
 from .material import (
     build_blender_materials,
@@ -882,7 +883,14 @@ def export_mod(bl_obj):
         dst_mod.model_info.light_group = export_light_group(bl_obj, src_mod.model_info.light_group)
     _init_mod_header(bl_obj, src_mod, dst_mod)
 
-    bone_palettes = _create_bone_palettes(src_mod, bl_obj, bl_meshes)
+    # which bone is which entry of the bone table (bones added in Blender go last; joints.py), shared by the
+    # bone table, the palettes, the vertex weights and the weight bounds
+    dst_mod._albam_joint_layout = None
+    if bl_obj.type == "ARMATURE" and src_mod.header.version in (153, 156) and src_mod.header.num_bones:
+        dst_mod._albam_joint_layout = joints.export_layout(bl_obj, src_mod.bones_data.bones_hierarchy)
+    dst_mod._albam_bone_index = (joints.bone_index_map(dst_mod._albam_joint_layout)
+                                 if dst_mod._albam_joint_layout else None)
+    bone_palettes = _create_bone_palettes(src_mod, bl_obj, bl_meshes, dst_mod._albam_bone_index)
     dst_mod.bones_data = _serialize_bones_data(bl_obj, bl_meshes, src_mod, dst_mod, bone_palettes)
     dst_mod.groups = _serialize_groups(src_mod, dst_mod)
     materials_map, mrl, vtextures = serialize_materials_data(asset, bl_meshes, src_mod, dst_mod)
@@ -1030,6 +1038,8 @@ def _serialize_top_level_mod(bl_meshes, src_mod, dst_mod):
 def _serialize_bones_data(bl_obj, bl_meshes, src_mod, dst_mod, bone_palettes=None):
     if bl_obj.type != "ARMATURE":
         return
+    if getattr(dst_mod, "_albam_joint_layout", None):
+        return _serialize_joint_layout(bl_obj, src_mod, dst_mod, bone_palettes)
     dst_mod.header.num_bones = src_mod.header.num_bones
     bones_data = dst_mod.BonesData(_parent=dst_mod, _root=dst_mod._root)
     bones_data.bone_map = src_mod.bones_data.bone_map
@@ -1217,6 +1227,89 @@ def _serialize_bones_data(bl_obj, bl_meshes, src_mod, dst_mod, bone_palettes=Non
     return bones_data
 
 
+def _write_matrix(dst_mod, parent, column_form):
+    """a Matrix4x4 record from a column-form Matrix (the file stores the row-vector form: its transpose)"""
+    m = dst_mod.Matrix4x4(_parent=parent, _root=parent._root)
+    rows = column_form.transposed()
+    for name, values in zip(("row_1", "row_2", "row_3", "row_4"), rows):
+        row = dst_mod.Vec4(_parent=m, _root=m._root)
+        row.x, row.y, row.z, row.w = values
+        setattr(m, name, row)
+    return m
+
+
+def _copy_matrix(dst_mod, parent, src):
+    return _write_matrix(dst_mod, parent, _matrix_rows(src).transposed())
+
+
+def _serialize_joint_layout(bl_obj, src_mod, dst_mod, bone_palettes):
+    """The bone table from joints.export_layout: the source model's bones (fields as the file has them; local
+    matrices from the armature, the source's bits while they still match) then the bones added in Blender (fields
+    from their rest pose, joints.py). Inverse binds come from the local-matrix chain (_inverse_binds_from_chain)."""
+    entries = dst_mod._albam_joint_layout
+    index = dst_mod._albam_bone_index
+    src_bones = src_mod.bones_data.bones_hierarchy
+    bones_data = dst_mod.BonesData(_parent=dst_mod, _root=dst_mod._root)
+    dst_mod.header.num_bones = len(entries)
+    bone_map = list(src_mod.bones_data.bone_map)
+    bones_data.bones_hierarchy = []
+    bones_data.parent_space_matrices = []
+    bones_data.inverse_bind_matrices = []
+    if bone_palettes:
+        bones_data.bone_palettes = []
+        dst_mod.header.num_bone_palettes = len(bone_palettes)
+        for bp in bone_palettes.values():
+            bone_palette = dst_mod.BonePalette(_parent=bones_data, _root=bones_data._root)
+            bone_palette.unk_01 = len(bp)
+            bone_palette.indices = bp + [0] * (32 - len(bp))
+            bones_data.bone_palettes.append(bone_palette)
+            bone_palette._check()
+
+    for i, (bl_bone, src_i) in enumerate(entries):
+        bone = dst_mod.Bone(_parent=bones_data, _root=bones_data._root)
+        local = joints.local_matrix(bl_bone, index)
+        loc = dst_mod.Vec3(_parent=bone, _root=bone._root)
+        if src_i is not None:
+            src_bone = src_bones[src_i]
+            src_local = _matrix_rows(src_mod.bones_data.parent_space_matrices[src_i]).transposed()
+            unchanged = max(abs(a - b) for ra, rb in zip(local, src_local) for a, b in zip(ra, rb)) < 1e-3
+            if unchanged:
+                local = src_local
+            bone.idx_anim_map = src_bone.idx_anim_map
+            parent = joints.parent_index(bl_bone, index)
+            bone.idx_parent = src_bone.idx_parent if parent == src_bone.idx_parent else parent
+            bone.idx_mirror = src_bone.idx_mirror
+            bone.idx_mapping = src_bone.idx_mapping
+            bone.length = src_bone.length
+            if unchanged:
+                bone.parent_distance = src_bone.parent_distance
+                loc.x, loc.y, loc.z = src_bone.location.x, src_bone.location.y, src_bone.location.z
+            else:
+                bone.parent_distance = local.translation.length
+                loc.x, loc.y, loc.z = local.translation
+            m = (_copy_matrix(dst_mod, bones_data, src_mod.bones_data.parent_space_matrices[src_i]) if unchanged
+                 else _write_matrix(dst_mod, bones_data, local))
+        else:
+            joint = joints.joint_of(bl_bone)
+            bone.idx_anim_map = joint
+            bone.idx_parent = joints.parent_index(bl_bone, index)
+            bone.idx_mirror = joints.mirror_index(bl_bone, index, bl_obj)
+            bone.idx_mapping = 0                    # not read by the game (uModel::setModel)
+            bone.length = bl_bone.length * 100.0    # not read by the game either
+            bone.parent_distance = local.translation.length   # mLength
+            loc.x, loc.y, loc.z = local.translation          # mOffset, the rest translation
+            m = _write_matrix(dst_mod, bones_data, local)
+            bone_map[joint] = i
+        bone.location = loc
+        bones_data.bones_hierarchy.append(bone)
+        bones_data.parent_space_matrices.append(m)
+        bones_data.inverse_bind_matrices.append(_write_matrix(dst_mod, bones_data, Matrix.Identity(4)))
+    bones_data.bone_map = bytes(bone_map)
+    _inverse_binds_from_chain(src_mod, bones_data)
+    bones_data._check()
+    return bones_data
+
+
 def _matrix_rows(m):
     return Matrix([(r.x, r.y, r.z, r.w) for r in (m.row_1, m.row_2, m.row_3, m.row_4)])
 
@@ -1297,7 +1390,8 @@ def _get_vertex_colors(blender_mesh):
     return colors
 
 
-def _create_bone_palettes(src_mod, bl_armature, bl_meshes):
+def _create_bone_palettes(src_mod, bl_armature, bl_meshes, bone_index=None):
+    """bone_index: bone name -> bone-table index (joints.export_layout); without it, the armature's own order"""
     if src_mod.header.version not in (156, 153):
         return {}
     bone_palette_dicts = []
@@ -1308,7 +1402,8 @@ def _create_bone_palettes(src_mod, bl_armature, bl_meshes):
 
         mesh_vertex_groups = get_mesh_vertex_groups(mesh)
         bone_indices = {
-            bl_armature.pose.bones.find(mesh.vertex_groups[vgi].name)
+            (bone_index.get(mesh.vertex_groups[vgi].name, -1) if bone_index is not None
+             else bl_armature.pose.bones.find(mesh.vertex_groups[vgi].name))
             for vgi, vertices in mesh_vertex_groups.items() if vertices
         }
         bone_indices = {bi for bi in bone_indices if bi != -1}
@@ -1516,7 +1611,7 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
     uvs_per_vertex_3 = _uvs_for_slot(bl_mesh, 2)
     uvs_per_vertex_4 = _uvs_for_slot(bl_mesh, 3)
     color_per_vertex = _get_vertex_colors(bl_mesh)
-    weights_per_vertex = get_bone_indices_and_weights_per_vertex(bl_mesh)
+    weights_per_vertex = get_bone_indices_and_weights_per_vertex(bl_mesh, getattr(dst_mod, "_albam_bone_index", None))
     max_bones_per_vertex = max({len(data) for data in weights_per_vertex.values()}, default=0)
     normals = get_normals_per_vertex(bl_mesh.data)
     tangents = get_tangents_per_vertex(bl_mesh.data)
@@ -2040,7 +2135,8 @@ def _joint_space_weight_bound(armature, vertex_group, vertices_in_group, dst_mod
     p_game . inverse_bind[j] (row vectors). The game culls with c_world = (bsphere.xyz, 1) . joint world matrix,
     radius bsphere.w, and an OBB from oabb (rows 0-2 axes, row 3 centre, joint space) with oabb_dimension
     half-extents (uModel::updateBoundary 0x9E7DC0, cullPrimitivesAgainstFrustum 0x9EDDD0)."""
-    joint = armature.data.bones.find(vertex_group.name)
+    bone_index = getattr(dst_mod, "_albam_bone_index", None)
+    joint = bone_index.get(vertex_group.name, -1) if bone_index is not None else armature.data.bones.find(vertex_group.name)
     if joint < 0 or joint >= len(dst_mod.bones_data.inverse_bind_matrices):
         return None
     ibm = dst_mod.bones_data.inverse_bind_matrices[joint]

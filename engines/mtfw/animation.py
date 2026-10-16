@@ -597,6 +597,8 @@ def export_lmt(lmt_group, notes=None):
     notes = notes if notes is not None else []
     timings = {item.action.name: ExportTiming(item.action) for item in lmt_group.actions if item.action}
     _check_lmt_group(lmt_group, timings)
+    from albam.engines.mtfw.joints import ensure_joint_numbers
+    ensure_joint_numbers(lmt_group.armature)   # bones added in Blender get their joint numbers now
     dst_lmt = Lmt()
     header_size = _serialize_top_level_lmt(dst_lmt, lmt_group)
     final_size = _serialize_block(dst_lmt, lmt_group, header_size, timings, notes)
@@ -836,6 +838,7 @@ def _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size, timing, notes
     tracks = []
     armature = lmt_group.armature
     export_tracks = _get_export_tracks(action, armature, notes)
+    loop = get_lmt_props(action).loop_frames      # game frames, -1 = no loop: picks each track's ref_data
     table_start = cml_size
     cml_size += len(export_tracks) * 32
     for bone_name, action_type, channels in export_tracks:
@@ -868,7 +871,7 @@ def _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size, timing, notes
             pose_bone = armature.pose.bones.get(bone_name)
             order = pose_bone.rotation_mode if pose_bone and pose_bone.rotation_mode in EULER_ORDERS else 'XYZ'
             keys = _rotation_keys(channels, action_type, order, timing)
-            buffer, bf_size = _serialize_bone_rotation(dst_lmt, bone, track, keys)
+            buffer, bf_size = _serialize_bone_rotation(dst_lmt, bone, track, keys, loop)
         elif action_type == 'location':
             if track.bone_index == ROOT_MOTION_BONE_ID:
                 track.usage = 4
@@ -876,12 +879,12 @@ def _serialize_tracks(dst_lmt, lmt_group, action, block, cml_size, timing, notes
                 track.usage = 1
             track.buffer_type = 9
             keys = _track_keys(channels, (0.0, 0.0, 0.0), timing)
-            buffer, bf_size = _serialize_bone_location(dst_lmt, bone, track, keys)
+            buffer, bf_size = _serialize_bone_location(dst_lmt, bone, track, keys, loop)
         else:
             track.usage = 2
             track.buffer_type = 9
             keys = _track_keys(channels, (1.0, 1.0, 1.0), timing)
-            buffer, bf_size = _serialize_bone_scale(dst_lmt, track, keys)
+            buffer, bf_size = _serialize_bone_scale(dst_lmt, track, keys, loop)
 
         track.weight = 1.0
         track.data = buffer.to_byte_array()
@@ -978,21 +981,23 @@ def _serialize_events(dst_lmt, dst_action, action, timing):
     return serialized[0], serialized[1]
 
 
-def _track_keys(channels, defaults, timing):
+def _track_keys(channels, defaults, timing, max_gap=None):
     """
     (game frame, [values]) for every game frame where any channel of the track has a keyframe,
     with every channel evaluated there. The file stores all components of a track per key, so
     channels keyed on different frames are filled in from their curves. Keyframes are mapped to
     whole game frames (see ExportTiming). Animated tracks always get a key on frame 0, where the
-    game starts reading them, and gaps longer than 255 frames are split, the most a rotation
-    key's 8-bit duration can hold. Channels missing from the track take their value from defaults
+    game starts reading them. With max_gap, longer gaps are split: rotation keys (MAX_KEY_GAP, the
+    most their 8-bit duration holds); location and scale keys store 32-bit durations and aren't.
+    Channels missing from the track take their value from defaults
     """
     frames = {round(timing.to_game(kp.co[0])) for c in channels.values() for kp in c.keyframe_points}
     if len(frames) > 1:
         frames.add(0)
         ordered = sorted(frames)
-        for before, after in zip(ordered, ordered[1:]):
-            frames.update(range(before + MAX_KEY_GAP, after, MAX_KEY_GAP))
+        if max_gap:
+            for before, after in zip(ordered, ordered[1:]):
+                frames.update(range(before + max_gap, after, max_gap))
     return [
         (float(frame), [channels[i].evaluate(timing.to_action(frame)) if i in channels else default
                         for i, default in enumerate(defaults)])
@@ -1004,10 +1009,10 @@ def _rotation_keys(channels, prop, euler_order, timing):
     """(game frame, Quaternion) for a rotation track in any of Blender's rotation modes"""
     if prop == 'rotation_euler':
         return [(frame, Euler(xyz, euler_order).to_quaternion())
-                for frame, xyz in _track_keys(channels, (0.0, 0.0, 0.0), timing)]
+                for frame, xyz in _track_keys(channels, (0.0, 0.0, 0.0), timing, MAX_KEY_GAP)]
     if prop == 'rotation_axis_angle':
         keys = []
-        for frame, (angle, x, y, z) in _track_keys(channels, (0.0, 0.0, 1.0, 0.0), timing):
+        for frame, (angle, x, y, z) in _track_keys(channels, (0.0, 0.0, 1.0, 0.0), timing, MAX_KEY_GAP):
             axis = Vector((x, y, z))
             keys.append((frame, Quaternion(axis.normalized(), angle) if axis.length > 1e-9 else Quaternion()))
         return keys
@@ -1028,7 +1033,7 @@ def _quaternion_keys(channels, timing):
 
     key_times = sorted({kp.co[0] for c in channels.values() for kp in c.keyframe_points})
     keys = []
-    for game_frame, _ in _track_keys(channels, defaults, timing):
+    for game_frame, _ in _track_keys(channels, defaults, timing, MAX_KEY_GAP):
         t = timing.to_action(game_frame)
         after = next((i for i, kt in enumerate(key_times) if kt >= t - 1e-6), len(key_times))
         if after == len(key_times) or after == 0 or abs(key_times[after] - t) < 1e-6:
@@ -1062,7 +1067,7 @@ def _key_durations(keys):
     return [int(keys[k + 1][0] - keys[k][0]) for k in range(len(keys) - 1)] + [0]
 
 
-def _serialize_bone_rotation(dst_lmt, bone, track, keys):
+def _serialize_bone_rotation(dst_lmt, bone, track, keys, loop=-1):
     parent_quat = _rest_rotation(bone, track.bone_index)   # back to the parent's frame
 
     # to the game's space, which is what the file stores (keys and ref_data alike)
@@ -1071,10 +1076,11 @@ def _serialize_bone_rotation(dst_lmt, bone, track, keys):
     kf_num = len(keys)
     track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
     first = keys[0][1]
-    track.ref_data.x = first.x
-    track.ref_data.y = first.y
-    track.ref_data.z = first.z
-    track.ref_data.w = first.w
+    ref, _ = _loop_sample(keys, loop, lambda a, b, t: _normalized_rotation(a.slerp(b, t)))
+    track.ref_data.x = ref.x
+    track.ref_data.y = ref.y
+    track.ref_data.z = ref.z
+    track.ref_data.w = ref.w
     if kf_num == 1:
         # constant rotation: quaternion x, y, z, w is implied
         buffer = KaitaiStream(BytesIO(bytearray(12)))
@@ -1090,49 +1096,64 @@ def _serialize_bone_rotation(dst_lmt, bone, track, keys):
     return buffer, (kf_num * 8)
 
 
-def _serialize_bone_location(dst_lmt, bone, track, keys):
+def _serialize_bone_location(dst_lmt, bone, track, keys, loop=-1):
     kf_num = len(keys)
     track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
     # the same frame for one key and many (one key used to be written with y / z swapped on bones without a parent)
     parent_space = rest_in_parent(bone, track.bone_index)
+    game_keys = []
+    for frame, (x, y, z) in keys:
+        if parent_space is not None:
+            x, y, z = (parent_space @ Matrix.Translation([x, y, z])).to_translation()
+        game_keys.append((frame, (x * 100.0, y * 100.0, z * 100.0)))
+    ref, is_first = _loop_sample(game_keys, loop, _lerp)
+    track.ref_data.x, track.ref_data.y, track.ref_data.z = ref
+    track.ref_data.w = 1.0 if is_first else 0.0     # as the game's files have it (not read, as far as known)
 
     if kf_num == 1:
         buffer = KaitaiStream(BytesIO(bytearray(12)))
         track.buffer_type = 2
-        x, y, z = keys[0][1]
-
-        if parent_space is not None:
-            parent_space_frame = (parent_space @ Matrix.Translation([x, y, z])).to_translation()
-            x, y, z = parent_space_frame.x, parent_space_frame.y, parent_space_frame.z
-        track.ref_data.x = x * 100.0
-        track.ref_data.y = y * 100.0
-        track.ref_data.z = z * 100.0
-        track.ref_data.w = 1.0
-        buffer.write_bytes(struct.pack('fff', x * 100.0, y * 100.0, z * 100.0))
+        buffer.write_bytes(struct.pack('fff', *game_keys[0][1]))
         return buffer, 12
 
     buffer = KaitaiStream(BytesIO(bytearray(kf_num * 16)))
-    for k, ((frame, (x, y, z)), duration) in enumerate(zip(keys, _key_durations(keys))):
-        if parent_space is not None:
-            parent_space_frame = (parent_space @ Matrix.Translation([x, y, z])).to_translation()
-            x, y, z = parent_space_frame.x, parent_space_frame.y, parent_space_frame.z
-        if k == 0:
-            track.ref_data.x = x * 100.0
-            track.ref_data.y = y * 100.0
-            track.ref_data.z = z * 100.0
-            track.ref_data.w = 1.0
-        buffer.write_bytes(struct.pack('fffI', x * 100.0, y * 100.0, z * 100.0, duration))
+    for (frame, (x, y, z)), duration in zip(game_keys, _key_durations(keys)):
+        buffer.write_bytes(struct.pack('fffI', x, y, z, duration))
     return buffer, (kf_num * 16)
 
 
-def _serialize_bone_scale(dst_lmt, track, keys):
+def _lerp(a, b, t):
+    return tuple(p + (q - p) * t for p, q in zip(a, b))
+
+
+def _loop_sample(keys, loop, interpolate):
+    """
+    (ref_data value, whether it's the first key) for a track's game-space keys [(game frame, value)]: the value at
+    the loop frame for a looping animation, else the first key. The game reads this "loop-start sample" from the
+    track header when it wraps (calcMotionVector 0xAE0050: the last key interpolates toward it, and root motion
+    carries over by it), so a looping run whose loop frame isn't 0 snapped back every loop when it held the first
+    key (fixed 2026-10-16). Every DX9 track follows this: 6,187 rotation and 729 location / scale tracks hold their
+    loop-frame value, the rest their first key (where that's the same value, or no loop)
+    """
+    first = keys[0][1]
+    if loop is None or loop < 0 or len(keys) == 1:
+        return first, True
+    value = keys[-1][1]                                 # past the last key: it holds
+    for (f0, v0), (f1, v1) in zip(keys, keys[1:]):
+        if f0 <= loop < f1:
+            value = v0 if loop == f0 else interpolate(v0, v1, (loop - f0) / (f1 - f0))
+            break
+    same = max(abs(a - b) for a, b in zip(value, first)) < 1e-6
+    return (first, True) if same else (value, False)
+
+
+def _serialize_bone_scale(dst_lmt, track, keys, loop=-1):
     kf_num = len(keys)
     track.ref_data = dst_lmt.Vec4(_parent=track, _root=dst_lmt._root)
     x, y, z = keys[0][1]
-    track.ref_data.x = x
-    track.ref_data.y = y
-    track.ref_data.z = z
-    track.ref_data.w = 1.0
+    ref, _ = _loop_sample([(frame, tuple(v)) for frame, v in keys], loop, _lerp)
+    track.ref_data.x, track.ref_data.y, track.ref_data.z = ref
+    track.ref_data.w = 0.0      # every scale track in the game's files
     if kf_num == 1:
         buffer = KaitaiStream(BytesIO(bytearray(12)))
         track.buffer_type = 2
