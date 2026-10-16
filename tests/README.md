@@ -45,6 +45,8 @@ The tests only read game files, never write them.
 |---|---|
 | `test_all_play`, `test_all_play_arm` | every Nero effect imports and plays (without / with the character's armature) |
 | `test_keys`, `test_wait` | keyframes as F-curves: tracks, random parts, loop, interpolation, markers, WaitFrame offsets |
+| `test_handles` | vector tracks keyed on handle Empties: built from the file, keyed in the viewport, made by Insert Key, removed with the track or the handle, copied with a duplicate, back after a rebuild |
+| `test_fps` | a scene frame-rate change rescales the effect's keys and end marker about its start marker; the export and the preview's game frames stay the same |
 | `test_kf_tab` | the Keys tab and keyframe export |
 | `test_bulk_edit` | editing several selected records, the records list's Outliner-like clicks (plain / Shift / Ctrl) and All / None / Same Type, selection across rebuilds, Copy one field / one track / Draw Common / Generator Common / Life / section / tab to Selected |
 | `test_live`, `test_apply_blend` | live preview, Blender's own tools on records (Shift+D, X), blending edits |

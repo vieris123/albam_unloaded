@@ -91,6 +91,50 @@ def store_source(root, efl_bytes, start_frame):
     root["efl_data"] = base64.b64encode(efl_bytes).decode("ascii")
     root["efl_start_frame"] = int(start_frame)
     ensure_start_marker(root, bpy.context.scene)
+    if KEY_FPS not in root:
+        root[KEY_FPS] = scene_fps(bpy.context.scene)
+
+
+KEY_FPS = "efl_key_fps"   # effect root: the scene frame rate its keys and end marker are laid out for
+
+
+def scene_fps(scene):
+    return scene.render.fps / (scene.render.fps_base or 1.0)
+
+
+def sync_fps(root, scene):
+    """Keys are game frames drawn on the timeline at the scene's frame rate: when the rate changes, every key of the
+    effect's objects (records, handles, companions) and its end marker are rescaled about the start marker so they
+    keep their game frames (and the preview, which converts with the current rate, keeps matching them)."""
+    new = scene_fps(scene)
+    old = root.get(KEY_FPS)
+    if old is None:   # laid out before this existed: taken as the current rate
+        root[KEY_FPS] = new
+        return False
+    if abs(float(old) - new) < 1e-6:
+        return False
+    from .effect_keys import rescale
+    start = int(root.get("efl_start_frame", scene.frame_current))
+    factor = new / float(old)
+    for ob in bpy.data.objects:
+        if ob.get("efl_root") == root:
+            rescale(ob, start, factor)
+    end = _marker(root, END_MARKER, scene)
+    if end is not None:
+        end.frame = int(round(start + (end.frame - start) * factor))
+    root[KEY_FPS] = new
+    forget_history(root)
+    refresh_root(root, scene)
+    return True
+
+
+def sync_fps_all(scene):
+    """Every effect follows a frame-rate change (the depsgraph handler queues this on scene updates)."""
+    changed = False
+    for root in scene.objects:
+        if root.albam_asset.extension == "efl" and "efl_data" in root:
+            changed = sync_fps(root, scene) or changed
+    return changed
 
 
 # -- timeline markers ---------------------------------------------------------------------------
@@ -149,6 +193,7 @@ def sync_markers(scene):
         delta = marker.frame - int(root.get("efl_start_frame", marker.frame))
         if delta:
             shift_effect(root, scene, delta)
+        sync_fps(root, scene)
 
 
 def shift_effect(root, scene, delta):

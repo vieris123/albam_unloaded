@@ -592,6 +592,14 @@ def _make_new_record(ob, source, root):
     if source_handle is not None and ob.parent_type == "BONE" and ob.parent is not None:
         rotation = (effect_root(source).matrix_world.inverted_safe() @ source_handle.matrix_world).to_quaternion()
         attach_rotation_handle(ob, root, rotation)
+    # the copy's vector-track handles still point at the source's: give it handles of its own, carrying the
+    # source's current keys (its curves, not the file's)
+    for key in [k for k in ob.keys() if k.startswith(effect_keys.HANDLE_PROP)]:
+        ob.pop(key, None)
+    source_root = effect_root(source)
+    if source_root is not None and source.get("efl_kf") is not None:
+        ob["efl_kf"] = effect_keys.keyframe_props_of(source, source_root)
+        effect_keys.rebuild_tracks(ob, root)
     return ob
 
 

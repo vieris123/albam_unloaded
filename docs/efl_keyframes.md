@@ -42,9 +42,21 @@ in an action named `<Empty>_keys`:
 - **Generator position, rotation, scale** keys are the Empty's own `location`, `rotation_euler` and `scale`
   keys. The Empty's rotation mode is set to the game's rotation order (the generator's `Order` field). A
   RelationType 2 generator (joint position, world rotation) keeps its rotation keys on its `_rot` companion.
+- **Vector tracks** (particle `Rot`, move `Rot`, a path chain's `ChainRot` / `BlendRot`, a light's `SpotRot`,
+  the path keyframe `Ofs`, the generator's `Range`, a model's `ModelScale`) are keyed on a **handle Empty**
+  named `<record>:<Field>`, a child of the record Empty. Its local transform is the value in the record's frame
+  (which is game axes): a rotation handle (arrows) turns by the game's angles in the track's rotation order, a
+  position handle (plain axes) sits at the offset in metres, a size handle (a cube) is scaled by the value. Select
+  it, G / R / S it in the viewport and press I: its `location` / `rotation_euler` / `scale` keys are the track's
+  keys. The Keys tab's handle button next to such a track selects the handle (and makes it when the track has no
+  keys yet). The record's Rand property keeps the random part. The Graph Editor and Dope Sheet list the keys of
+  **selected** objects, so picking a record in the Effect Editor's list selects its handles with it, and Show
+  Curves selects the track's handle; clicking a record in the viewport alone shows only the record's own keys
+  until you add its handles to the selection (or turn off the editor's Only Show Selected filter). Vector tracks
+  keyed before handles existed (as custom properties) move onto handles the first time they are read.
 - **Every other track** is a custom property on the Empty named `<Block> <Field>`: `Particle Intensity`,
-  `Particle Color`, `Particle Scale`, `Move Speed`, `Move Rot`, `Life KeepFrame`, `Generator SetNum`... They
-  are listed in Object Properties > Custom Properties, and in the Dope Sheet / Graph Editor under the Empty.
+  `Particle Color`, `Particle Scale`, `Move Speed`, `Life KeepFrame`, `Generator SetNum`... They are listed in
+  Object Properties > Custom Properties, and in the Dope Sheet / Graph Editor under the Empty.
 - The **random part** is a sibling property `<track> Rand` (`Particle Intensity Rand`). For colour tracks it is
   `<track> B`, the second colour of the mix. It is a plain value (one random part for every key) until you key
   it: then each key of the value track reads the Rand curve at its own frame.
@@ -56,7 +68,9 @@ Units:
 | number (Intensity, Scale, Speed, Width...) | one float | as the game's value |
 | whole number (SetNum, KeepFrame, PatNo...) | one integer | as the game's value |
 | colour (Color, PlaceColor) | 4 floats, colour picker | RGBA 0-1 (the game stores bytes) |
-| vector (Rot, ModelScale, Ofs...) | 3 floats | as the game's value; rotations in radians, shown as degrees |
+| rotation (particle / move Rot, ChainRot, BlendRot, SpotRot) | the handle's `rotation_euler` | the game's angles in its order (radians; Blender shows degrees) |
+| offset (path keyframe Ofs) | the handle's `location` | metres (the game uses centimetres) |
+| size (Range, ModelScale) | the handle's `scale` | Range in metres, ModelScale as the game's value |
 | generator Pos | `location` | metres (the game uses centimetres) |
 | generator Rot | `rotation_euler` | radians, the game's order |
 | generator Scale | `scale` | as the game's value |
@@ -65,7 +79,13 @@ Hover a property for its tooltip: it carries the field's help text.
 
 Time: the effect's frame 0 is the timeline marker **`EFL_<file> start`**, placed at the frame the effect was
 imported on. A key at game frame `g` sits on scene frame `start + g x fps / 60`. At 60 fps (the LMT import's
-setting, recommended for effects) that is simply `start + g`, for effect-timer tracks.
+setting, recommended for effects) that is simply `start + g`, for effect-timer tracks. The same goes for
+WaitFrame and every other frame count in the fields: they are game frames (60 per second), so at 30 fps a
+WaitFrame of 100 fires 50 scene frames after the start marker. **Importing an effect sets the scene to 60 fps**
+(as the LMT import does): every DMC4 file counts in game frames, so that is where the numbers in the fields are
+the frame numbers on the timeline. **Changing the scene frame rate** afterwards rescales every key of the effect
+(records, handles, companions) and its end marker about the start marker, so the keys keep their game frames; the
+effect remembers the rate its keys are laid out for (`efl_key_fps` on its root).
 
 Generator-timer and particle-age tracks are drawn after the record's wait: `start + (WaitFrame + g) x fps / 60`.
 For the generator timer that is exactly when the key plays. A particle-age curve is drawn for the **first**
@@ -129,7 +149,9 @@ applied. Tracks you didn't touch keep their exact bytes.
 
 - **Whole game frames.** Keys export at `round((frame - start) x 60 / fps)`. At 24 or 30 fps a key can land
   one game frame off; two keys that round to the same game frame refuse to export ("key frames must
-  increase"). Work at 60 fps when the exact frame matters.
+  increase"). Work at 60 fps when the exact frame matters. After a frame-rate change the rescaled keys can sit
+  on fractional scene frames (a 60 fps key at frame 31 becomes 16.5 at 30 fps); they still export to their
+  game frame.
 - **Keys before the start of their curve** (the start marker plus the wait, for generator-timer and
   particle-age tracks) would be negative game frames and refuse to export; Insert Key won't put them there, but
   dragging them there in the Graph Editor will.
@@ -149,6 +171,10 @@ applied. Tracks you didn't touch keep their exact bytes.
   stale until the next edit of WaitFrame or a rebuild.
 - **A per-key random part that isn't keyed** at a key's frame reads the Rand curve there (interpolated), or
   the static Rand value when the curve has no keys.
+- **Handles are the keys.** Deleting a handle Empty removes its track's keys on export (Ctrl+Z brings it back;
+  Insert Key makes a fresh one at the field's value). Shift+D on a handle gives a plain Empty, not a second
+  track. A handle shows the key values only; the particles still follow the game's interpolation between keys.
+  Full spins are fine: type 720 into the handle's rotation and key it.
 - **Rebuilds recreate the Empties.** Edits that change what the import builds (a particle's blending, texture,
   shape, a new record, a changed strip) rebuild the effect; the keys come back from the exported bytes, but curve
   selection and any handle tweaks are lost.

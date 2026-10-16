@@ -4,6 +4,11 @@ Every typed keyframe of a record ("track": a keyframe offset field of its genera
 is edited with Blender's own animation tools:
 - the generator's position / rotation / scale keyframes are location / rotation_euler (the game's Euler order) /
   scale keys on the record Empty (the rotation on its RelationType 2 companion when it has one);
+- the other vector tracks (particle / move / chain / spot rotations, the path offset, the spawn range, the model
+  scale: HANDLES) are location / rotation_euler / scale keys on a handle Empty parented to the record
+  (ensure_handle; `<record>:<Field>`, identity parent inverse, so its local transform is the value in the
+  generator's frame, which is game axes; a rotation handle's mode is the track's order, so its channels are the
+  game's angles). Move / rotate / scale the handle and press I; no handle = no keys;
 - every other track is a custom property on the record Empty named "<Block> <Field>" ("Particle Intensity",
   "Move Speed"; colours are 4 floats, vectors 3) keyed with F-curves. Its random part is the sibling property
   "<track> Rand" (colour: "<track> B", the second colour the game mixes toward): static, or keyed on the same frames.
@@ -43,6 +48,26 @@ RAND = " Rand"
 COLOR_B = " B"
 TRANSFORM = {("gen", "KeyframePosParamOffset"): "location", ("gen", "KeyframeRotParamOffset"): "rotation_euler",
              ("gen", "KeyframeScaleParamOffset"): "scale"}
+# the other vector tracks are keyed on a handle Empty parented to the record (identity parent inverse, so its local
+# transform is the value in the generator's frame = game axes): (transform channel, unit, rotation-order field)
+HANDLES = {
+    ("gen", "KeyframeRangeParamOffset"): ("scale", SCALE, None),               # spawn extents, cm
+    ("move", "KeyframeRotParamOffset"): ("rotation_euler", 1.0, "RotOrder"),   # move direction
+    ("move", "KeyframeChainRotParamOffset"): ("rotation_euler", 1.0, "ChainRotOrder"),
+    ("move", "KeyframeBlendRotParamOffset"): ("rotation_euler", 1.0, "ChainBlendRotOrder"),
+    ("move", "KeyframeOfsParamOffset"): ("location", SCALE, None),            # path offset, cm
+    ("ptcl", "KeyframeRotParamOffset"): ("rotation_euler", 1.0, "RotOrder"),   # Polygon / Model / PrimModel / strip
+    ("ptcl", "KeyframeModelScaleParamOffset"): ("scale", 1.0, None),
+    ("ptcl", "KeyframeSpotRotParamOffset"): ("rotation_euler", 1.0, None),
+    ("ptcl", "KeyframeChainRotParamOffset"): ("rotation_euler", 1.0, "ChainRotOrder"),     # CHAIN line extension
+    ("ptcl", "KeyframeBlendRotParamOffset"): ("rotation_euler", 1.0, "ChainBlendRotOrder"),
+    ("ptcl", "LineKeyframeRotParamOffset"): ("rotation_euler", 1.0, "LineRotOrder"),       # LENGTH stick
+    ("ptcl", "CurveKeyframeRotParamOffset"): ("rotation_euler", 1.0, "CurveRotOrder"),     # cloth CURVE bend
+}
+HANDLE_PROP = "efl_handle:"        # record Empty: "<prefix><track id>" -> the track's handle Empty
+HANDLE_OF = "efl_handle_of"        # handle Empty -> its record
+HANDLE_TRACK = "efl_handle_track"  # handle Empty -> its track id
+_HANDLE_DISPLAY = {"rotation_euler": ("ARROWS", 0.12), "location": ("PLAIN_AXES", 0.06), "scale": ("CUBE", 0.5)}
 SIZES = {"f32": 1, "u32": 1, "color": 4, "vec3": 3, "fixangle": 3}
 _KEYABLE_TYPES = ("rangef", "rangef[3]", "rangeu16", "f32", "vec3", "color[2]", "color")
 
@@ -241,6 +266,7 @@ def sync_offsets(ob, root=None):
         if old != new:
             _shift_track(ob, slot, field, (new - old) / rate)
             _set_applied(ob, slot, field, new)
+    sync_handles(ob)
 
 
 # -- values -----------------------------------------------------------------------------------------
@@ -249,6 +275,129 @@ def _rot_target(ob):
     """Where a generator's rotation lives: its RelationType 2 companion, else itself."""
     handle = ob.get("efl_rot_handle")
     return handle if handle is not None and handle.get("efl_rot_handle_of") == ob else ob
+
+
+def channel_of(slot, field):
+    """(transform channel, unit, rotation-order field) of a track kept on an object's transform (the generator's
+    on the record Empty, the other vector tracks on a handle), else None."""
+    channel = TRANSFORM.get((slot, field))
+    if channel is not None:
+        return channel, SCALE if channel == "location" else 1.0, "Order" if channel == "rotation_euler" else None
+    return HANDLES.get((slot, field))
+
+
+def _order_of(ob, slot, order_field):
+    """The rotation order a rotation track's angles are applied in (the block's order field; 0 when unknown)."""
+    if order_field is None:
+        return 0
+    for s in [slot] + [other for other in SLOTS if other != slot]:
+        props = ob.get(f"efl_{s}")
+        if props is not None and order_field in props.keys():
+            try:
+                return int(props[order_field])
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
+def _rot_mode(ob, slot, order_field):
+    order = _order_of(ob, slot, order_field)
+    return ROT_ORDERS[order] if 0 <= order < len(ROT_ORDERS) else "XYZ"
+
+
+def handle_of(ob, slot, field):
+    """A vector track's handle Empty, or None (no handle track, none made yet, or the user deleted it)."""
+    if (slot, field) not in HANDLES:
+        return None
+    handle = ob.get(HANDLE_PROP + track_id(slot, field))
+    try:
+        return handle if handle is not None and handle.get(HANDLE_OF) == ob else None
+    except ReferenceError:
+        return None
+
+
+def handles_of(ob):
+    """Every handle Empty of a record (select them with it so the Graph Editor lists their keys)."""
+    return [h for h in (handle_of(ob, slot, field) for slot, field in HANDLES) if h is not None]
+
+
+def _migrate_legacy(ob, slot, field):
+    """A vector track keyed as a custom property (before handles, 2026-10-16) becomes a handle with the same keys:
+    the property's curves are moved onto the handle's channel (with the unit) and the property dropped."""
+    name = track_name(slot, field)
+    curves = _curves(ob, _data_path(name))
+    if not curves or not any(len(fc.keyframe_points) for fc in curves.values()):
+        return None
+    channel, unit, _order = HANDLES[(slot, field)]
+    handle = _new_handle(ob, slot, field, "vec3")
+    frames = sorted({kp.co.x for fc in curves.values() for kp in fc.keyframe_points})
+    static = _value_of(ob, name, 3)
+    values = [tuple((curves[i].evaluate(f) if i in curves else static[i]) * unit for i in range(3)) for f in frames]
+    bezier = any(kp.interpolation not in ("LINEAR", "CONSTANT") for fc in curves.values() for kp in fc.keyframe_points)
+    loop = any(m.type == "CYCLES" for fc in curves.values() for m in fc.modifiers)
+    _write_curves(handle, channel, 3, frames, values, "BEZIER" if bezier else "LINEAR", loop, name)
+    _remove_curves(ob, _data_path(name))
+    ob.pop(name, None)
+    return handle
+
+
+def ensure_handle(ob, slot, field, vtype="vec3"):
+    """The track's handle Empty, made when missing: a child of the record with an identity parent inverse (its
+    local transform is the value in the generator's frame), arrows for a rotation (rotation mode = the track's
+    order, so the channels are the game's angles), axes for a position, a cube for a size, hidden from render,
+    starting at the field's value. Keys on it are the track's keys."""
+    handle = handle_of(ob, slot, field) or _migrate_legacy(ob, slot, field)
+    if handle is not None:
+        return handle
+    return _new_handle(ob, slot, field, vtype)
+
+
+def _new_handle(ob, slot, field, vtype):
+    channel, unit, order_field = HANDLES[(slot, field)]
+    handle = bpy.data.objects.new(f"{ob.name}:{pretty(field)}", None)
+    for collection in (ob.users_collection or [bpy.context.scene.collection]):
+        collection.objects.link(handle)
+    handle.parent = ob
+    handle.empty_display_type, handle.empty_display_size = _HANDLE_DISPLAY[channel]
+    handle.hide_render = True
+    root = ob.get("efl_root")
+    if root is not None:
+        handle["efl_root"] = root
+    handle[HANDLE_OF] = ob
+    handle[HANDLE_TRACK] = track_id(slot, field)
+    if channel == "rotation_euler":
+        handle.rotation_mode = _rot_mode(ob, slot, order_field)
+    value, _ = field_key_values(ob, slot, field, vtype, from_field=True)
+    setattr(handle, channel, tuple(c * unit for c in value))
+    ob[HANDLE_PROP + track_id(slot, field)] = handle
+    return handle
+
+
+def sync_handles(ob):
+    """Rotation handles follow their track's order field after an edit (the channels keep the game's angles)."""
+    for slot, field, _vtype in tracks(ob):
+        handle = handle_of(ob, slot, field)
+        if handle is None:
+            continue
+        channel, _unit, order_field = HANDLES[(slot, field)]
+        if channel == "rotation_euler":
+            mode = _rot_mode(ob, slot, order_field)
+            if handle.rotation_mode != mode:
+                angles = tuple(handle.rotation_euler)
+                handle.rotation_mode = mode   # (assigning a mode converts the angles; put the game's back)
+                handle.rotation_euler = angles
+
+
+def _owner(ob, slot, field, create=False, vtype="vec3"):
+    """The object whose channels hold a transform track (None for a handle track without a handle)."""
+    channel = TRANSFORM.get((slot, field))
+    if channel is not None:
+        return _rot_target(ob) if channel == "rotation_euler" else ob
+    if (slot, field) in HANDLES:
+        if create:
+            return ensure_handle(ob, slot, field, vtype)
+        return handle_of(ob, slot, field) or _migrate_legacy(ob, slot, field)
+    return ob
 
 
 def _blender_values(vtype, param):
@@ -326,14 +475,14 @@ def _action(ob, create=False):
 
 
 def _curves(ob, data_path):
-    action = _action(ob)
+    action = _action(ob) if ob is not None else None
     if action is None:
         return {}
     return {fc.array_index: fc for fc in compat.fcurves_of(action, ob) if fc.data_path == data_path}
 
 
 def _remove_curves(ob, data_path):
-    action = _action(ob)
+    action = _action(ob) if ob is not None else None
     if action is None:
         return
     for fc in [fc for fc in compat.fcurves_of(action, ob) if fc.data_path == data_path]:
@@ -356,13 +505,13 @@ def _write_curves(ob, data_path, size, frames, values, interpolation, loop, grou
         fc.update()
 
 
-def _paths(ob, slot, field):
-    """(value path, value owner, random path, size key) of a track: transform tracks use the Empty's channels."""
+def _paths(ob, slot, field, create=False, vtype="vec3"):
+    """(value path, value owner, random path, size key) of a track: transform tracks use the record Empty's (or
+    the handle's) channels; the owner is None for a handle track without a handle unless `create`."""
     name = track_name(slot, field)
-    channel = TRANSFORM.get((slot, field))
-    if channel is not None:
-        owner = _rot_target(ob) if channel == "rotation_euler" else ob
-        return channel, owner, _data_path(name + RAND), name
+    spec = channel_of(slot, field)
+    if spec is not None:
+        return spec[0], _owner(ob, slot, field, create, vtype), _data_path(name + RAND), name
     return _data_path(name), ob, _data_path(name + (COLOR_B if field.endswith("ColorParamOffset") else RAND)), name
 
 
@@ -399,16 +548,16 @@ def build_track(ob, slot, field, kf, start, rate):
     values = [v for v, _ in pairs]
     rands = [r for _, r in pairs]
     interpolation = "LINEAR" if kf.inp_type == 0 else "BEZIER"
-    value_path, owner, rand_path, name = _paths(ob, slot, field)
+    value_path, owner, rand_path, name = _paths(ob, slot, field, create=True, vtype=vtype)
     size = SIZES[vtype]
-    channel = TRANSFORM.get((slot, field))
-    if channel == "location":
-        values = [tuple(c * SCALE for c in v) for v in values]
-    elif channel == "rotation_euler":
-        props = ob.get("efl_gen")
-        order = int(props.get("Order", 0)) if props is not None else 0
-        owner.rotation_mode = ROT_ORDERS[order] if 0 <= order < len(ROT_ORDERS) else "XYZ"
-    if channel is None:
+    spec = channel_of(slot, field)
+    if spec is not None:
+        channel, unit, order_field = spec
+        if unit != 1.0:
+            values = [tuple(c * unit for c in v) for v in values]
+        if channel == "rotation_euler":
+            owner.rotation_mode = _rot_mode(ob, slot, order_field)
+    else:
         _ensure_prop(ob, name, values[0], vtype, field, _description(slot, field, vtype))
     _write_curves(owner, value_path, size, frames, values, interpolation, kf.loop, name)
     rname = rand_name(slot, field, vtype)
@@ -425,7 +574,11 @@ def remove_track(ob, slot, field, vtype=None):
     value_path, owner, rand_path, name = _paths(ob, slot, field)
     _remove_curves(owner, value_path)
     _remove_curves(ob, rand_path)
-    if (slot, field) not in TRANSFORM:
+    handle = handle_of(ob, slot, field)
+    if handle is not None:
+        bpy.data.objects.remove(handle)
+    ob.pop(HANDLE_PROP + track_id(slot, field), None)
+    if channel_of(slot, field) is None:
         ob.pop(name, None)
     for suffix in (RAND, COLOR_B):
         ob.pop(name + suffix, None)
@@ -474,9 +627,9 @@ def _collect(ob, slot, field, vtype, start, rate):
         return None
     size = SIZES[vtype]
     frames = sorted({kp.co.x for fc in curves.values() for kp in fc.keyframe_points})
-    channel = TRANSFORM.get((slot, field))
-    static = (owner.location if channel == "location" else owner.rotation_euler if channel == "rotation_euler"
-              else owner.scale if channel == "scale" else None)
+    spec = channel_of(slot, field)
+    channel, unit = (spec[0], spec[1]) if spec is not None else (None, 1.0)
+    static = tuple(getattr(owner, channel)) if channel is not None else None
     rand_curves = _curves(ob, rand_path)
     rand_static = _value_of(ob, rand_name(slot, field, vtype), size)
     values, rands = [], []
@@ -488,8 +641,8 @@ def _collect(ob, slot, field, vtype, start, rate):
         else:
             value = curves[0].evaluate(frame) if 0 in curves else (ob.get(name) or 0.0)
             rand = rand_curves[0].evaluate(frame) if 0 in rand_curves else rand_static
-        if channel == "location":
-            value = tuple(c / SCALE for c in value)
+        if unit != 1.0:
+            value = tuple(c / unit for c in value)
         values.append(value)
         rands.append(rand)
     bezier = any(kp.interpolation not in ("LINEAR", "CONSTANT") for fc in curves.values() for kp in fc.keyframe_points)
@@ -578,13 +731,11 @@ def field_key_values(ob, slot, field, vtype, from_field=True):
             return float(props[name]), 0.0
         elif f.type == "vec3" and flat is not None and size == 3:
             return tuple(float(c) for c in flat[:3]), (0.0, 0.0, 0.0)
-    channel = TRANSFORM.get((slot, field))
-    if channel is not None:
-        owner = _rot_target(ob) if channel == "rotation_euler" else ob
-        value = tuple(getattr(owner, channel))
-        if channel == "location":
-            value = tuple(c / SCALE for c in value)
-        return value, _value_of(ob, rand_name(slot, field, vtype), size)
+    spec = channel_of(slot, field)
+    owner = _owner(ob, slot, field) if spec is not None else None
+    if owner is not None:   # the Empty's (or handle's) transform is what the viewport shows
+        channel, unit, _ = spec
+        return tuple(c / unit for c in getattr(owner, channel)), _value_of(ob, rand_name(slot, field, vtype), size)
     if vtype == "color":
         return _value_of(ob, track_name(slot, field), 4) if track_name(slot, field) in ob else (1.0,) * 4, \
             _value_of(ob, rand_name(slot, field, vtype), 4) if rand_name(slot, field, vtype) in ob else (1.0,) * 4
@@ -603,9 +754,9 @@ def insert_key(ob, slot, field, vtype, frame, value=None, rand=None, interpolati
         field_value, field_rand = field_key_values(ob, slot, field, vtype, from_field=not has_keys(ob, slot, field))
         value = field_value if value is None else value
         rand = field_rand if rand is None else rand
-    value_path, owner, rand_path, name = _paths(ob, slot, field)
+    value_path, owner, rand_path, name = _paths(ob, slot, field, create=True, vtype=vtype)
     size = SIZES[vtype]
-    channel = TRANSFORM.get((slot, field))
+    spec = channel_of(slot, field)
     flags = header_flags(ob, slot, field)
     if not has_keys(ob, slot, field):   # a new track: its curve shows when the keys play (the wait included)
         _set_applied(ob, slot, field, wanted_offset(ob, slot, field, flags["RefType"]))
@@ -616,14 +767,14 @@ def insert_key(ob, slot, field, vtype, frame, value=None, rand=None, interpolati
         frame = first
     if interpolation is None:
         interpolation = "LINEAR" if flags["InpType"] == 0 else "BEZIER"
-    if channel is not None:
-        if channel == "location":
-            value = tuple(c * SCALE for c in value)
-        elif channel == "rotation_euler" and owner.rotation_mode not in ROT_ORDERS:
-            props = ob.get("efl_gen")
-            order = int(props.get("Order", 0)) if props is not None else 0
-            owner.rotation_euler = owner.matrix_basis.to_euler(ROT_ORDERS[order] if 0 <= order < 6 else "XYZ")
-            owner.rotation_mode = ROT_ORDERS[order] if 0 <= order < len(ROT_ORDERS) else "XYZ"
+    if spec is not None:
+        channel, unit, order_field = spec
+        if unit != 1.0:
+            value = tuple(c * unit for c in value)
+        if channel == "rotation_euler" and owner.rotation_mode not in ROT_ORDERS:
+            mode = _rot_mode(ob, slot, order_field)
+            owner.rotation_euler = owner.matrix_basis.to_euler(mode)
+            owner.rotation_mode = mode
         setattr(owner, channel, value)
         owner.keyframe_insert(channel, frame=frame, group=name)
     else:
@@ -680,13 +831,26 @@ def set_loop(ob, slot, field, vtype, on):
 def select_track(ob, slot, field):
     """Select the track's curves (and nothing else of the record) for the Graph Editor."""
     value_path, owner, rand_path, _ = _paths(ob, slot, field)
-    for target in {ob, owner}:
+    for target in {ob, owner} - {None}:
         action = _action(target)
         if action is None:
             continue
         for fc in compat.fcurves_of(action, target):
             fc.select = fc.data_path in (value_path, rand_path) and (target is owner or fc.data_path == rand_path)
             fc.hide = False
+
+
+def rescale(ob, start, factor):
+    """Scale every key of an object's action about `start` (the effect's frame-rate changed by `factor`)."""
+    action = _action(ob)
+    if action is None or factor == 1.0:
+        return
+    for fc in compat.fcurves_of(action, ob):
+        for kp in fc.keyframe_points:
+            kp.co.x = start + (kp.co.x - start) * factor
+            kp.handle_left.x = start + (kp.handle_left.x - start) * factor
+            kp.handle_right.x = start + (kp.handle_right.x - start) * factor
+        fc.update()
 
 
 def shift(ob, delta):

@@ -374,6 +374,7 @@ def _write_field_raw(ob, item, value):
         ob.scale = [float(v) for v in as_list(value)[0::2]]
     if block_slot == "gen" and item.label == "WaitFrame":
         effect_keys.sync_offsets(ob)
+    effect_keys.sync_handles(ob)   # a rotation order edit changes how a handle reads its angles
     return True
 
 
@@ -463,6 +464,7 @@ def _on_item_edit(item, context):
             ob.scale = item.floats[0], item.floats[2], item.floats[4]
         if item.slot == "gen" and item.label == "WaitFrame":   # generator-timer keys move with the wait
             effect_keys.sync_offsets(ob)
+        effect_keys.sync_handles(ob)
         if item.label in TEXTURE_FIELDS:   # the image picker follows the typed path
             item.image = _loaded_image(value)
     finally:
@@ -739,6 +741,7 @@ class ALBAM_OT_EflPickRecord(bpy.types.Operator):
                 if other is not None:
                     other.select_set(False)
         ob.select_set(True)
+        _select_handles(context, ob)
         context.view_layer.objects.active = ob
         _loading = True
         try:
@@ -954,9 +957,50 @@ class ALBAM_OT_EflKeysSelect(bpy.types.Operator):
         if track is None:
             return {"CANCELLED"}
         effect_keys.select_track(ob, track[0], track[1])
+        handle = effect_keys.handle_of(ob, track[0], track[1])
+        if handle is not None and handle.name in context.view_layer.objects:
+            handle.select_set(True)   # the editors list selected objects' keys only
         for area in context.screen.areas:
             if area.type in ("GRAPH_EDITOR", "DOPESHEET_EDITOR"):
                 area.tag_redraw()
+        return {"FINISHED"}
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_EflHandleSelect(bpy.types.Operator):
+    """Select this track's handle Empty (made if the track has none yet) so you can move, rotate or scale it in the
+    viewport and press I to key it. The handle sits in the record's frame: a rotation handle's angles are the game's
+    angles in the track's rotation order, a position handle is in metres (the game's centimetres / 100), a size
+    handle's scale is the value"""
+    bl_idname = "albam.efl_handle_select"
+    bl_label = "Select Handle"
+    bl_options = {"REGISTER", "UNDO"}
+
+    track: bpy.props.StringProperty(description="The keyframe track: '<block>:<offset field>'")
+
+    @classmethod
+    def poll(cls, context):
+        return _state(context).target is not None
+
+    def execute(self, context):
+        state = _state(context)
+        ob = state.target
+        track = _track_of(ob, self.track)
+        if track is None or (track[0], track[1]) not in effect_keys.HANDLES:
+            return {"CANCELLED"}
+        slot, field, vtype = track
+        if effect_keys.VERSION_KEY not in ob:
+            effect_keys.rebuild_tracks(ob)
+        handle = effect_keys.ensure_handle(ob, slot, field, vtype)
+        for other in context.view_layer.objects:
+            if other.select_get():
+                other.select_set(False)
+        if handle.name in context.view_layer.objects:
+            handle.select_set(True)
+            context.view_layer.objects.active = handle
+        channel = effect_keys.HANDLES[(slot, field)][0]
+        self.report({"INFO"}, f"{handle.name}: {'rotate (R)' if channel == 'rotation_euler' else 'move (G)' if channel == 'location' else 'scale (S)'} it and press I to key "
+                              f"{effect_keys.track_name(slot, field)}")
         return {"FINISHED"}
 
 
@@ -992,8 +1036,16 @@ def _on_record_index(state, context):
                 other.select_set(False)
     context.view_layer.objects.active = ob
     ob.select_set(True)
+    _select_handles(context, ob)
     if state.target != ob:
         load_record(state, ob)
+
+
+def _select_handles(context, ob):
+    """Select a record's key handles with it: the Graph Editor and Dope Sheet list selected objects' keys only."""
+    for handle in effect_keys.handles_of(ob):
+        if handle.name in context.view_layer.objects:
+            handle.select_set(True)
 
 
 @blender_registry.register_blender_prop
@@ -1325,7 +1377,7 @@ def _action_roots(action):
     roots = set()
     for ob in bpy.data.objects:
         if ob.animation_data is not None and ob.animation_data.action == action and ob.get("efl_root") is not None \
-                and ("efl_record" in ob or ROT_HANDLE_OF in ob):
+                and ("efl_record" in ob or ROT_HANDLE_OF in ob or effect_keys.HANDLE_OF in ob):
             roots.add(ob["efl_root"].name)
     return roots
 
@@ -1363,11 +1415,13 @@ def _run_job(job, state):
     elif kind == "unlink":
         ob = job[1]
         if ob.name in bpy.data.objects:
-            for key in ("efl_linked", ROT_HANDLE_OF, "efl_root"):
+            for key in ("efl_linked", ROT_HANDLE_OF, effect_keys.HANDLE_OF, effect_keys.HANDLE_TRACK, "efl_root"):
                 ob.pop(key, None)
     elif kind == "material":
         for root in _material_image_changed(job[1]):
             schedule_live_apply(root)
+    elif kind == "fps":
+        effect_sim.sync_fps_all(job[1])
     elif kind == "reload":   # after an edit rebuilt a record's block: show its fields as they are now
         ob = job[1]
         if ob.name in bpy.data.objects and state.target == ob:
@@ -1442,6 +1496,10 @@ def _scan_objects():
             _queue.append(("unlink", ob))
         elif ob.get(ROT_HANDLE_OF) is not None and ob[ROT_HANDLE_OF].get(ROT_HANDLE_KEY) != ob:
             _queue.append(("unlink", ob))
+        elif ob.get(effect_keys.HANDLE_OF) is not None and ob.get(effect_keys.HANDLE_TRACK) is not None \
+                and effect_keys.handle_of(ob[effect_keys.HANDLE_OF],
+                                          *effect_keys.parse_track(str(ob[effect_keys.HANDLE_TRACK]))) != ob:
+            _queue.append(("unlink", ob))   # a copied track handle is just an Empty
     _known_uids.clear()
     _known_uids.update(seen)
 
@@ -1486,6 +1544,13 @@ def _material_of(id_):
 
 
 @persistent
+def _fps_changed(scene):
+    """Does an effect's key layout belong to another frame rate than the scene's now?"""
+    fps = effect_sim.scene_fps(scene)
+    return any(ob.albam_asset.extension == "efl" and ob.get(effect_sim.KEY_FPS) is not None
+               and abs(float(ob[effect_sim.KEY_FPS]) - fps) > 1e-6 for ob in scene.objects)
+
+
 def _on_depsgraph(scene, depsgraph):
     """Blender's own tools on effect objects: duplicates become records, deletions change the structure, a swapped
     material image writes its path back, an edited strip / flipbook is applied (Live) after leaving Edit Mode.
@@ -1521,6 +1586,9 @@ def _on_depsgraph(scene, depsgraph):
                     queued = True
             elif update.is_updated_geometry and isinstance(id_, bpy.types.Object) and "ean_data" in id_:
                 _queue.append(("ean_join", id_))
+                queued = True
+            elif isinstance(id_, bpy.types.Scene) and _fps_changed(id_):   # keys follow a frame-rate change
+                _queue.append(("fps", id_))
                 queued = True
             elif isinstance(id_, bpy.types.Action) and not _applying and _state().live:   # keys edited
                 for name in _action_roots(id_):
@@ -2033,6 +2101,7 @@ class _EflEditorDraw:
             layout.label(text="This record has no keyframe slots")
             return
         layout.label(text="Keys are F-curves on the record's Empty (Graph Editor, Dope Sheet)", icon="INFO")
+        layout.label(text="Vector tracks are keyed on a handle Empty: select it, G / R / S, then I", icon="EMPTY_AXIS")
         col = layout.column(align=True)
         for slot, field, vtype in tracks:
             ident = effect_keys.track_id(slot, field)
@@ -2041,6 +2110,10 @@ class _EflEditorDraw:
             row.operator("albam.efl_keys_select", text=effect_keys.track_name(slot, field), emboss=False,
                          icon="KEYFRAME_HLT" if count else "KEYFRAME").track = ident
             row.label(text=f"{count} keys" if count else "")
+            if (slot, field) in effect_keys.HANDLES:
+                channel = effect_keys.HANDLES[(slot, field)][0]
+                row.operator("albam.efl_handle_select", text="", icon="ORIENTATION_GIMBAL" if channel == "rotation_euler"
+                             else "EMPTY_AXIS" if channel == "location" else "FIXED_SIZE").track = ident
             row.operator("albam.efl_key_insert", text="", icon="DECORATE_KEYFRAME" if count else "DECORATE_ANIMATE"
                          ).track = ident
             sub = row.row(align=True)
@@ -2061,7 +2134,9 @@ class _EflEditorDraw:
         row.prop(state, "kf_loop", toggle=True)
         row.prop(state, "kf_init_only", toggle=True)
         units = {"color": "Colour keys: the key's colour, and its '... B' property is the second colour of the "
-                          "random mix", "vec3": "X Y Z keys; '... Rand' is the random part per axis",
+                          "random mix", "vec3": "X Y Z keys on the track's handle Empty (rotation: the game's angles "
+                                                "in its order; position: metres; size: scale); '... Rand' is the "
+                                                "random part per axis on the record",
                  "fixangle": "Angle keys in radians", "u32": "Whole-number keys; '... Rand' is the random range",
                  "f32": "Value keys; '... Rand' is the random part (value + Rand x random)"}
         box.label(text=units.get(state.kf_vtype, ""))

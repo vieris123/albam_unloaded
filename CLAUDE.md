@@ -481,6 +481,22 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
     - Generator Pos / Rot / Scale keys are `location` / `rotation_euler` (the Empty's rotation mode = the game's
       `Order`; on the RelationType 2 companion when there is one) / `scale` keys on the record Empty: one key per game
       key, not the baked samples of before.
+    - **Vector tracks have handle Empties** (2026-10-16, `effect_keys.HANDLES`: particle / move / chain / line /
+      curve / spot rotations, the path keyframe Ofs, the generator Range, ModelScale): `ensure_handle` makes
+      `<record>:<Field>`, a child of the record with an identity parent inverse (its local transform is the value
+      in the generator's frame = game axes), arrows / plain axes / cube by channel, hidden from render, with
+      `efl_handle_of` / `efl_handle_track` and the record's `efl_handle:<track id>` pointer. The keys are the
+      handle's `location` (x SCALE) / `rotation_euler` (the game's angles; rotation mode = the track's order
+      field, `_order_of`, kept in step by `sync_handles` on every editor edit) / `scale` (Range x SCALE,
+      ModelScale as is); the random part stays on the record. `channel_of` / `_owner` generalise the generator's
+      transform tracks; a handle track without a handle has no keys (deleting the handle removes them on export),
+      `insert_key` / `build_track` make one, `remove_track` deletes it, `_make_new_record` gives a copied record
+      handles of its own (from the source's current keys), `_scan_objects` cuts a Shift+D'd handle loose. Keys tab:
+      `albam.efl_handle_select`. Keys on a handle trigger the live apply like the record's (`_action_roots`); the
+      Graph Editor lists selected objects only, so the records list / Show Curves select the handles too
+      (`_select_handles`). Vector tracks keyed as custom properties by the 2026-10-11 layout migrate onto handles
+      on first use (`_migrate_legacy`; without it their keys would have been dropped on export). Test:
+      `tests/blender/test_handles.py`.
     - Every other track is a custom property on the Empty, `"<Block> <Field>"` (`track_name`: "Particle Intensity",
       "Move Speed"; colours 4 floats rgba 0-1 with the COLOR subtype, vectors 3 floats, Rot tracks EULER), keyed with
       F-curves. The random part is the sibling property `"<track> Rand"` (colour: `"<track> B"`, the second colour
@@ -705,6 +721,14 @@ Blender import (`engines/mtfw/effect.py`) and its particle preview (`effect_sim.
     (`efl_end_marker`, `set_end` / `end_frame_of`; the editor's End Effect / At Frame are get / set properties on it,
     shown at the top of the panel). The simulated length is `sim_length` = game frames up to `scene.frame_end`; the
     particle cache is keyed by (length, end frame), so changing either re-simulates on the next frame.
+    **Frame rate** (2026-10-17): `load_efl` sets the scene to 60 fps (every DMC4 format counts game frames at 60,
+    as the LMT import already assumed; effects already laid out for another rate are rescaled first). The root
+    then remembers the scene rate its keys are laid out for
+    (`efl_key_fps`, set by `store_source`); `sync_fps` (from `sync_markers` on frame changes, and from the editor's
+    depsgraph handler on scene updates via the `fps` job / `_fps_changed`) rescales every key of the effect's
+    objects and the end marker about the start marker (`effect_keys.rescale`), so keys keep their game frames
+    while the preview / export keep converting with the current rate. Before this, changing the rate after the
+    import silently moved every key's game frame. Test: `tests/blender/test_fps.py`.
   - It returns `None` and links its objects into its own `EFL_<file>` collection, because joint-attached Empties
     aren't children of the root, so the operator's `children_recursive` linking would miss them.
   - **`ParentNo` is the MT joint number** (`bone['mtfw.anim_retarget']`), not the bone name/index. Attach with

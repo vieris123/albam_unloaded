@@ -117,6 +117,10 @@ def load_efl(file_item, context):
     options = context.scene.albam.import_options_efl
     armature = options.armature
     stem = PureWindowsPath(file_item.display_name).stem
+    from . import effect_sim
+    if abs(effect_sim.scene_fps(context.scene) - 60.0) > 1e-6:   # the game runs at 60 fps: keys, WaitFrames and
+        context.scene.render.fps, context.scene.render.fps_base = 60, 1.0   # the preview are exact there (like LMT)
+        effect_sim.sync_fps_all(context.scene)   # effects already laid out for the old rate follow
     builder = _EffectBuilder(app_id, context, stem, armature, options,
                              masks=effect_filter.masks_from_options(options))
     builder.build(efl, getattr(file_item, "relative_path", ""), efl_bytes)
