@@ -88,6 +88,7 @@ The notes most relevant to the addon:
 | `sbc_moving_parts.md` | Moving collision: part matrices per group_id, uStageSetMoveFloor, riding (surface 0x40), the authoring recipe, 20 proposed IDB renames. |
 | `chain_cnschain.md` | Model chains (`.phs` = rCnsChain): file layout, the per-frame solver step by step, `.col` collision, where Nero's coat hangs (body joint 2). |
 | `sdl_scheduler_runtime.md` | How `.sdl` schedulers load and evaluate: header fields, track binding, key modes (step / one-shot / linear / Catmull-Rom / counter), refs, events, the DTI hash; `.pla` `mRotY` / `mAngle` units. |
+| `chartbl_ctn_hang.md` | `.ctn` (rCharTbl, `cCharTblMgr` cancel scripts): layout, which bank / slot each LMT uses (body `_NN` = bank NN - 1, Buster grabs banks 10-29), why a motion without a script hangs the game, and the data / exe fixes. |
 | `sbc_dx9_format.md` | **The DX9 `.sbc` (SBC1 v18) format**: loader, node / group / triangle layout, traversal, what each triangle field does. Read this before touching collision. |
 | `collision_findings.md`, `collision_lineCast.md`, `sCollision_LineSeg_findings.md` | SBC/BVH collision runtime and line casts. |
 | `efl.bt`, `efl_generator_struct.md`, `efl_import_plan.md`, `particle_*.md` | The `.efl` effect format and a not-yet-implemented import plan. |
@@ -215,6 +216,12 @@ This reproduces the game's player foot planting (`cLegIkCtrl` + `cCnsIK`, see `V
   - 153/156 store materials inside the .mod. 21x uses an external `.mrl`.
   - 153 has no RCN header (`size_top_level_` = header + 72, versus +104 for 156).
   - The DMC4 vertex format is driven by the **material's** `vtype` / `func_skin` custom props.
+  - **Material display** (`material.setup_dmc4_material`; spec in `Vibed/RE/mod153_materials.md`): besides the alpha /
+    lightmap / specular / env-cube setup, from the pixel shaders (2026-10-17): LIGHTING_NONE -> group input `Unlit`
+    (emission of the base colour, no lights), THIN -> `Translucency` (Translucent BSDF, albedo x additional.r x
+    lightmap_factor), LIGHTMAP_SHADOW -> Specular MM x shadow map red, POWMAP -> no env cube (`_extend_mtfw_shader_lighting`
+    adds the inputs, also to groups in older .blend files). `_group_socket_name` (export) prefers a texture's direct
+    link to the group, so a texture may also feed other inputs. Test: `tests/blender/test_material_display.py`.
   - Bone palettes hold at most 32 bones.
   - **Bones** (`joints.py`, `mesh._serialize_joint_layout`, 2026-10-16; v153 / v156): the bone table follows the
     armature. The source file's bones keep their index, matched by joint number (`mtfw.anim_retarget`), with their
@@ -239,6 +246,12 @@ This reproduces the game's player foot planting (`cLegIkCtrl` + `cCnsIK`, see `V
     `model_info.light_group` (`uModel::setModel` -> `uModel.mLightGroup`). Import fills `Object.albam_mod.light_group`
     (32 toggles) and sets `loaded`; export writes it when `loaded`, else the source file's value (older imports; the
     panel's Load from File reads it). The panel also works with a mesh of the model selected (`model_root`).
+  - **Level of detail** (same panel, 2026-10-17): `model_info.middist` / `lowdist` (0x80 / 0x84, s32) as Near Up To /
+    Mid Up To (`lod_loaded`, like `loaded`), and the active mesh's LOD mask (`level_of_detail` bits 0-2) as Near / Mid /
+    Far toggles (`Mesh.albam_lod`; other bits kept). `uModel::transDefault` 0x9F1950 picks LOD 1 / 2 / 4 by comparing
+    the draw-depth key (view depth x the draw-order scale, clamped to 0xFFD: not cm) with them; the shadow pass draws
+    LOD 4. Every DX9 model has 1000 / 3000 and every mesh 255, so the stock game never switches. `strip_type` (0
+    everywhere) and the bytes after it are kept from the source.
 - **.tex**: re5 and dmc4 use `tex_112` / `rtex_112`; the others use `tex_157`.
 - **.sbc**: the byte at offset 3 is 49 (`SBC1`, DMC4 DX9 v18; also re5) or 255 (`Sbc21`, the other games; SE DMC4 files
   are `SBCÿ` too). See [SBC (collision)](#sbc-collision).

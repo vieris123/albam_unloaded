@@ -868,7 +868,13 @@ def _create_cb_resource(app_id, mrl_mat, custom_props, cb_name, onlyif=True):
 
 
 def _group_socket_name(output, depth=4):
-    """Name of the MT Framework group socket an image output ends up in (through math / mix nodes), or None."""
+    """Name of the MT Framework group socket an image output ends up in (through math / mix nodes), or None. A
+    direct link to the group wins over a path through other nodes: a texture can also feed another input on the
+    way (the shadow map masks the specular, the additional map the THIN translucency), and link order isn't
+    stable."""
+    for link in output.links:
+        if link.to_node.type == "GROUP" and link.to_socket.name in NODE_NAMES_TO_TYPES:
+            return link.to_socket.name
     for link in output.links:
         node = link.to_node
         if node.type == "GROUP" and link.to_socket.name in NODE_NAMES_TO_TYPES:
@@ -1114,8 +1120,18 @@ def setup_dmc4_material(record, bl_mat):
                                 (emit.location[0] + 180, emit.location[1]))
             nt.links.new(out, group.inputs["Emission DMC4"])
 
+    # LIGHTMAP_SHADOW: the shadow map's red masks the specular only (lights and environment)
+    if record.func_lightmap == 2 and "Use Specular Color" in group.inputs:
+        _shadow_masks_specular(nt, group)
+
     if "Emission DMC4" in group.inputs:
         _env_cube_display(nt, group, record)
+
+    if "Unlit" in group.inputs:
+        # LIGHTING_NONE: no light is read; the colour is albedo x lightmap / vertex colour (and the env term)
+        group.inputs["Unlit"].default_value = 1 if record.func_lighting == 0 else 0
+    if record.func_lighting == 4 and "Translucency" in group.inputs:
+        _thin_translucency(nt, group, record)
 
     if record.func_lightmap in LIGHTMAP_VCOLOR and not group.inputs["Lightmap LM"].links:
         vc = nt.nodes.new("ShaderNodeVertexColor")
@@ -1124,6 +1140,60 @@ def setup_dmc4_material(record, bl_mat):
         out = _scaled_color(nt, vc.outputs["Color"], factor, None, (vc.location[0] + 200, vc.location[1]))
         nt.links.new(out, group.inputs["Lightmap LM"])
         group.inputs["Use Lightmap"].default_value = 1
+
+
+def _shadow_masks_specular(nt, group):
+    """LIGHTMAP_SHADOW (XfMaterialStandard: texld ShadowMap on TEXCOORD2, x tangent.w, times the Fresnel-weighted
+    specular): Specular MM x the shadow map's red. The shadow texture keeps its direct link to Special Map (export)."""
+    shadow = _image_nodes_into(nt, group, "Special Map")
+    if not shadow:
+        return
+    tex = shadow[0][0]
+    red = nt.nodes.new("ShaderNodeSeparateColor")
+    red.label = "Shadow Map R"
+    red.location = (tex.location[0] + 220, tex.location[1] - 160)
+    nt.links.new(tex.outputs["Color"], red.inputs[0])
+    masked = nt.nodes.new("ShaderNodeVectorMath")
+    masked.operation = "SCALE"
+    masked.label = "Specular x Shadow"
+    masked.location = (red.location[0] + 180, red.location[1])
+    mask_links = group.inputs["Specular MM"].links
+    if mask_links:
+        source = mask_links[0].from_socket
+        nt.links.remove(mask_links[0])
+        nt.links.new(source, masked.inputs[0])
+    else:
+        masked.inputs[0].default_value = tuple(group.inputs["Specular MM"].default_value)[:3]
+    nt.links.new(red.outputs[0], masked.inputs["Scale"])
+    nt.links.new(masked.outputs["Vector"], group.inputs["Specular MM"])
+
+
+def _thin_translucency(nt, group, record):
+    """LIGHTING_THINSH4SPOT: the back-face light, times the additional map's red and LightMapScale
+    (lightmap_factor.rgb), joins the diffuse light before the albedo, so Translucency = albedo x additional.r x
+    lightmap_factor (a Translucent BSDF responds to light on the back face, as -N.L does)."""
+    add_nodes = _image_nodes_into(nt, group, "Alpha Mask AM")
+    albedo_links = group.inputs["Diffuse BM"].links
+    if not albedo_links:
+        return
+    colour = albedo_links[0].from_socket
+    x, y = group.location[0] - 450, group.location[1] - 900
+    if add_nodes:
+        add_node = add_nodes[0][0]
+        if add_node.image:
+            add_node.image.colorspace_settings.name = "Non-Color"
+        red = nt.nodes.new("ShaderNodeSeparateColor")
+        red.label = "Translucency Mask R"
+        red.location = (x - 180, y)
+        nt.links.new(add_node.outputs["Color"], red.inputs[0])
+        masked = nt.nodes.new("ShaderNodeVectorMath")
+        masked.operation = "SCALE"
+        masked.location = (x, y)
+        nt.links.new(colour, masked.inputs[0])
+        nt.links.new(red.outputs[0], masked.inputs["Scale"])
+        colour = masked.outputs["Vector"]
+    out = _scaled_color(nt, colour, tuple(record.lightmap_factor[:3]), None, (x + 180, y))
+    nt.links.new(out, group.inputs["Translucency"])
 
 
 CUBE_UV_GROUP = "ALBAM DMC4 Cube UV"
@@ -1195,9 +1265,10 @@ def _cube_uv_group():
 
 def _env_cube_display(nt, group, record):
     """Environment cube (texCUBE(reflect) in the game): rgb / max(a, 1/255) * EnvMapPower * mask
-    * (1 - sat(FresnelFactor * facing^5 + FresnelBias)), added as emission. Only for specular STANDARD / POWMAP /
-    RIM (NONE has no specular term, MIRROR samples the screen instead)."""
-    if record.func_specular in (0, 2):
+    * (1 - sat(FresnelFactor * facing^5 + FresnelBias)), added as emission. Only for specular STANDARD / RIM (NONE
+    has no specular term, MIRROR samples the screen instead, POWMAP's shaders sample a gloss map in the environment
+    map's place)."""
+    if record.func_specular in (0, 2, 3):
         return
     env_nodes = _image_nodes_into(nt, group, "Environment CM")
     if not env_nodes:
@@ -1517,6 +1588,7 @@ def _extend_mtfw_shader(shader_group):
     - Flip Normal Green: 1 = the old green inversion, 0 = none;
     - Emission DMC4: an emission colour (black = none)."""
     if "Use Specular Color" in [s.name for s in _group_inputs(shader_group)]:
+        _extend_mtfw_shader_lighting(shader_group)
         return
     sg = ShaderGroupCompat(shader_group, "OLD" if bpy.app.version[0] <= 3 else "NEW")
     sg.new_socket("Use Specular Color", in_out="INPUT", socket_type="NodeSocketInt")
@@ -1571,6 +1643,77 @@ def _extend_mtfw_shader(shader_group):
         strength = bsdf.inputs.get("Emission Strength")
         if strength is not None:
             strength.default_value = 1.0
+    _extend_mtfw_shader_lighting(shader_group)
+
+
+def _extend_mtfw_shader_lighting(shader_group):
+    """Second set of added inputs (2026-10-17), defaults keep the old look:
+    - Unlit: 1 = an emission of the base colour (albedo, times the lightmap when Use Lightmap) plus Emission DMC4,
+      with the alpha, instead of the BSDF: LIGHTING_NONE, whose pixel shaders read no light (XfMaterialStandard);
+    - Translucency: a colour for a Translucent BSDF added to the BSDF (black = none): LIGHTING_THINSH4SPOT adds
+      the light reaching the back face (-N.L, and the ambient toward -N) times the additional map's red and
+      LightMapScale, before the albedo."""
+    if "Unlit" in [i.name for i in _group_inputs(shader_group)]:
+        return
+    sg = ShaderGroupCompat(shader_group, "OLD" if bpy.app.version[0] <= 3 else "NEW")
+    sg.new_socket("Unlit", in_out="INPUT", socket_type="NodeSocketInt")
+    sg.new_socket("Translucency", in_out="INPUT", socket_type="NodeSocketColor")
+    inputs = {i.name: i for i in _group_inputs(shader_group)}
+    inputs["Unlit"].default_value = 0
+    inputs["Unlit"].min_value, inputs["Unlit"].max_value = 0, 1
+    inputs["Translucency"].default_value = (0.0, 0.0, 0.0, 1.0)
+
+    nodes, links = shader_group.nodes, shader_group.links
+    group_in = next(n for n in nodes if n.type == "GROUP_INPUT")
+    group_out = next(n for n in nodes if n.type == "GROUP_OUTPUT")
+    bsdf = next(n for n in nodes if n.type == "BSDF_PRINCIPLED")
+    base = bsdf.inputs["Base Color"].links[0].from_socket
+    alpha = bsdf.inputs["Alpha"].links[0].from_socket
+    normal = bsdf.inputs["Normal"].links[0].from_socket if bsdf.inputs["Normal"].links else None
+    x, y = bsdf.location
+
+    translucent_colour = nodes.new("ShaderNodeVectorMath")
+    translucent_colour.operation = "SCALE"
+    translucent_colour.label = "Translucency x Alpha"
+    translucent_colour.location = (x, y - 700)
+    links.new(group_in.outputs["Translucency"], translucent_colour.inputs[0])
+    links.new(alpha, translucent_colour.inputs["Scale"])
+    translucent = nodes.new("ShaderNodeBsdfTranslucent")
+    translucent.location = (x + 200, y - 700)
+    links.new(translucent_colour.outputs["Vector"], translucent.inputs["Color"])
+    if normal is not None:
+        links.new(normal, translucent.inputs["Normal"])
+    lit = nodes.new("ShaderNodeAddShader")
+    lit.label = "BSDF + Translucency"
+    lit.location = (x + 400, y - 200)
+    links.new(bsdf.outputs[0], lit.inputs[0])
+    links.new(translucent.outputs[0], lit.inputs[1])
+
+    unlit_colour = nodes.new("ShaderNodeVectorMath")
+    unlit_colour.operation = "ADD"
+    unlit_colour.label = "Base + Emission DMC4"
+    unlit_colour.location = (x, y - 950)
+    links.new(base, unlit_colour.inputs[0])
+    links.new(group_in.outputs["Emission DMC4"], unlit_colour.inputs[1])
+    emission = nodes.new("ShaderNodeEmission")
+    emission.location = (x + 200, y - 950)
+    links.new(unlit_colour.outputs["Vector"], emission.inputs["Color"])
+    transparent = nodes.new("ShaderNodeBsdfTransparent")
+    transparent.location = (x + 200, y - 1100)
+    unlit = nodes.new("ShaderNodeMixShader")
+    unlit.label = "Unlit with Alpha"
+    unlit.location = (x + 400, y - 1000)
+    links.new(alpha, unlit.inputs["Fac"])
+    links.new(transparent.outputs[0], unlit.inputs[1])
+    links.new(emission.outputs[0], unlit.inputs[2])
+
+    switch = nodes.new("ShaderNodeMixShader")
+    switch.label = "Unlit Switcher"
+    switch.location = (x + 600, y - 400)
+    links.new(group_in.outputs["Unlit"], switch.inputs["Fac"])
+    links.new(lit.outputs[0], switch.inputs[1])
+    links.new(unlit.outputs[0], switch.inputs[2])
+    links.new(switch.outputs[0], group_out.inputs[0])
 
 
 def _group_inputs(shader_group):

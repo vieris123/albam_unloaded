@@ -127,7 +127,8 @@ The game behaviour is known; Blender only approximates it. The other preview gap
   joint numbers and go after the model's own; renamed / reordered bones are fine. Check in the game: a model with a
   new bone weighted to some vertices, animated by an LMT track and driving a chain. Still refused: deleting a model's
   own bones (needs remapping every LMT / chain / .col / effect that refers to them).
-- [ ] **Editable `.mod` model settings beyond the light group** (`model_info`: middist, lowdist, strip type).
+- [x] **Editable `.mod` model settings beyond the light group.** Done 2026-10-17: LOD distances and per-mesh LOD
+  toggles (Model Settings panel); strip type is 0 in every file and stays as the source has it.
 - [x] **Particle keyframes as F-curves.** Done 2026-10-11 (`effect_keys.py`): tracks are custom properties on the
   record Empty with F-curves ("… Rand" / "… B" for the random part), generator keys are transform keys, loop is a
   Cycles modifier, interpolation follows the keys; the timer and init-only stay in the Keys tab. Keyframe decorators
@@ -190,7 +191,7 @@ classes and `.sdl` / `.pla`; binary formats need a codec first). Already native:
    sound link, so it belongs next to the LMT events) and the binary banks `.sreq` (126) / `.spac` (66) / `.dnrs` (59),
    which need codecs. See "Sound effects" above.
 7. [ ] **Codec only, no Blender view:** `.msg` rMessage (237, MSG2 binary: game text; an editing job, XML / JSON is
-   enough) and `.mot` rMotion (85, single motions outside LMT banks; native import only if they turn out to matter).
+   enough) and `.mot`: no game file is an rMotion (no entry of type 0x1A773D0C in 3,422 .arc files; the native format is "MOT\0" v48, 32-byte tracks, loader 0xADF830). The 85 `.mot` under `arctool` are an LMT splitter's output (`pl006_01\`: one block per `_NNN` = block NNN-1, with `.motptr` / `.motindex` / `.atk` / `.atkindex` and a `.lmtheader`), so they're covered by LMT support.
 
 **Plain XML is enough** (XFS, values only), once Edit as XML handles XFS (item above): `.sprmap` rSprLayout (33, UI
 layout; a 2D preview would be a luxury), `.sif`, `.ase`, `.eng` / `.engv`, `.ssd`, `.equ`, `.rev_win`.

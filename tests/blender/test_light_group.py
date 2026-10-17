@@ -85,6 +85,38 @@ try:
     rna = bpy.ops.albam.mod_load_settings.get_rna_type()
     check(bool(rna.description) and bool(model_settings.AlbamModSettings.bl_rna.properties["light_group"].description),
           "operator and property have tooltips")
+
+    # -- level-of-detail distances (model_info 0x80 / 0x84) and the mesh LOD mask ------------------------------------
+    def exported(root_):
+        vfiles = mesh.export_mod(root_)
+        return next(v for v in vfiles if v.relative_path.endswith(".mod")).data_bytes
+
+    file_lod = struct.unpack_from("<ii", DATA, 0x80)
+    check(s.lod_loaded and (s.middist, s.lowdist) == file_lod, f"import stores the LOD distances {file_lod}")
+    s.middist, s.lowdist = 600, 2400
+    check(struct.unpack_from("<ii", exported(root), 0x80) == (600, 2400), "edited LOD distances export")
+    s.lod_loaded = False
+    check(struct.unpack_from("<ii", exported(root), 0x80) == file_lod, "an older import exports the file's distances")
+    with bpy.context.temp_override(object=child):
+        bpy.ops.albam.mod_load_settings()
+    check(s.lod_loaded and (s.middist, s.lowdist) == file_lod, "Load from File reads the distances")
+    lod = child.data.albam_lod
+    check(list(lod.levels) == [True, True, True], "a game mesh draws at every LOD")
+    lod.levels = (True, True, False)
+    props = child.data.albam_custom_properties.get_custom_properties_for_appid("dmc4")
+    check(props.level_of_detail == 0xFB, f"Far off clears bit 2 only ({props.level_of_detail:#x})")
+    bpy.context.scene.albam.export_settings.force_lod255 = False
+    out = mesh.Mod153(mesh.KaitaiStream(mesh.BytesIO(bytes(exported(root)))))
+    out._read()
+    check(any(m.level_of_detail == 0xFB for m in out.meshes_data.meshes), "the exported mesh has the new LOD mask")
+    layout = Stub(); p.layout = layout
+    ctx_mesh = type("C", (), {"object": child})()
+    model_settings.ALBAM_PT_ModSettings.draw(p, ctx_mesh)
+    check(sum(1 for n, a, k in layout.calls if n == "prop" and a[1:2] == ("levels",)) == 3
+          and any(n == "prop" and a[1:2] == ("middist",) for n, a, k in layout.calls),
+          "panel draws the distances and the mesh's three LOD toggles")
+    check(all(model_settings.AlbamModSettings.bl_rna.properties[k].description for k in ("middist", "lowdist"))
+          and model_settings.AlbamMeshLod.bl_rna.properties["levels"].description, "LOD properties have tooltips")
 except Exception:
     traceback.print_exc()
     failures.append("exception")

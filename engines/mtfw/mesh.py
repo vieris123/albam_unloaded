@@ -38,7 +38,7 @@ from .material import (
     check_mtfw_shader_group,
 )
 from .texture import check_dds_textures
-from .model_settings import export_light_group, set_light_group
+from .model_settings import export_light_group, export_lod_distances, set_light_group, set_lod_distances
 from .structs.mod_156 import Mod156
 from .structs.mod_153 import Mod153
 from .structs.mod_21 import Mod21
@@ -369,6 +369,7 @@ def build_blender_model(file_list_item, context):
     bl_object.albam_asset.extension = file_list_item.extension
     if hasattr(mod, "model_info"):
         set_light_group(bl_object.albam_mod, mod.model_info.light_group)
+        set_lod_distances(bl_object.albam_mod, mod.model_info.middist, mod.model_info.lowdist)
 
     exportable = context.scene.albam.exportable.file_list.add()
     exportable.bl_object = bl_object
@@ -881,6 +882,8 @@ def export_mod(bl_obj):
     _serialize_top_level_mod(bl_meshes, src_mod, dst_mod)
     if hasattr(dst_mod, "model_info"):
         dst_mod.model_info.light_group = export_light_group(bl_obj, src_mod.model_info.light_group)
+        dst_mod.model_info.middist, dst_mod.model_info.lowdist = export_lod_distances(
+            bl_obj, (src_mod.model_info.middist, src_mod.model_info.lowdist))
     _init_mod_header(bl_obj, src_mod, dst_mod)
 
     # which bone is which entry of the bone table (bones added in Blender go last; joints.py), shared by the
