@@ -88,6 +88,9 @@ The notes most relevant to the addon:
 | `sbc_moving_parts.md` | Moving collision: part matrices per group_id, uStageSetMoveFloor, riding (surface 0x40), the authoring recipe, 20 proposed IDB renames. |
 | `chain_cnschain.md` | Model chains (`.phs` = rCnsChain): file layout, the per-frame solver step by step, `.col` collision, where Nero's coat hangs (body joint 2). |
 | `sdl_scheduler_runtime.md` | How `.sdl` schedulers load and evaluate: header fields, track binding, key modes (step / one-shot / linear / Catmull-Rom / counter), refs, events, the DTI hash; `.pla` `mRotY` / `mAngle` units. |
+| `..\MoveDef\README.md` | **Move definition files** (one XML per player move: motion, effects, hitboxes, cancels, sounds; Albam compiles, dmc4_hook runs): brief, index, design, schema, decisions, RE todo. Scoped 2026-10-17, not implemented. |
+| `player_move_pipeline.md` | How a player move runs: upper / lower body halves, the `.ctn` contact bytes and `cancelNoTbl` (cancel windows), `setEffectConst` and the 0x39 effect-list table, `uCollisionMgr::move` (LMT event bits -> `.idx` -> `.col` + `.atk`), the state-function pattern. |
+| `resource_loaders_writers.md` | How each resource class loads (`sResource::create`, vtbl slot 8) and the game's own writers (slot 9, `MtDataWriter`): exact `.atk` / `.dfd` / `.col` / `.idx` layouts, hot-swap rule for `.ctn` / LMT buffers. |
 | `chartbl_ctn_hang.md` | `.ctn` (rCharTbl, `cCharTblMgr` cancel scripts): layout, which bank / slot each LMT uses (body `_NN` = bank NN - 1, Buster grabs banks 10-29), why a motion without a script hangs the game, and the data / exe fixes. |
 | `sbc_dx9_format.md` | **The DX9 `.sbc` (SBC1 v18) format**: loader, node / group / triangle layout, traversal, what each triangle field does. Read this before touching collision. |
 | `collision_findings.md`, `collision_lineCast.md`, `sCollision_LineSeg_findings.md` | SBC/BVH collision runtime and line casts. |
