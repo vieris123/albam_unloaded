@@ -11,10 +11,28 @@
   wrapper group instead (`effect_sim._wrapped_modifier`) and these helpers are kept for simple cases only.
 - Set Curve Normal: the mode is a node property in 4.2 and a menu socket "Mode" in 5 ("Minimum Twist" / "Z Up" /
   "Free").
+- Bone selection (Pose / Object Mode): `Bone.select` in 4.2, `PoseBone.select` in 5 (`Bone.select` is gone there, so
+  reading it raised and greyed out every button whose poll did: New Chain from Selected Bones, 2026-10-27).
 """
 import bpy
 
 LEGACY_ACTIONS = "fcurves" in bpy.types.Action.bl_rna.properties   # 4.2 (and 4.4's compatibility accessors)
+POSE_BONE_SELECT = "select" in bpy.types.PoseBone.bl_rna.properties  # Blender 5
+
+
+# -- bone selection ------------------------------------------------------------------------------------
+
+def bone_selected(armature_ob, bone):
+    """Whether an armature's bone (a Bone or PoseBone) is selected outside Edit Mode."""
+    if POSE_BONE_SELECT:
+        pose_bone = armature_ob.pose.bones.get(bone.name) if armature_ob.pose else None
+        return bool(pose_bone and pose_bone.select)
+    return bool(getattr(bone, "bone", bone).select)
+
+
+def selected_bones(armature_ob):
+    """The armature's selected Bones (data bones), in its own order."""
+    return [b for b in armature_ob.data.bones if bone_selected(armature_ob, b)]
 
 
 # -- actions ------------------------------------------------------------------------------------------

@@ -184,6 +184,18 @@ try:
                                 r"model\game\pl000\pl000_03_90.phs")
     slots = [int(j) for j in chain["phs_joints"]]
     check(slots == [joint(arm, n) for n in ("tail_a", "tail_b", "tail_c")], f"a chain over the new bones ({slots})")
+    # New Chain from Selected Bones reads the selection through blender_compat (Blender 5 keeps it on pose bones;
+    # reading Bone.select there raised and greyed the button out)
+    bpy.context.view_layer.objects.active = arm
+    bpy.ops.object.mode_set(mode="POSE")
+    for pb in arm.pose.bones:
+        if animation.compat.POSE_BONE_SELECT:
+            pb.select = pb.name in ("tail_a", "tail_b")
+        else:
+            pb.bone.select = pb.name in ("tail_a", "tail_b")
+    check(bpy.ops.albam.phs_new.poll() and [b.name for b in animation.compat.selected_bones(arm)] ==
+          ["tail_a", "tail_b"], "New Chain from Selected Bones sees the selected bones")
+    bpy.ops.object.mode_set(mode="OBJECT")
 
     # -- Shift+D in Edit Mode: the copy gets its own number ----------------------------------------------------------
     bpy.ops.object.mode_set(mode="EDIT")

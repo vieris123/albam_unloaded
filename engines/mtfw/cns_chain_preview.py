@@ -42,6 +42,7 @@ import bpy
 from bpy.app.handlers import persistent
 from mathutils import Matrix, Vector
 
+from albam.lib import blender_compat as compat
 from albam.registry import blender_registry
 from albam.engines.mtfw import col_shapes
 from albam.engines.mtfw import cns_chain
@@ -1096,7 +1097,7 @@ class ALBAM_OT_PhsNew(bpy.types.Operator):
     def poll(cls, context):
         ob = context.object
         return ob is not None and ob.type == "ARMATURE" and ob.mode == "POSE" and \
-            any(b.select for b in ob.data.bones)
+            bool(compat.selected_bones(ob))
 
     def invoke(self, context, event):
         arm = context.object
@@ -1113,7 +1114,7 @@ class ALBAM_OT_PhsNew(bpy.types.Operator):
             self.report({"ERROR"}, f"{path} is already in the scene")
             return {"CANCELLED"}
         try:
-            ob = cns_chain.new_chain(context, arm, [b for b in arm.data.bones if b.select], path)
+            ob = cns_chain.new_chain(context, arm, compat.selected_bones(arm), path)
         except Exception:                   # noqa: BLE001 - shown in the popup
             bpy.ops.albam.error_handler_popup("INVOKE_DEFAULT")
             return {"CANCELLED"}

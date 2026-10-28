@@ -103,11 +103,15 @@ The game behaviour is known; Blender only approximates it. The other preview gap
   decoded). Patch a chain with a limited bone and compare.
 - [ ] **Model chains: Dante's coat attachment.** The preview's Attach to Body uses body joint 2, which is what
   `uPlayerNero::initModel` does for Nero's coat; Dante's (pl006_03, `uPlayerDante::setupDanteModel`?) wasn't traced.
-- [ ] **Move definition files (scoped 2026-10-17, not started).** One XML per player move (motion, effects by
-  frame, hitbox windows, cancel windows, sounds, the move-table row); Albam compiles the parts with a binary home
-  (`.ctn` cancel scripts, LMT event tables, `.idx` rows) and dmc4_hook runs the rest. Design, schema, decisions and
-  the open RE items: `E:\DMC mod stuffs\Vibed\MoveDef\README.md`. Albam's share: `ctn.py` / `idx.py` / `atk.py`
-  codecs (upstream dmc4_xml), compile / extract operators, apply-XML-to-LMT-events, a move panel. Phase 1 = Streak.
+- [ ] **Move definition files: Albam's share (the dmc4_hook runner reached v1 on 2026-10-24).** One XML per player
+  move, run by dmc4_hook's `MoveDef` mod: row, input command, runtime motion bank, stage with stick-direction slots,
+  synthesised `.ctn` cancels, ballistics, effects by frame, hand-offs between files, overlays on vanilla moves (Nero
+  gets Dante's Million Stab out of Streak, working in-game). Design, schema (v0.2 + the implemented subset), decisions
+  D1-D23: `E:\DMC mod stuffs\Vibed\MoveDef\README.md`. **Left for Albam (phase C):** author the XML from the LMT
+  action (stages from blocks, frames from pose markers, effects picked from Game Files), the `.atk` codec upstream in
+  dmc4_xml for new attack entries, Save to Game Folder writing xml + lmt + atk together, validation (block exists and
+  is non-empty, frames inside the block, joint names, ids unique and in range). The `.ctn` compile (`ctn.py`, done) is
+  optional now: cancels are synthesised at runtime.
 - [ ] **Hitboxes (saved for later, 2026-10-10).** Four file types keyed to a model's joints, already mined in IDA
   (per the user) and described by 010 templates in `E:\DMC mod stuffs\DMC4 templates`:
   - `.col` = `rCollisionShape` (shapes): codec done (`dmc4xml/col.py`, byte-exact on 110 DX9 files); Blender import,

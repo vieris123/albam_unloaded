@@ -37,6 +37,7 @@ from bpy.app.handlers import persistent
 from mathutils import Matrix, Vector
 
 from albam.exceptions import AlbamCheckFailure
+from albam.lib import blender_compat as compat
 from albam.registry import blender_registry
 from albam.vfs import VirtualFileData
 from albam.engines.mtfw.cns_chain import (ARMATURE_PROP, JOINT_PROP, _folder, _joint_bones, _stem, apply_tips,
@@ -947,7 +948,7 @@ class ALBAM_OT_ColAddShape(bpy.types.Operator):
         if self.kind == "sphere":
             a = _new_end(name, "sphere", arm, bone, (0.0, 0.0, 0.0), self.radius, coll, root)
         else:
-            other = next((b for b in arm.data.bones if b.select and b != bone), None) or \
+            other = next((b for b in compat.selected_bones(arm) if b != bone), None) or \
                 next(iter(bone.children), None)
             if other is None or other.get(JOINT_PROP) is None:
                 self.report({"ERROR"}, "select a second bone (with a joint number) for the capsule's other end")
