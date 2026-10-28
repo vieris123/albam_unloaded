@@ -30,7 +30,7 @@ from albam.lib.blender import (
 from albam.exceptions import AlbamCheckFailure
 from albam.lib.misc import chunks
 from albam.registry import blender_registry
-from albam.engines.mtfw import joints
+from albam.engines.mtfw import joints, mesh_prep
 from albam.vfs import VirtualFileData
 from .material import (
     build_blender_materials,
@@ -866,11 +866,14 @@ def export_mod(bl_obj):
 
     src_mod = Mod.from_bytes(asset.original_bytes)
     src_mod._read()
-    dst_mod = Mod()
     # TODO: export options like visibility
     bl_meshes = [c for c in bl_obj.children_recursive if c.type == "MESH"]
     if export_settings.export_visible:
         bl_meshes = [mesh for mesh in bl_meshes if mesh.visible_get()]
+    if src_mod.header.version == 153 and not bl_meshes:
+        # the group table needs a record per part (_serialize_groups), and a model without meshes draws nothing
+        raise AlbamCheckFailure("The model has no meshes", details=bl_obj.name,
+                                solution="Parent at least one mesh to the model (Ctrl+P > Object)")
     if src_mod.header.version == 153:   # one material per mesh: the record has a single idx_material
         mixed = [m.name for m in bl_meshes
                  if len({p.material_index for p in m.data.polygons}) > 1]
@@ -878,6 +881,27 @@ def export_mod(bl_obj):
             raise AlbamCheckFailure(
                 "Some meshes use more than one material", details=", ".join(mixed),
                 solution="Separate them by material (Edit Mode > Mesh > Separate > By Material)")
+        bare = [m.name for m in bl_meshes if not any(slot.material for slot in m.material_slots)]
+        if bare:
+            raise AlbamCheckFailure(
+                "Some meshes have no material", details=", ".join(bare),
+                solution="Give each mesh a material (Material Properties > New); New DMC4 Model sets them up")
+    temporary = []
+    if app_id == "dmc4":
+        # temporary triangulated / seam-split copies of meshes made in Blender (mesh_prep.py); imported meshes
+        # pass through unchanged
+        bl_meshes, temporary = mesh_prep.prepared_meshes(bl_obj, bl_meshes)
+    try:
+        return _export_mod(bl_obj, src_mod, bl_meshes, vfiles)
+    finally:
+        mesh_prep.remove_temporary(temporary)
+
+
+def _export_mod(bl_obj, src_mod, bl_meshes, vfiles):
+    asset = bl_obj.albam_asset
+    app_id = asset.app_id
+    Mod = APPID_CLASS_MAPPER[app_id]
+    dst_mod = Mod()
 
     _serialize_top_level_mod(bl_meshes, src_mod, dst_mod)
     if hasattr(dst_mod, "model_info"):
@@ -888,14 +912,15 @@ def export_mod(bl_obj):
 
     # which bone is which entry of the bone table (bones added in Blender go last; joints.py), shared by the
     # bone table, the palettes, the vertex weights and the weight bounds
+    # (a new model's blank source has no bones: every bone is then "added in Blender", new_model.py)
     dst_mod._albam_joint_layout = None
-    if bl_obj.type == "ARMATURE" and src_mod.header.version in (153, 156) and src_mod.header.num_bones:
-        dst_mod._albam_joint_layout = joints.export_layout(bl_obj, src_mod.bones_data.bones_hierarchy)
+    if bl_obj.type == "ARMATURE" and src_mod.header.version in (153, 156):
+        dst_mod._albam_joint_layout = joints.export_layout(bl_obj, _source_bones(src_mod))
     dst_mod._albam_bone_index = (joints.bone_index_map(dst_mod._albam_joint_layout)
                                  if dst_mod._albam_joint_layout else None)
     bone_palettes = _create_bone_palettes(src_mod, bl_obj, bl_meshes, dst_mod._albam_bone_index)
     dst_mod.bones_data = _serialize_bones_data(bl_obj, bl_meshes, src_mod, dst_mod, bone_palettes)
-    dst_mod.groups = _serialize_groups(src_mod, dst_mod)
+    dst_mod.groups = _serialize_groups(src_mod, dst_mod, bl_meshes)
     materials_map, mrl, vtextures = serialize_materials_data(asset, bl_meshes, src_mod, dst_mod)
 
     meshes_data, vertex_buffer, vertex_buffer_2, index_buffer = (
@@ -1036,6 +1061,11 @@ def _serialize_top_level_mod(bl_meshes, src_mod, dst_mod):
 
     if src_mod.header.version in (210, 212):
         dst_mod.num_weight_bounds = 0
+
+
+def _source_bones(src_mod):
+    """the source file's bone records; none for a model without bones (a new model's blank source)"""
+    return src_mod.bones_data.bones_hierarchy if src_mod.header.num_bones else []
 
 
 def _serialize_bones_data(bl_obj, bl_meshes, src_mod, dst_mod, bone_palettes=None):
@@ -1251,10 +1281,11 @@ def _serialize_joint_layout(bl_obj, src_mod, dst_mod, bone_palettes):
     from their rest pose, joints.py). Inverse binds come from the local-matrix chain (_inverse_binds_from_chain)."""
     entries = dst_mod._albam_joint_layout
     index = dst_mod._albam_bone_index
-    src_bones = src_mod.bones_data.bones_hierarchy
+    src_bones = _source_bones(src_mod)
     bones_data = dst_mod.BonesData(_parent=dst_mod, _root=dst_mod._root)
     dst_mod.header.num_bones = len(entries)
-    bone_map = list(src_mod.bones_data.bone_map)
+    # joint number -> bone index, 255 = no such joint (uModel::setupMotionParam)
+    bone_map = list(src_mod.bones_data.bone_map) if src_bones else [255] * 256
     bones_data.bones_hierarchy = []
     bones_data.parent_space_matrices = []
     bones_data.inverse_bind_matrices = []
@@ -1433,9 +1464,16 @@ def _create_bone_palettes(src_mod, bl_armature, bl_meshes, bone_index=None):
     return final
 
 
-def _serialize_groups(src_mod, dst_mod):
+def _serialize_groups(src_mod, dst_mod, bl_meshes):
+    """The part records (`group`, 32 bytes: part number, 3 unread words, a sphere). DX9 uModel::transDefault
+    0x9F1950 (and transDevilTrigger 0x9F3060) reads only the number and the sphere's centre: it projects each centre
+    with the model's world matrix to a draw depth, picks LOD 1 / 2 / 4 for that part number against middist /
+    lowdist (or the forced uModel LOD), and a mesh draws only if that LOD shares a bit with its LOD mask. A mesh
+    whose part number (idx_group) has no record reads an uninitialised stack byte instead, so it may not draw.
+    The source file's records are kept as they are; a part number a mesh uses without a record gets one, centred
+    on that part's meshes (90 of the 675 DX9 models have meshes like that). See Vibed/RE/mod153_findings.md."""
     groups = []
-    for i in range(dst_mod.header.num_groups):
+    for i in range(src_mod.header.num_groups):
         src_group = src_mod.groups[i]
         g = dst_mod.Group(_parent=dst_mod, _root=dst_mod._root)
         g.group_index = src_group.group_index
@@ -1449,6 +1487,31 @@ def _serialize_groups(src_mod, dst_mod):
         g.pos.z = src_group.pos.z
         g.radius = src_group.radius
 
+        groups.append(g)
+    if dst_mod.header.version == 153:
+        groups.extend(_new_part_groups(dst_mod, bl_meshes, {g.group_index for g in groups}))
+        dst_mod.header.num_groups = len(groups)
+    return groups
+
+
+def _new_part_groups(dst_mod, bl_meshes, numbered):
+    """records for the part numbers of bl_meshes that aren't in `numbered`: the bounding sphere of the part's
+    meshes (cm, game axes, as the header's)"""
+    app_id = "dmc4"
+    parts = {}
+    for ob in bl_meshes:
+        number = ob.data.albam_custom_properties.get_custom_properties_for_appid(app_id).idx_group
+        if number not in numbered:
+            parts.setdefault(number, []).append(ob)
+    groups = []
+    for number in sorted(parts):
+        x, y, z, radius = get_model_bounding_sphere(parts[number])
+        g = dst_mod.Group(_parent=dst_mod, _root=dst_mod._root)
+        g.group_index = number
+        g.reserved = [0, 0, 0]
+        g.pos = dst_mod.Vec3(_parent=g, _root=g._root)
+        g.pos.x, g.pos.y, g.pos.z = x * 100, z * 100, -y * 100
+        g.radius = radius * 100
         groups.append(g)
     return groups
 

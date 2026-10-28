@@ -39,6 +39,7 @@ def register():
     importlib.import_module("albam.engines.mtfw.joints")
     importlib.import_module("albam.engines.mtfw.mesh")
     importlib.import_module("albam.engines.mtfw.model_settings")
+    importlib.import_module("albam.engines.mtfw.new_model")
     importlib.import_module("albam.engines.mtfw.effect")
     importlib.import_module("albam.engines.mtfw.effect_export")
     importlib.import_module("albam.engines.mtfw.effect_editor")

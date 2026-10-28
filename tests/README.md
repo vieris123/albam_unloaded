@@ -61,6 +61,8 @@ The tests only read game files, never write them.
 | `test_frame_cache` | the per-frame playback cache: replays, scrubbing and fresh computation draw the same; camera moves redraw |
 | `test_ribbon_nodes` | line ribbons built by the Ribbons node group match the points' camera-facing strips, UVs, colours and material |
 | `test_missing` | missing textures |
+| `test_new_bones`, `test_new_model` | (not effects) `.mod` export: bones added in Blender; New DMC4 Model (a static cube and a rig made from scratch, mesh preparation, part records; imported models pass through unchanged) |
+| `test_material_display` | (not effects) DMC4 material display from the shader functions |
 | `test_culling`, `test_orient`, `test_billboard_face`, `test_billboard_modes`, `test_polygon_align`, `test_light`, `test_light_group` | preview rules: culling fade, particle orientation, camera facing, lights, light groups |
 
 `corpus/` (plain Python over every unique DX9 `.efl`):

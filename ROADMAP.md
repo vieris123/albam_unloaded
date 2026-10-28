@@ -138,6 +138,22 @@ The game behaviour is known; Blender only approximates it. The other preview gap
   own bones (needs remapping every LMT / chain / .col / effect that refers to them).
 - [x] **Editable `.mod` model settings beyond the light group.** Done 2026-10-17: LOD distances and per-mesh LOD
   toggles (Model Settings panel); strip type is 0 in every file and stays as the source has it.
+- [x] **New `.mod` from scratch.** Done 2026-10-28 (`new_model.py`, `mesh_prep.py`; user guide `docs/new_model.md`):
+  New DMC4 Model on an armature / Empty / mesh, export from a generated blank source, bones numbered from 0, part
+  records generated, meshes triangulated / seam-split / moved into the root's frame on temporary copies at export.
+  Open:
+  - [ ] **Check in the game:** a static prop and a small skinned model (bones from scratch, an LMT on them) load
+    and draw; the generated part record keeps meshes drawn at every distance.
+  - [ ] **Images to DDS.** Export needs DDS images; Albam has no converter (PNG / TGA must be converted outside).
+    An uncompressed A8R8G8B8 writer from Blender pixels (with mips) would remove that step.
+  - [ ] **Normal maps.** DMC4 reads DXT5nm (X in alpha, Y in green); New DMC4 Model leaves a regular normal map
+    unconnected and says so. A swizzle on export (with the DDS writer) would let ordinary normal maps work.
+  - [ ] **Modifiers.** Export reads the mesh data and ignores every modifier but the vertex groups (a Mirror or
+    Subdivision has to be applied first). Evaluating the mesh without its Armature modifier in `mesh_prep` would fix
+    it.
+  - [ ] **Part records of edited game models.** Export now adds a record for a part number without one: that
+    changes the output of the 90 DX9 models whose meshes already lack one (they drew by a stale stack byte before).
+    Harmless by the code, not checked in the game.
 - [x] **Particle keyframes as F-curves.** Done 2026-10-11 (`effect_keys.py`): tracks are custom properties on the
   record Empty with F-curves ("… Rand" / "… B" for the random part), generator keys are transform keys, loop is a
   Cycles modifier, interpolation follows the keys; the timer and init-only stay in the Keys tab. Keyframe decorators

@@ -119,6 +119,27 @@ def ensure_joint_numbers(armature_ob):
     return assigned
 
 
+def number_new_rig(armature_ob):
+    """For a new model (new_model.py): bones without a joint number get the lowest free ones in Blender's bone order
+    (parents first), so a rig made in Blender starts at joint 0 like the game's. Bones that have a number keep it
+    (a rig taken from a game model keeps its animations). Returns [(bone name, number)] for the bones numbered."""
+    _sync_edit_mode(armature_ob)
+    bones = joint_bones(armature_ob)
+    taken = {joint_of(b) for b in bones if joint_of(b) is not None} | set(RESERVED)
+    needs = [b for b in bones if joint_of(b) is None]
+    free = [j for j in range(254) if j not in taken]
+    if len(free) < len(needs):
+        raise AlbamCheckFailure(
+            "Too many bones", f"{len(needs)} bones without a joint number, {len(free)} numbers free (0-253)",
+            "Remove some bones, or mark helper bones Not a Game Joint (Bone Properties > Game Joint)")
+    assigned = []
+    for b, j in zip(needs, free):
+        b[JOINT_PROP] = str(j)
+        b[ADDED_PROP] = 1
+        assigned.append((b.name, j))
+    return assigned
+
+
 def export_layout(armature_ob, src_bones):
     """[(bone, source index or None)] in .mod bone-table order: the source file's bones by joint number, then the
     bones added in Blender, parents first. Raises AlbamCheckFailure for deleted source bones, too many bones, and a
