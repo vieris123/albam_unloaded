@@ -446,6 +446,31 @@ def slots_from_bones(armature, bones):
     return slots
 
 
+def unnumbered_chain_bones(ob):
+    """bones in the chain's bone collection that are game joints but have no joint number yet (bones made in Blender
+    and assigned to the collection); read-only, cheap enough for a depsgraph handler"""
+    from albam.engines.mtfw.joints import is_helper
+    arm = chain_armature(ob)
+    coll = arm.data.collections.get(ob.get(COLLECTION_PROP, "")) if arm is not None else None
+    if coll is None:
+        return []
+    return [b for b in coll.bones if b.get(JOINT_PROP) is None and not is_helper(b)]
+
+
+def number_chain_bones(ob):
+    """Give the chain's new bones their joint numbers (joints.ensure_joint_numbers: the highest free ones, as for any
+    bone added in Blender), so chain_joints can place them. Not in Edit Mode: leaving it rebuilds the bones from the
+    edit bones and would drop the numbers (the depsgraph handler runs again once it's left). Returns
+    [(bone name, number)]."""
+    if not unnumbered_chain_bones(ob):
+        return []
+    arm = chain_armature(ob)
+    if arm.mode == "EDIT":
+        return []
+    from albam.engines.mtfw.joints import ensure_joint_numbers
+    return ensure_joint_numbers(arm)
+
+
 def chain_joints(ob, problems):
     """The chain's slot list (joints, -1 between tendrils): from the bone collection when the chain has an armature,
     else the property. Bones still in the collection keep their slots and tendrils; a removed bone's slot goes (an
@@ -459,7 +484,8 @@ def chain_joints(ob, problems):
     by_joint = {}
     for b in coll.bones:
         if b.get(JOINT_PROP) is None:
-            problems.append(f"bone {b.name} has no joint number ({JOINT_PROP})")
+            problems.append(f"bone {b.name} has no joint number yet: leave Edit Mode (it gets one then), or set it "
+                            "in Bone Properties > Game Joint")
             return source
         by_joint[int(b[JOINT_PROP])] = b
     if not by_joint:
@@ -633,6 +659,9 @@ def build_phs(ob):
     x = xfs_codec.read(bytes(ob.albam_asset.original_bytes))
     root, layout = _root_object(x)
     problems, notes = [], []
+    numbered = number_chain_bones(ob)
+    if numbered:
+        notes.append("new joint numbers: " + ", ".join(f"{name} {j}" for name, j in numbered))
     for i, (prop, items) in enumerate(zip(layout.props, root.values)):
         if prop.name == "mBone":
             joints = chain_joints(ob, problems)

@@ -663,15 +663,59 @@ def _adopt_timer():
     return None
 
 
+# ---- bones assigned to a chain's bone collection get joint numbers --------------------------------------------------
+
+_number_pending = [False]
+
+
+def number_new_chain_bones():
+    """joint numbers for the bones made in Blender and assigned to a chain's bone collection (chain_joints needs
+    them to place the bone); returns [(bone name, number)]"""
+    numbered = []
+    for ob in list(bpy.data.objects):
+        if ob.type == "EMPTY" and COLLECTION_PROP in ob:
+            numbered += cns_chain.number_chain_bones(ob)
+    return numbered
+
+
+def _number_timer():
+    _number_pending[0] = False
+    try:
+        number_new_chain_bones()
+    except Exception as err:                # noqa: BLE001 - never break editing
+        print(f"PHS joint numbers: {err}")
+    return None
+
+
+def _needs_numbers(updated):
+    """chains on the updated armatures with an unnumbered bone in their collection (outside Edit Mode)"""
+    for ob in bpy.data.objects:
+        if ob.type == "EMPTY" and COLLECTION_PROP in ob:
+            arm = chain_armature(ob)
+            if arm is not None and arm.data in updated and arm.mode != "EDIT" and \
+                    cns_chain.unnumbered_chain_bones(ob):
+                return True
+    return False
+
+
 @persistent
 def _on_depsgraph(scene, depsgraph):
+    updated = set()
     for update in depsgraph.updates:
         ob = update.id.original if isinstance(update.id, bpy.types.Object) else None
         if ob is not None and cns_chain.NAME_PROP in ob and ob.name != ob[cns_chain.NAME_PROP]:
             if not _adopt_pending[0]:
                 _adopt_pending[0] = True
                 bpy.app.timers.register(_adopt_timer, first_interval=0.0)
-            return
+        if ob is not None and ob.type == "ARMATURE":
+            updated.add(ob.data)
+        elif isinstance(update.id, bpy.types.Armature):
+            updated.add(update.id.original)
+    # a bone made in Blender and assigned to a chain's collection: give it a joint number (a timer: no ID writes in
+    # the handler); the check itself only reads
+    if updated and not _number_pending[0] and _needs_numbers(updated):
+        _number_pending[0] = True
+        bpy.app.timers.register(_number_timer, first_interval=0.0)
 
 
 def register_handlers():
@@ -726,6 +770,7 @@ def _clear_base(ob):
 def _preview_update(self, context):
     ob = self.id_data
     if self.preview:
+        cns_chain.number_chain_bones(ob)
         if BASE_PROP not in ob:
             _store_base(ob)
     else:

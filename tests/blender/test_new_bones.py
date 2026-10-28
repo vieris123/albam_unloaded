@@ -184,6 +184,50 @@ try:
                                 r"model\game\pl000\pl000_03_90.phs")
     slots = [int(j) for j in chain["phs_joints"]]
     check(slots == [joint(arm, n) for n in ("tail_a", "tail_b", "tail_c")], f"a chain over the new bones ({slots})")
+
+    # -- a bone made in Blender and assigned to the chain's bone collection gets a joint number by itself -------------
+    from albam.engines.mtfw import cns_chain_preview
+    coll = arm.data.collections[chain[cns_chain.COLLECTION_PROP]]
+
+    def make_bone(name, parent):
+        bpy.context.view_layer.objects.active = arm
+        bpy.ops.object.mode_set(mode="EDIT")
+        e = arm.data.edit_bones.new(name)
+        e.head = arm.data.edit_bones[parent].tail
+        e.tail = e.head + Vector((0, 0, -0.05))
+        e.parent = arm.data.edit_bones[parent]
+        return e
+
+    def depsgraph_update():
+        cns_chain_preview._on_depsgraph(scene, SimpleNamespace(updates=[SimpleNamespace(id=arm)]))
+
+    make_bone("tail_d", "tail_c")
+    coll.assign(arm.data.edit_bones["tail_d"])
+    cns_chain_preview._number_pending[0] = False
+    depsgraph_update()
+    check(not cns_chain_preview._number_pending[0], "in Edit Mode the handler leaves the new chain bone alone")
+    bpy.ops.object.mode_set(mode="OBJECT")
+    check(cns_chain.unnumbered_chain_bones(chain) == [arm.data.bones["tail_d"]],
+          "after Edit Mode the bone is in the chain's collection without a number")
+    depsgraph_update()
+    check(cns_chain_preview._number_pending[0], "the depsgraph handler queues the numbering")
+    cns_chain_preview._number_timer()          # timers don't run headless
+    check(arm.data.bones["tail_d"].get(joints.JOINT_PROP) is not None and not cns_chain.unnumbered_chain_bones(chain),
+          "the timer gives it a joint number")
+    problems = []
+    slots = cns_chain.chain_joints(chain, problems)
+    check(not problems and slots == [joint(arm, n) for n in ("tail_a", "tail_b", "tail_c", "tail_d")],
+          f"the chain's tendril grows by the new bone ({slots}, {problems})")
+    cns_chain_preview._number_pending[0] = False
+    depsgraph_update()
+    check(not cns_chain_preview._number_pending[0], "with every chain bone numbered the handler queues nothing")
+    make_bone("tail_e", "tail_d")
+    bpy.ops.object.mode_set(mode="OBJECT")
+    coll.assign(arm.data.bones["tail_e"])
+    data, notes = cns_chain.build_phs(chain)
+    check(arm.data.bones["tail_e"].get(joints.JOINT_PROP) is not None and any("tail_e" in n for n in notes) and
+          cns_chain.chain_joints(chain, [])[-1] == joint(arm, "tail_e"),
+          f"chain export numbers a new bone itself ({notes})")
     # New Chain from Selected Bones reads the selection through blender_compat (Blender 5 keeps it on pose bones;
     # reading Bone.select there raised and greyed the button out)
     bpy.context.view_layer.objects.active = arm
@@ -229,7 +273,8 @@ try:
           "export writes the picked mirror")
     settings.not_joint = True
     out = parse(export(arm))
-    check(out.header.num_bones == n_src + 4, "a bone marked Not a Game Joint isn't exported")  # tail_b, c, copy, mid
+    check(out.header.num_bones == n_src + 6,     # tail_b, c, d, e, the copy, mid
+          f"a bone marked Not a Game Joint isn't exported ({out.header.num_bones - n_src} new)")
     settings.not_joint = False
 
     # -- deleting a model bone is refused ------------------------------------------------------------------------------

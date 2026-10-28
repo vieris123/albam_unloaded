@@ -70,6 +70,7 @@ Open work is tracked in `ROADMAP.md` (repo root): keep it up to date when an ite
 | `lib/` | Helpers: `blender_compat.py` (Blender 4.2 / 5 API differences: actions, node-modifier inputs, see Runtime above), `blender.py` (mesh/material utilities), `bvh_construction.py` + `primitive_geometry.py` + `pymorton.py` + `rays.py` (BVH for the SBC21 export of other games; DMC4 uses `engines/mtfw/sbc_bvh.py`), `bone_names.py` (bone rename presets), `common_op.py`, `dds.py`, `vec_op.py` (**`vec_mult` actually divides**). |
 | `albam_vendor/` | Vendored `kaitaistruct` (the read-write runtime), `pymmh3` and `dmc4xml` (the `.sdl` / `.pla` codecs, a **third-party copy** of the package in the user's [dmc4_xml](https://github.com/vieris123/dmc4_xml) repo: never edit it here, change it upstream and run `scripts/sync_dmc4xml.py <dmc4_xml checkout>`, which records the commit in `albam_vendor/dmc4xml/UPSTREAM.txt`). They can only be imported after `register()` has put this folder on `sys.path`. |
 | `tests/` | End-to-end tests: `run_tests.py` (runner), `common.py` (data / output paths), `blender/` (headless Blender), `corpus/` (plain Python over the DX9 files). See `tests/README.md`. |
+| `docs/` | User guides (`README.md` is the index). **`implicit_features.md` lists every behaviour without a button** (Shift+D / X / parenting / bone collections / markers / handlers): when a feature works through ordinary Blender actions or on its own, add it there in the same change. |
 | `scripts/sync_dmc4xml.py` | Re-syncs `albam_vendor/dmc4xml` from a dmc4_xml checkout (default: `E:\DMC mod stuffs\dmc4_xml`). |
 
 ## DMC4 reverse-engineering notes
@@ -236,8 +237,8 @@ This reproduces the game's player foot planting (`cLegIkCtrl` + `cCnsIK`, see `V
     bones by hierarchy, so a new child shifts its indices: palettes, vertex weights and weight bounds all use the
     layout's name -> index map, `dst_mod._albam_bone_index`, not Blender's order). A new bone gets the highest free
     joint number below 254 (`ensure_joint_numbers`: skips the armature's numbers and the joints the scene's LMTs
-    keep for the character's other models; also run by LMT export, New Chain, Add Sphere / Capsule and effect
-    parenting, so a new bone can be animated / chained / collided / effect-parented before the .mod is exported);
+    keep for the character's other models; also run by LMT export, New Chain, chain export / preview / a bone assigned to a
+    chain's collection, Add Sphere / Capsule and effect parenting, so a new bone can be animated / chained / collided / effect-parented before the .mod is exported);
     a Shift+D copy carries its original's number and is renumbered (the bone without a `.001` suffix keeps it).
     New-bone fields: parent index, mirror (Bone Properties > Game Joint pick, else the bone at the reflected
     position across X = 0, itself on the centre line, else 255), offset = Lmat translation, mLength = |offset|,
@@ -1139,6 +1140,14 @@ Researched 2026-10-05, supported 2026-10-10 (import / export, motion preview). R
     else starts a new tendril at the end. New chains get one tendril per parent-linked run of the selected bones
     (`slots_from_bones`). Errors: more than 32 slots (separators count), a bone without a joint number, an axis value
     out of range.
+  - **New bones assigned to a chain's collection get joint numbers by themselves** (2026-10-28): the preview's
+    depsgraph handler checks (read-only, `cns_chain.unnumbered_chain_bones`) the chains of updated armatures and
+    queues a timer (`cns_chain_preview._number_timer` -> `cns_chain.number_chain_bones` ->
+    `joints.ensure_joint_numbers`); chain export (`build_phs`, noted) and turning the preview on do it too. Never in
+    Edit Mode: leaving it rebuilds the bones from the edit bones and would drop the numbers (the handler fires again
+    after). Before this a bone made in Blender had no number until a .mod / LMT export, so the preview silently kept
+    the old slots and chain export refused. Test: `test_new_bones.py` (and the real Assign button, checked on 4.2
+    and 5.4).
   - **Settings in the Chain panel** (`CHAIN_SETTING_GROUPS`: Forces, Response, Shape, Collision & Floor, Carried
     by Parent): the Empty's custom properties drawn with readable labels; each keeps its `cns_chain.HELP` tooltip.
   - **Bookkeeping properties** (`phs_*` on chain Empties, `col_*` on collision objects) get an "Albam internal,
