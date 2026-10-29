@@ -102,6 +102,17 @@ Panels mentioned here are in the Properties editor (Object / Bone tabs) unless a
 - **Foot IK Preview** (LMT panel) plants the feet the way the game does wherever the animation's foot IK event
   flags are on. Preview only: export is unaffected.
 
+## Moves (MoveDef files, Dope Sheet > Action Editor > Albam > Moves)
+
+- **A move's frames are pose markers** named `md <element>` on its stage's animation. Drag one to move that cancel,
+  trigger, effect, sound, shell, launch or transition; the file gets the marker's game frame when it's checked or
+  written. Turn on View > Show Pose Markers in the Action editor to see them.
+- **Deleting a marker** leaves its element at its last frame (the frame field then edits a number); typing a frame
+  there puts the marker back. Removing the element (or the move) removes its markers.
+- **Selecting an element** in the Elements list selects its marker and moves the playhead to it.
+- **Writing a move keeps the file as it was** apart from your edits: comments, wrapped tags and elements the runner
+  doesn't read stay. See [movedef.md](movedef.md).
+
 ## Effects (`.efl`, the Effect Editor)
 
 **Selecting and editing**

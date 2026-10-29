@@ -103,15 +103,35 @@ The game behaviour is known; Blender only approximates it. The other preview gap
   decoded). Patch a chain with a limited bone and compare.
 - [ ] **Model chains: Dante's coat attachment.** The preview's Attach to Body uses body joint 2, which is what
   `uPlayerNero::initModel` does for Nero's coat; Dante's (pl006_03, `uPlayerDante::setupDanteModel`?) wasn't traced.
-- [ ] **Move definition files: Albam's share (the dmc4_hook runner reached v1 on 2026-10-24).** One XML per player
-  move, run by dmc4_hook's `MoveDef` mod: row, input command, runtime motion bank, stage with stick-direction slots,
-  synthesised `.ctn` cancels, ballistics, effects by frame, hand-offs between files, overlays on vanilla moves (Nero
-  gets Dante's Million Stab out of Streak, working in-game). Design, schema (v0.2 + the implemented subset), decisions
-  D1-D23: `E:\DMC mod stuffs\Vibed\MoveDef\README.md`. **Left for Albam (phase C):** author the XML from the LMT
-  action (stages from blocks, frames from pose markers, effects picked from Game Files), the `.atk` codec upstream in
-  dmc4_xml for new attack entries, Save to Game Folder writing xml + lmt + atk together, validation (block exists and
-  is non-empty, frames inside the block, joint names, ids unique and in range). The `.ctn` compile (`ctn.py`, done) is
-  optional now: cancels are synthesised at runtime.
+- [ ] **Move definition files: Albam's share (phase C, started 2026-10-29).** One XML per player move, run by
+  dmc4_hook's `MoveDef` mod (v1 2026-10-24: row, input command, runtime motion bank, stage with stick-direction slots,
+  synthesised `.ctn` cancels, ballistics, effects by frame, hand-offs, overlays on vanilla moves; phase B adds the
+  overlays' synthesised scripts on vanilla motions). Design, schema, decisions: `E:\DMC mod stuffs\Vibed\MoveDef\README.md`.
+  - [x] **Authoring panel** (2026-10-29, `engines/mtfw/movedef/` + `movedef_blender.py`, guide `docs/movedef.md`): moves
+    from LMT animations (new move: id, LMT, row, stage; overlay on a vanilla motion), the file as an element tree with
+    a widget and tooltip per attribute (`movedef/schema.py` = the runner's "Implemented" subset), frames as pose
+    markers, Import / Write XML keeping hand-written files byte for byte apart from the edits, the checks (ids, banks,
+    blocks exist and have keys, frames inside the motion, names, limits, `.atk` entries). Tests: `test_movedef`,
+    `corpus/movedef_check`.
+  - [x] **Motion registry form (D26, 2026-10-29):** New Move writes `<lmt path>` without `bank=` (dmc4_hook's registry
+    places it) and `<stage block="N">` for the move's own blocks; the checks know both forms (the bank clash only for a
+    fixed `bank=`; `block=` needs an `<lmt path>`, excludes `motion=`, 0-255; `motion=` in a runtime bank, 10-14 and Nero's
+    4 / 6-9, is refused unless it's the file's own fixed bank (overlays exempt), a bank over 15 always, as the runner does).
+    Grab overlays: `motion="15:N"`, Cancels from .ctn reads the chosen enemy's `.ctn` bank 10-29. Per-enemy grab
+    overlays would need a runner attribute (not asked for yet). Runner side written, not built yet.
+  - [x] **Extract a vanilla motion's cancels** from `.ctn` (`movedef/extract.py`, Cancels from .ctn): all 941 scripts of
+    pl000 / pl006 extract and check clean; the 12 looping ones are flagged (the runner can't override them).
+  - [x] **`.atk` codec** upstream (`dmc4xml/atk.py`, `tests/test_atk.py`: 61 DX9 files byte-identical; the 6 SE ones,
+    version 8 with 0x6C-byte entries, are refused), vendored; the checks read `<shell entry=>` names from it.
+  - [ ] Save to Game Folder of the move's xml + LMT (+ `.atk`) in one go (Write XML and Export LMT are separate now).
+  - [x] **`<attack>`** (the user's decision D25, 2026-10-29: attack data defined in the XML or taken from an `.atk`):
+    attacks under `<move>` (an entry with overrides, or values over Nero's RED-ComboA_00), `<shell attack=>` as a
+    dropdown of the file's attacks, `entry=` by index or name with the picked entry shown; checks for both.
+  - [ ] Writing new entries into `.atk` files (phase D, hits on the game's own `.idx` / LMT-event path; not needed by
+    `<attack>`).
+  - [ ] Effects picked from Game Files / the scene's effects; joints by name (the runner reads self / weapon only).
+  - [ ] Check an authored move in the game (Write XML + Reload in the runner's panel). Nothing tested in-game yet.
+
 - [ ] **Hitboxes (saved for later, 2026-10-10).** Four file types keyed to a model's joints, already mined in IDA
   (per the user) and described by 010 templates in `E:\DMC mod stuffs\DMC4 templates`:
   - `.col` = `rCollisionShape` (shapes): codec done (`dmc4xml/col.py`, byte-exact on 110 DX9 files); Blender import,
@@ -123,14 +143,15 @@ The game behaviour is known; Blender only approximates it. The other preview gap
     kind (cCollisionGroup.mKind) and flags (1 attack, 2 hurt, 4 push, 8 grab, 0x20 friendly attack); shapes are
     spheres (type 0) / capsules (type 3) on joint IDs of the collision model, radius, pos0 / pos1 in the bones'
     frames. `DMC4_col.bt`.
-  - `.atk` (186 files, `ATK\0`, u16, u16 count): `kAttackStatus` per entry (`DMC4_atk.bt`): mAsName[16], 4 unknown
-    bytes, mDamageValue, mAttackLv, mAttackLvI / B, mRangeType, mHitStopTimer, mDamageType / I / B (launch etc.),
+  - `.atk` (186 files, `ATK\0`, u16, u16 count): **codec done 2026-10-29** (`dmc4xml/atk.py`: the 61 unique DX9 files
+    byte-identical, SE version 8 refused). `kAttackStatus` per entry (`DMC4_atk.bt`): mAsName[16], mAttackID (the
+    template's 4 unknown bytes), mDamageValue, mAttackLv, mAttackLvI / B, mRangeType, mHitStopTimer, mDamageType / I / B (launch etc.),
     mHitMarkAngle, mHitSE, mStylishPoint, mStylishTimer, mDTAdd, mAttackFlag, mBlownAngleType, mElementType.
   - `.dfd` (32 files, `DFD\0`, u16, u16 count): `kDefendStatus` (`DMC4_dfd.bt`): mAsName[16], mResist[3],
     mMaxInterrupt[5], mMaxBlown[5].
   - `.rCollisionIdxData` (13 files): a tab-separated text table (first line = row count), probably linking shape
     groups to attack / defend entries; not decoded yet.
-  - Plan: codecs for atk / dfd / idx in dmc4xml (byte-exact on the corpus), then Albam: the attack / defend entries
+  - Plan: codecs for dfd / idx in dmc4xml (byte-exact on the corpus; atk done), then Albam: the attack / defend entries
     editable alongside the `.col` groups.
 - [x] **Bones added in Blender export to the `.mod`.** Done 2026-10-16 (`joints.py`, see CLAUDE.md): new bones get
   joint numbers and go after the model's own; renamed / reordered bones are fine. Check in the game: a model with a
@@ -201,7 +222,8 @@ beyond plain XML editing. Ranked by: spatial data (in a level or on a skeleton, 
 classes and `.sdl` / `.pla`; binary formats need a codec first). Already native: `.mod`, `.tex`, `.lmt`, `.efl` /
 `.efs` / `.ean`, `.sbc`, `.sdl`, `.pla`, `.phs` / `.clt`, `.col` (import).
 
-1. [ ] **Hitboxes:** `.atk` (145), `.dfd` (23), `.idx` (23); `.col` (114) import / export / new is done.
+1. [ ] **Hitboxes:** `.atk` (145; codec done, no Blender editing yet), `.dfd` (23), `.idx` (23); `.col` (114) import /
+   export / new is done.
    Binary, so not even XML-editable yet; shapes on joints, switched by LMT events. See "Hitboxes" above.
 2. [ ] **Camera areas, `.cam` rDevilCamera** (17, XFS): cCameraNormal mCameraPos / mTargetPos / mCameraUp / mFov /
    Fog, area boxes (`mppBox`), area links (cCamAreaConnect). Cameras, boxes and link lines in Blender.

@@ -52,6 +52,33 @@ The addon imports and exports models (.mod), textures (.tex/.rtex), collision (.
 
 Open work is tracked in `ROADMAP.md` (repo root): keep it up to date when an item is done or a new gap is found.
 
+## dmc4_hook (the game side)
+
+Albam and dmc4_hook are now one pipeline. dmc4_hook is the DMC4 DX9 hook DLL the user co-maintains, at `D:\dmc4_hook`
+(github muhopensores/dmc4_hook). Albam makes the files and dmc4_hook loads and runs them in the game. Several Albam
+features only make sense with it:
+- **Loose files.** The user's game reads `nativePC\<game path>` before the arcs ("HDD File Priority"; the hook's
+  loose-file loading), which is why Save to Game Folder is the usual export route.
+- **MoveDef** (`src/dev/movedef/`): runs `nativePC\movedef\*.xml`, the move files Albam authors (see
+  [MoveDef](#movedef-move-files)). It builds `.ctn` cancel scripts in memory, so a new move needs no `.ctn` or move-table
+  edit, and since 2026-10-29 (D26, unbuilt) the SDK's motion registry (`src/sdk/MotionRegistry`) places every move's LMT
+  in the free motion banks (`<lmt path=>` without `bank=`, `<stage block=>`), so moves no longer pick a bank.
+- **ModelExtension** (`src/dev/model_ext/`, guide `docs/model_extension.html` there): `nativePC\model_ext\*.xml` attaches
+  extra models and physics chains (`.clt` = Albam's `.phs`, with a `.col`) to the game's models at runtime. This is how
+  new chains, collision shapes and accessory `.mod`s from Albam get into the game, since the stock game loads them per
+  owner by hard-coded names.
+- **LMTSlotFix** guards the `.ctn` hang (a motion without a cancel script, `Vibed/RE/chartbl_ctn_hang.md`).
+- The RE notes in `Vibed\RE` serve both: a finding for one usually applies to the other.
+
+Working rules:
+- Usually one session works on Albam and another on dmc4_hook; they coordinate by message. A shared format changes on
+  the side that owns it first: MoveDef XML in the runner and `Vibed/MoveDef/schema.md` (the dmc4_hook side), codecs in
+  dmc4_xml upstream.
+- Never build dmc4_hook unless the user asks: the user builds it and tests in the game. Its files are CRLF, and
+  `src/dev/` holds the hook extensions (one folder each, CMake `DEV_SRC`, source group "Dev").
+- The game is the reference. Albam's previews (effects, chains, foot IK, collision groups following events) imitate it
+  and are checked against it.
+
 ## Layout
 
 | Path | Purpose |
@@ -62,13 +89,13 @@ Open work is tracked in `ROADMAP.md` (repo root): keep it up to date when an ite
 | `vfs.py` | Virtual file system stored in scene `CollectionProperty`s (`scene.albam.vfs`, `scene.albam.exported`). File bytes live in `BYTE_STRING` props. |
 | `rfs.py` | Fork addition, and the **main DMC4 file browser** ("Game Files" panel): `scene.albam.rfs` lists folders of extracted game files. See [Game Files (RFS)](#game-files-rfs). |
 | `blender_ui/` | Panels and operators. `import_panel.py` / `export_panel.py` are in the 3D View sidebar tab "Albam [Beta]". `tools.py` has the UV seam split, normal transfer, bone rename, VG merge and collision face editor. `anim_tools.py` is the Dope Sheet LMT section (LMT → Animations → Events). `custom_properties.py` is the per-app property factory. `error_handling.py` is the error popup. |
-| `engines/mtfw/` | MT Framework: `mesh.py` (.mod), `joints.py` (which bone is which game joint: joint numbers, bones added in Blender), `new_model.py` (New DMC4 Model: a .mod from scratch) and `mesh_prep.py` (export-time triangulate / seam split / root-frame copies of meshes), `material.py` (materials/MRL), `texture.py` (tex↔DDS), `animation.py` (.lmt), `collision.py` (.sbc import/export, Blender side), `sbc_bvh.py` (DMC4 SBC1 reader/writer, pure Python), `placement.py` (.pla) and `scheduler.py` (.sdl) Blender import/export over the vendored `dmc4xml`, `xml_edit.py` (Edit as XML / Apply XML for them), `cns_chain.py` (.phs model chains), `col_shapes.py` (.col collision shapes) and `cns_chain_preview.py` (chain motion preview, the import wiring between them), `archive.py` (.arc + dmc4 loose files), `__init__.py` (bone anim mapping enums, file-id↔extension hash tables). |
+| `engines/mtfw/` | MT Framework: `mesh.py` (.mod), `joints.py` (which bone is which game joint: joint numbers, bones added in Blender), `new_model.py` (New DMC4 Model: a .mod from scratch) and `mesh_prep.py` (export-time triangulate / seam split / root-frame copies of meshes), `material.py` (materials/MRL), `texture.py` (tex↔DDS), `animation.py` (.lmt), `collision.py` (.sbc import/export, Blender side), `sbc_bvh.py` (DMC4 SBC1 reader/writer, pure Python), `placement.py` (.pla) and `scheduler.py` (.sdl) Blender import/export over the vendored `dmc4xml`, `xml_edit.py` (Edit as XML / Apply XML for them), `cns_chain.py` (.phs model chains), `col_shapes.py` (.col collision shapes) and `cns_chain_preview.py` (chain motion preview, the import wiring between them), `movedef/` (MoveDef move XML: schema, byte-exact reader / writer, checks, `.ctn` extraction; pure Python) and `movedef_blender.py` (the Moves panel, see [MoveDef](#movedef-move-files)), `archive.py` (.arc + dmc4 loose files), `__init__.py` (bone anim mapping enums, file-id↔extension hash tables). |
 | `engines/mtfw/structs/` | Kaitai Struct `.ksy` sources and the **generated** read-write `.py` parsers. |
 | `engines/mtfw/efl/` | Fork addition: DMC4 DX9 `.efl` (effects) parser/writer; `edit.py` maps block fields, keyframes and sub-structs to and from custom properties and restructures records. **Pure Python, not Kaitai, relative imports only**, so it runs without Blender. `schema.py` is the single layout table, with an evidence tier per field. `model.py` holds blocks as raw bytes with typed views (exact round-trip). `check.py` has the invariants and corpus coverage, `export_json.py` the JSON dump, `primmodel.py` the PrimModel mesh builders, `ean.py` the `.ean` flipbook tables, `keyframe.py` keyframe curves, `efs.py` `.efs` path curves, `sim.py` the particle simulation, `field_help.py` the plain-language help for every field, `retype.py` block type changes. The Blender import is `engines/mtfw/effect.py`; animated playback is `engines/mtfw/effect_sim.py`; export is `engines/mtfw/effect_export.py`; the editor panel is `engines/mtfw/effect_editor.py`; keyframes as F-curves are `engines/mtfw/effect_keys.py`; the spawn filter is `engines/mtfw/effect_filter.py`; Change Type is `engines/mtfw/effect_retype.py`; `.efs` / `.ean` import / export is `engines/mtfw/effect_efs.py` / `effect_ean.py`. See [EFL](#efl-effects). |
 | `engines/mtfw/defines/shader-objects.json` | Shader-object hashes, regenerated by `scripts/dump_mfx.py` from `.mfx` files. It has no re5 or dmc4 entries; it is used only by the MRL (v21) path. |
 | `engines/reng/` | Experimental RE Engine support (pak/mesh/mdf/tex), gated by `ALBAM_ENABLE_REEN`. |
 | `lib/` | Helpers: `blender_compat.py` (Blender 4.2 / 5 API differences: actions, node-modifier inputs, see Runtime above), `blender.py` (mesh/material utilities), `bvh_construction.py` + `primitive_geometry.py` + `pymorton.py` + `rays.py` (BVH for the SBC21 export of other games; DMC4 uses `engines/mtfw/sbc_bvh.py`), `bone_names.py` (bone rename presets), `common_op.py`, `dds.py`, `vec_op.py` (**`vec_mult` actually divides**). |
-| `albam_vendor/` | Vendored `kaitaistruct` (the read-write runtime), `pymmh3` and `dmc4xml` (the `.sdl` / `.pla` codecs, a **third-party copy** of the package in the user's [dmc4_xml](https://github.com/vieris123/dmc4_xml) repo: never edit it here, change it upstream and run `scripts/sync_dmc4xml.py <dmc4_xml checkout>`, which records the commit in `albam_vendor/dmc4xml/UPSTREAM.txt`). They can only be imported after `register()` has put this folder on `sys.path`. |
+| `albam_vendor/` | Vendored `kaitaistruct` (the read-write runtime), `pymmh3` and `dmc4xml` (the `.sdl` / `.pla` / `.col` / `.ctn` / `.atk` / XFS codecs, a **third-party copy** of the package in the user's [dmc4_xml](https://github.com/vieris123/dmc4_xml) repo: never edit it here, change it upstream and run `scripts/sync_dmc4xml.py <dmc4_xml checkout>`, which records the commit in `albam_vendor/dmc4xml/UPSTREAM.txt`). They can only be imported after `register()` has put this folder on `sys.path`. |
 | `tests/` | End-to-end tests: `run_tests.py` (runner), `common.py` (data / output paths), `blender/` (headless Blender), `corpus/` (plain Python over the DX9 files). See `tests/README.md`. |
 | `docs/` | User guides (`README.md` is the index). **`implicit_features.md` lists every behaviour without a button** (Shift+D / X / parenting / bone collections / markers / handlers): when a feature works through ordinary Blender actions or on its own, add it there in the same change. |
 | `scripts/sync_dmc4xml.py` | Re-syncs `albam_vendor/dmc4xml` from a dmc4_xml checkout (default: `E:\DMC mod stuffs\dmc4_xml`). |
@@ -91,7 +118,7 @@ The notes most relevant to the addon:
 | `sbc_moving_parts.md` | Moving collision: part matrices per group_id, uStageSetMoveFloor, riding (surface 0x40), the authoring recipe, 20 proposed IDB renames. |
 | `chain_cnschain.md` | Model chains (`.phs` = rCnsChain): file layout, the per-frame solver step by step, `.col` collision, where Nero's coat hangs (body joint 2). |
 | `sdl_scheduler_runtime.md` | How `.sdl` schedulers load and evaluate: header fields, track binding, key modes (step / one-shot / linear / Catmull-Rom / counter), refs, events, the DTI hash; `.pla` `mRotY` / `mAngle` units. |
-| `..\MoveDef\README.md` | **Move definition files** (one XML per player move: motion, effects, hitboxes, cancels, sounds; dmc4_hook runs them, Albam will author them): brief, status, index, design (section 5b = the rules the hand-coded moves settled), schema (v0.2 + the implemented subset), decisions D1-D22, RE todo. Scoped 2026-10-17; the dmc4_hook runner (`MoveDef`) reached v1 on 2026-10-24 (rows, commands, runtime banks, synthesised cancels, effects by frame, hand-offs, overlays on vanilla moves; proven in-game); Albam's share (authoring from the action, `.atk` codec) is phase C, not started, see ROADMAP. |
+| `..\MoveDef\README.md` | **Move definition files** (one XML per player move: motion, effects, hitboxes, cancels, sounds; dmc4_hook runs them, Albam will author them): brief, status, index, design (section 5b = the rules the hand-coded moves settled), schema (v0.2 + the implemented subset), decisions D1-D25, RE todo. Scoped 2026-10-17; the dmc4_hook runner (`MoveDef`) reached v1 on 2026-10-24 (rows, commands, runtime banks, synthesised cancels, effects by frame, hand-offs, overlays on vanilla moves; proven in-game); phase B (overlay `<cancel>` / `<trigger>`s merged into vanilla motions' `.ctn` scripts), `<next ticks=>` and `<attack>` (D25) written 2026-10-29, not built yet; Albam's share is phase C, first cut 2026-10-29, see [MoveDef](#movedef-move-files). |
 | `player_move_pipeline.md` | How a player move runs: upper / lower body halves, the `.ctn` contact bytes and `cancelNoTbl` (cancel windows), `setEffectConst` and the 0x39 effect-list table, `uCollisionMgr::move` (LMT event bits -> `.idx` -> `.col` + `.atk`), the state-function pattern, input commands and attack strings, motion banks (free banks 10-14, runtime loading, the `mMotionSetCharTblParam` `.ctn` override), the wall jump's entry and jump counters, the per-action limit / status tables (`kActLimitBit`, `ACT_STAT`), the cancel verdict (`checkAtckCancel` / `checkAtckSub`, 0x10 vs 0x30 bytes), the cancel gate `mIsCancelCehckEnable`, the input-command layouts (`kCmdHead` / `kCmdData`, lever modes) and how a custom command gets a spare `mCmdFlag` bit, the stay effects and the air hike's effect / SE, and shells with code-defined hitboxes (`uEm019_ice::setup`, `setCollision` with a `kCollPrim`, group kinds, the knock direction from `mBlownAngleType` in `uActor::calcDamageVec`). |
 | `resource_loaders_writers.md` | How each resource class loads (`sResource::create`, vtbl slot 8) and the game's own writers (slot 9, `MtDataWriter`): exact `.atk` / `.dfd` / `.col` / `.idx` layouts, hot-swap rule for `.ctn` / LMT buffers. |
 | `chartbl_ctn_hang.md` | `.ctn` (rCharTbl, `cCharTblMgr` cancel scripts): layout, which bank / slot each LMT uses (body `_NN` = bank NN - 1, Buster grabs banks 10-29), why a motion without a script hangs the game, and the data / exe fixes. |
@@ -1254,6 +1281,41 @@ Researched 2026-10-05, supported 2026-10-10 (import / export, motion preview). R
   `mCnsChain0..5`.
 - **Upstream support:** neither `HenryOfCarim/albam_reloaded` nor `Brachi/albam` has it (`Brachi/albam`'s "chains"
   are LMT limb IK chains, `joint_type` on a chain's root track; this fork's export always writes `joint_type = 0`).
+
+## MoveDef (move files)
+
+One XML per player move, run by dmc4_hook's `MoveDef` mod (`nativePC\movedef\*.xml`). The format belongs to the
+runner: `Vibed/MoveDef/schema.md` section "Implemented" and `D:\dmc4_hook\src\dev\movedef\XmlMove.cpp` (what it
+parses, with the defaults); the dmc4_hook session (albam-42 on 2026-10-29) owns it. **Don't invent elements or
+attributes**: ask that session to add them to the runner and schema.md first. Albam's share is phase C (authoring),
+started 2026-10-29; user guide `docs/movedef.md`.
+
+- `engines/mtfw/movedef/` (pure Python, relative imports; `tests/corpus/movedef_check.py`): `schema.py` = every element
+  / attribute the runner reads, with its default, kind and tooltip (`ELEMENTS`, `spec_for`; `MIN_ID` Nero 0x34 / Dante
+  0x6C, banks 10-14); `doc.py` = a small tokenizer (pugixml's subset: accepts `--` in comments, which expat refuses)
+  that reads a file into a flat `Elem` list (uid, tag, key, parent, src, attrs as text) and writes it back by patching
+  the source text: unchanged files are byte-identical (all example files), an edit changes only its own text, new
+  elements go after their previous sibling, indented like it; `check.py` = errors / warnings (`Env` supplies block
+  lengths, the other moves, shared commands, `.atk` entry names; `resolve_entry`: entry= is an index or an mAsName,
+  case-insensitive, 15 characters); `extract.py` = a `.ctn` script as `<cancel>` / `<trigger>`s (all 941 pl000 / pl006
+  scripts check clean; 12 loop and are flagged: the runner can't override them). Attribute kinds beyond the plain ones:
+  `frame` (a pose marker), `cats`, `entry` (shown with the entry it picks), `attackref` (a dropdown of the file's
+  `<attack>`s; D25: attack data in the XML or from an `.atk`, no new file entries).
+- `movedef_blender.py`: `scene.albam.movedefs.moves[i]` = one file (`source` text + `elems` + per-element pose
+  `marker`); Dope Sheet sidebar panel Moves (MoveDef) under the LMT panels. Frames are pose markers `md <tag>` on the
+  stage's action (its first `<slot>`'s block, else its `block=`, of the move's own `<lmt>`, bank key `schema.OWN`;
+  else its `motion=`; `find_group`: the move's LMT for OWN or its fixed bank, the character's vanilla `pl00X_NN` group
+  for bank NN - 1), converted with the LMT export timing
+  (`animation.ExportTiming`); `sync_frames` copies them into the attributes before a check / write (a marker on the
+  frame the text rounds to keeps the text). New Move (`new_move`: NEW = free id, `<lmt path>` without a bank (D26:
+  dmc4_hook's motion registry places it; `bank=` 10-14 stays as the fixed-bank form, the only one the clash check
+  applies to), row, stage `block=` borrowing ctn 0:5; `motion=` in a runtime bank (Nero 4 / 6-14, Dante 10-14,
+  `schema.RUNTIME_BANKS`) is refused unless it's the move's fixed bank, overlays exempt, a bank over 15 always, as the
+  runner does; a Buster grab LMT `pl000_<target>_00` is motion bank 15 and Cancels from .ctn reads the target's
+  `.ctn` bank 10-29, `schema.GRAB_CTN_BANKS`; OVERLAY = the vanilla motion), Import / Write XML (`write_text` -> `after_write` re-reads the written text as
+  the new source), Check, Cancels from .ctn. Test: `tests/blender/test_movedef.py` (4.2 and 5.4).
+- `.atk`: `dmc4xml/atk.py` (upstream first, vendored 2026-10-29): `ATK\0`, u16 version 0 (SE files are 8 with 0x6C
+  entries: refused), u16 count, 0x58-byte `kAttackStatus`; 61 DX9 files byte-identical (`tests/test_atk.py` upstream).
 
 ## Kaitai structs
 

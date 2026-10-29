@@ -2,6 +2,6 @@ Vendored copy of the dmc4xml package. Don't edit it here: change it upstream and
 scripts/sync_dmc4xml.py.
 
 repository: https://github.com/vieris123/dmc4_xml.git
-commit: 43641921a3b28bae05bb290f92218e1540e203d1
-synced: 2026-10-17
-files: __init__.py, classes.py, col.py, ctn.py, dti.py, pla.py, sdl.py, xfs.py, xfsxml.py, xmlconv.py
+commit: 8e5e2de75ed53aa49563ed008ebfe3e4882fd9a5 + uncommitted changes
+synced: 2026-10-29
+files: __init__.py, atk.py, classes.py, col.py, ctn.py, dti.py, pla.py, sdl.py, xfs.py, xfsxml.py, xmlconv.py

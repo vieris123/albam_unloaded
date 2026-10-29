@@ -52,6 +52,7 @@ def register():
     importlib.import_module("albam.engines.mtfw.cns_chain")
     importlib.import_module("albam.engines.mtfw.col_shapes")
     importlib.import_module("albam.engines.mtfw.cns_chain_preview")
+    importlib.import_module("albam.engines.mtfw.movedef_blender")
     importlib.import_module("albam.blender_ui.foot_ik")
     if os.getenv("ALBAM_ENABLE_REEN"):
         importlib.import_module("albam.engines.reng.archive")
