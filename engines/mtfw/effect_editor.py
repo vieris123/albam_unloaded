@@ -23,7 +23,7 @@ from .efl.field_help import lookup as field_help
 from .efl.edit import as_list, keyframe_value_type, to_prop, upgrade_props
 from .efl.model import SLOTS
 from .efl.sim import ROT_ORDER_NAMES, ROT_ORDERS
-from . import effect_filter, effect_keys, effect_sim
+from . import effect_filter, effect_keys, effect_sim, joints
 from .effect_export import (ROT_HANDLE_KEY, ROT_HANDLE_OF, adopt_duplicate, all_record_objects, apply_to_scene,
                             effect_root, ordered_record_objects, record_object, structure_changed)
 
@@ -1928,6 +1928,12 @@ def _draw_field(layout, item, show_notes, ob=None, bulk=False):
         right.prop(item, "color_a", text="")
         if item.count > 4:
             right.prop(item, "color_b", text="")
+    elif item.label == "ParentNo" and ob is not None and ob.parent is not None and ob.parent_type == "BONE":
+        # what export writes: the joint of the bone the Empty is on, with its name on a player-type skeleton
+        bone = ob.parent.data.bones.get(ob.parent_bone)
+        j = joints.joint_of(bone) if bone is not None else None
+        text = joints.joint_label(ob.parent, j) if j is not None else item.text
+        right.label(text=text if bone is None or text.endswith(bone.name) else f"{text} (bone {bone.name})")
     else:
         right.label(text=item.text or "-")
     if item.error:

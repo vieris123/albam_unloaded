@@ -8,13 +8,20 @@ Panels mentioned here are in the Properties editor (Object / Bone tabs) unless a
 
 ## Models and bones (`.mod`)
 
+- **Player bones are named after their joints on import** (Nero's and Dante's bodies, and any model with the same
+  skeleton): `thumb_1_r`, `thigh_l`, `hand_r` ...; a joint without a known name is `joint_<number>` (Nero's 153 / 154
+  on the Devil Bringer). Other models (the coat, weapons, enemies) keep their bone-table index names (`0`, `1` ...),
+  which aren't joint numbers. A rig imported before this shows **Name Bones by Joint** in Bone Properties > Game
+  Joint; its vertex groups, LMT actions, effects, chains and collision shapes follow the new names.
 - **Add bones in Edit Mode, and they export.** New bones go into the `.mod` after the model's own. Each gets a joint
   number the first time something needs one: .mod or LMT export, New Chain, assigning it to a chain's bone
   collection, Add Sphere / Capsule, parenting an effect to it.
 - **Shift+D a bone** and the copy gets its own joint number. The bone whose name has no `.001` suffix keeps the
   original's.
 - **Bone Properties > Game Joint** shows and sets a bone's **Joint Number** (what LMT tracks, chains, .col shapes and
-  effects refer to), its **Mirror Bone** (empty = automatic: the bone at the mirrored position across X = 0), and
+  effects refer to) with the joint's name when it has one, and for a bone added in Blender what the number is in the
+  player skeleton ("Player skeleton: thigh_r, under 13 hips") plus a search button next to the number that lists
+  the player joints by name (each marked free or with the bone that has it) and gives the picked one, its **Mirror Bone** (empty = automatic: the bone at the mirrored position across X = 0), and
   **Not a Game Joint** (a helper bone that isn't exported). Bones named `root_motion`, `IKP_…` or `IK_Foot…` are
   always helpers.
 - **Rename or reorder bones freely.** Export matches the model's bones by joint number, not name or order. Deleting
@@ -94,6 +101,8 @@ Panels mentioned here are in the Properties editor (Object / Bone tabs) unless a
   - It's rescaled from the animation's Frame Rate to 60 fps.
   - Euler and axis-angle rotations are converted.
   - F-Curve groups don't matter, so FBX imports and Bake Action output export as they are.
+  - Curves on helper bones (Not a Game Joint, `IKP_…`, constraint targets a visual bake keyed along) are left out
+    with a note; only game joints get tracks.
   - What it adjusted is reported.
 - **Tracks the armature can't show are kept.** Joints the rig doesn't have (an LMT shared with the character's
   other models) and track kinds the game ignores are stored on the action and exported back as they were, unless

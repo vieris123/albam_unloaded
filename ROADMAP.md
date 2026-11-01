@@ -157,6 +157,11 @@ The game behaviour is known; Blender only approximates it. The other preview gap
   joint numbers and go after the model's own; renamed / reordered bones are fine. Check in the game: a model with a
   new bone weighted to some vertices, animated by an LMT track and driving a chain. Still refused: deleting a model's
   own bones (needs remapping every LMT / chain / .col / effect that refers to them).
+- [x] **Bones named after their joints.** Done 2026-10-31 (`joints.PLAYER_JOINTS`, `name_bones`): player-type
+  skeletons import as `thumb_1_r`, `thigh_l` ... (checked on pl000 / pl006); Name Bones by Joint for older rigs;
+  the Effect Editor's ParentNo shows the joint's name; a new bone's Game Joint panel says what its number is in the
+  player skeleton and has a search picker of the player joints by name (`albam.pick_joint_number`, 2026-11-01). The 2xx helper joints are named by where they sit
+  (`elbow_deform_r` ...), not by a verified role; enemies have no name table.
 - [x] **Editable `.mod` model settings beyond the light group.** Done 2026-10-17: LOD distances and per-mesh LOD
   toggles (Model Settings panel); strip type is 0 in every file and stays as the source has it.
 - [x] **New `.mod` from scratch.** Done 2026-10-28 (`new_model.py`, `mesh_prep.py`; user guide `docs/new_model.md`):

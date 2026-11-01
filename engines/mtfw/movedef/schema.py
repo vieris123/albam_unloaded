@@ -171,7 +171,8 @@ _LIST = (
         Attr("repeat", "bool", "false", "May chain into itself"),
         Attr("weapon", "int", "-1", "-1 any, or the weapon id (RedQueen 0 ... Rebellion 4, Gilgamesh 5, Lucifer 6, "
              "Coyote 7, Pandora 8, EbonyIvory 9)"),
-        Attr("style", "int", "-1", "-1 any, 0 SM, 1 GS, 2 TS, 3 RG, 4 DS"),
+        Attr("style", "int", "-1", "-1 any, 0 SM, 1 GS, 2 TS, 3 RG, 4 DS; Nero: 5-8 = the NeroStyle mod's slots "
+             "(style buttons up / right / left / down; 5 = Devil Bringer, 6 = Gerbera)"),
         Attr("etc", "int", "0", "Extra condition (DT states)"),
         Attr("air", "enum", "air", "Where it may start", _items("ground", "air", "both", "fly"), required=True),
         Attr("cancel_words", "str", "", "Five cancelId words, comma separated: used as they are instead of "

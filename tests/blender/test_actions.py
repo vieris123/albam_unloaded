@@ -116,7 +116,7 @@ try:
     # used to stand bone 0's rest height too high)
     scene.frame_set(0)
     lowest = min(pb.head.z for pb in arm.pose.bones if pb.name != animation.ROOT_MOTION_BONE_NAME)
-    rest_height = arm.data.bones["0"].head_local.z
+    rest_height = next(b for b in arm.data.bones if b.get("mtfw.anim_retarget") == "0").head_local.z
     print(f"lowest bone at frame 0: {lowest:.3f} m (bone 0 rest height {rest_height:.3f})")
     check(-0.1 < lowest < 0.3, f"the feet are near the floor ({lowest:.3f} m)")
 

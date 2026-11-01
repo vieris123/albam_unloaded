@@ -824,6 +824,17 @@ def _get_export_tracks(action, armature, notes):
         for prop in props - {keep}:
             del tracks[(bone_name, prop)]
 
+    # Blender-only helper bones (Not a Game Joint, IK helpers, constraint targets) have no joint: their curves are
+    # left out, like a visual bake keys them along with the rest
+    from albam.engines.mtfw.joints import is_helper
+    helpers = sorted({bone_name for bone_name, _ in tracks
+                      if bone_name != ROOT_MOTION_BONE_NAME and (bone := armature.data.bones.get(bone_name)) is not None
+                      and is_helper(bone)})
+    if helpers:
+        for key in [k for k in tracks if k[0] in helpers]:
+            del tracks[key]
+        notes.append(f"{action.name}: no tracks for the helper bones {', '.join(helpers)} (not game joints)")
+
     bone_order = {bone.name: i for i, bone in enumerate(armature.data.bones)}
 
     def sort_key(item):

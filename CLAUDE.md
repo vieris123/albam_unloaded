@@ -98,6 +98,7 @@ Working rules:
 | `albam_vendor/` | Vendored `kaitaistruct` (the read-write runtime), `pymmh3` and `dmc4xml` (the `.sdl` / `.pla` / `.col` / `.ctn` / `.atk` / XFS codecs, a **third-party copy** of the package in the user's [dmc4_xml](https://github.com/vieris123/dmc4_xml) repo: never edit it here, change it upstream and run `scripts/sync_dmc4xml.py <dmc4_xml checkout>`, which records the commit in `albam_vendor/dmc4xml/UPSTREAM.txt`). They can only be imported after `register()` has put this folder on `sys.path`. |
 | `tests/` | End-to-end tests: `run_tests.py` (runner), `common.py` (data / output paths), `blender/` (headless Blender), `corpus/` (plain Python over the DX9 files). See `tests/README.md`. |
 | `docs/` | User guides (`README.md` is the index). **`implicit_features.md` lists every behaviour without a button** (Shift+D / X / parenting / bone collections / markers / handlers): when a feature works through ordinary Blender actions or on its own, add it there in the same change. |
+| `scripts/stand_taunt_retarget.py` | Headless Blender 4.2 (2026-10-31): bakes Nero's bank-0 taunts onto the DT stand body (`pl020`) and the Devil Bringer arm model (`wp024`: its root sits at the model origin, its blocks place it on the stand's joint 6, offset measured from the vanilla mimics) by rest-relative rotation deltas over a joint map (the stand's left arm is 7-10 where Nero's is 9-12; game +x is the character's left), and exports `motion\pl020\pl020_taunt.lmt` / `motion\wp024\wp024_taunt.lmt` (Nero's block indices) for dmc4_hook's GuardianDevil taunt mimic. `Vibed\GuardianDevil\README.md` has the rigs. |
 | `scripts/sync_dmc4xml.py` | Re-syncs `albam_vendor/dmc4xml` from a dmc4_xml checkout (default: `E:\DMC mod stuffs\dmc4_xml`). |
 
 ## DMC4 reverse-engineering notes
@@ -275,6 +276,18 @@ This reproduces the game's player foot planting (`cLegIkCtrl` + `cCnsIK`, see `V
     a source bone moved under a new bone (parents must come first), more than 255 bones. What the game reads per
     joint: `Vibed/RE/mod153_findings.md` "Joint table". Test: `tests/blender/test_new_bones.py`. Not checked in
     the game yet.
+  - **Bone names** (`joints.PLAYER_JOINTS`, `name_bones`, 2026-10-31): import creates bones named by their table
+    index (`"0"`, `"9"`: not joint numbers), then a v153 dmc4 import renames a player-type skeleton's bones after their
+    joints (`thumb_1_r`, `thigh_l`; unnamed joints `joint_<n>`). Player-type = joints 0-21 with the table's parents
+    (the coat reuses 0-38 for other bones); other joints are named only when their parent matches too (Nero's 153 /
+    154 hang off the Devil Bringer forearm, Dante's are chest / collars). Rename after the meshes exist: Blender's
+    bone rename fixes vertex groups, constraints, bone parents and the playing action; `name_bones` fixes the other
+    LMT actions (and Blender 5 slots made for the armature), `_phs_preview_base` keys and mirror names. Export
+    matches by joint number / vertex group name, so the .mod and LMT bytes don't change (test). Older rigs: Bone
+    Properties > Game Joint > **Name Bones by Joint**; `joint_label` / the Effect Editor's ParentNo show names. A
+    bone added in Blender shows `player_joint_hint` (its number in the player skeleton, with the expected parent) and
+    a search picker of the player joints (`albam.pick_joint_number`, `joint_choices`, used ones marked and refused). The
+    upstream Tools > Autorename bones uses another (Mod156-based) table. Test: `tests/blender/test_joint_names.py`.
   - **New model** (`engines/mtfw/new_model.py`, 2026-10-28; user guide `docs/new_model.md`): Object Properties >
     DMC4 Model > **New DMC4 Model** (`albam.mod_new`, dmc4 selected) on an armature, an Empty or a mesh (a lone mesh
     gets a new Empty root; the selected meshes and, for an armature, the meshes its Armature modifier deforms are
@@ -360,7 +373,8 @@ This reproduces the game's player foot planting (`cLegIkCtrl` + `cCnsIK`, see `V
   - **Events** are pose markers named `ev{1|2}_{frame}_{group_id}` on import (ev1 = Hitbox, ev2 = Sound). See [LMT section](#lmt-section-dope-sheet--action-editor-sidebar--albam-beta). In the first table, slot bit k turns on `.col` group `events_params_01[k]` (see "Groups follow the LMT events" under Model chains). The second table is sound effects with the same slot scheme (slot bit k plays `events_params_02[k]`, per the user); sound isn't scoped in Albam yet.
   - **Track export** (`_serialize_tracks`):
     - Tracks are built per (bone, property) straight from `action.fcurves` (`_get_export_tracks`), so F-Curve grouping doesn't matter: FBX and Bake Action output works as-is. Order matches the game's files: root motion first, then armature bone order, then rotation > location > scale.
-    - Properties other than location/rotation/scale (e.g. `bbone_*`) are skipped and reported.
+    - Properties other than location/rotation/scale (e.g. `bbone_*`) are skipped and reported, and so are curves on helper bones (`joints.is_helper`:
+      Not a Game Joint, `IKP_*`, constraint targets a visual bake keyed along), 2026-10-31.
     - **Timing (`ExportTiming`)** converts on the fly and never edits the action:
       - The action is shifted so its first key, or first event, lands on game frame 0.
       - It's scaled from the animation's **Frame Rate** (`source_fps`, per action: 60 for imported, the scene fps for Add Animation) to 60.

@@ -363,6 +363,9 @@ def build_blender_model(file_list_item, context):
             raise
             continue
 
+    if skeleton and app_id == "dmc4" and mod_version == 153:
+        joints.name_bones(skeleton)   # player-type skeletons: thumb_1_r ... instead of bone-table indices
+
     bl_object.albam_asset.original_bytes = mod_bytes
     bl_object.albam_asset.app_id = app_id
     bl_object.albam_asset.relative_path = file_list_item.relative_path

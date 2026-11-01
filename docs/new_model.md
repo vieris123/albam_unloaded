@@ -24,7 +24,9 @@ with its own rig. (Before 2026-10-28 a model could only be exported if it had be
   and for an armature every mesh its Armature modifier deforms.
 - **Bones** without a joint number get 0, 1, 2... in the armature's order (parents first), so the root bone is
   joint 0, as in the game's models. Bones that already have a number (a rig taken from a game model) keep it, so
-  their animations still fit. Numbers are shown, and can be changed, in Bone Properties > Game Joint.
+  their animations still fit. Numbers are shown, and can be changed, in Bone Properties > Game Joint. The search
+  button next to the number lists the player skeleton's joints by name (14 thigh_r, 100 thumb_1_r ...): give your
+  bones those numbers and the rig can play Nero's / Dante's animations.
 - **Materials** without the DMC4 shader get it: the Base Color image is wired to *Diffuse BM*; if the Principled
   Alpha was used, the material becomes alpha-tested. The DMC4 material settings are chosen to match the mesh:
   - static (no armature): no skinning;
