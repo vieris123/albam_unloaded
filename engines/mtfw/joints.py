@@ -24,6 +24,7 @@ import bpy
 from mathutils import Matrix
 
 from albam.exceptions import AlbamCheckFailure
+from albam.lib import blender_compat as compat
 from albam.registry import blender_registry
 
 JOINT_PROP = "mtfw.anim_retarget"
@@ -457,7 +458,7 @@ def _get_not_joint(self):
 
 def _set_not_joint(self, value):
     bone = _data_bone(self)
-    if bone is not None:
+    if bone is not None and not (value and from_game_file(bone)):   # export needs the game model's bones
         bone[NOT_JOINT_PROP] = int(value)
 
 
@@ -473,7 +474,8 @@ class AlbamGameJoint(bpy.types.PropertyGroup):
                     "bone at the reflected position across the model's centre, itself on the centre line, else none)")
     not_joint: bpy.props.BoolProperty(
         name="Not a Game Joint", get=_get_not_joint, set=_set_not_joint,
-        description="A Blender-only helper bone: not exported to the .mod and given no joint number")
+        description="A Blender-only helper bone: not exported to the .mod and given no joint number. Bones of the "
+                    "imported game model can't be marked (its animations, chains and collision refer to them)")
 
 
 @blender_registry.register_blender_type
@@ -499,6 +501,9 @@ class ALBAM_PT_GameJoint(bpy.types.Panel):
             return
         settings = pose_bone.albam_joint
         layout.prop(settings, "not_joint")
+        row = layout.row(align=True)
+        row.operator("albam.set_not_joint", text="Mark Selected", icon="HIDE_ON").value = True
+        row.operator("albam.set_not_joint", text="Unmark Selected", icon="HIDE_OFF").value = False
         if is_helper(bone):
             if not bone.get(NOT_JOINT_PROP):
                 layout.label(text="Albam helper bone: not exported", icon="INFO")
@@ -528,6 +533,55 @@ class ALBAM_PT_GameJoint(bpy.types.Panel):
             col.prop_search(settings, "mirror", ob.data, "bones")
         if names and _wanted_names(ob, names):
             layout.operator("albam.name_bones_by_joint", icon="SORTALPHA")
+
+
+def from_game_file(bone):
+    """a bone of the imported .mod (its joint number came from the file): export needs it, so it can't be a helper"""
+    return JOINT_PROP in bone and not bone.get(ADDED_PROP)
+
+
+def set_not_joint(bones, value):
+    """mark / unmark bones Not a Game Joint. Returns (changed bone names, skipped game-file bone names)."""
+    changed, skipped = [], []
+    for b in bones:
+        if value and from_game_file(b):
+            skipped.append(b.name)
+        elif bool(b.get(NOT_JOINT_PROP)) != value:
+            b[NOT_JOINT_PROP] = int(value)
+            changed.append(b.name)
+    return changed, skipped
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_SetNotJoint(bpy.types.Operator):
+    bl_idname = "albam.set_not_joint"
+    bl_label = "Set Not a Game Joint"
+    bl_description = ("Mark (or unmark) every selected bone as Not a Game Joint: Blender-only helpers (controls, "
+                      "retarget or IK bones) that export leaves out of the .mod and the LMTs. Bones of the imported "
+                      "game model are skipped: its animations, chains and collision refer to them")
+    bl_options = {"REGISTER", "UNDO"}
+
+    value: bpy.props.BoolProperty(
+        name="Not a Game Joint", default=True,
+        description="On: mark the selected bones as Blender-only helpers. Off: make them game joints again")
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        return ob is not None and ob.type == "ARMATURE" and ob.mode != "EDIT"
+
+    def execute(self, context):
+        bones = compat.selected_bones(context.object)
+        if not bones:
+            self.report({"WARNING"}, "No bones selected")
+            return {"CANCELLED"}
+        changed, skipped = set_not_joint(bones, self.value)
+        msg = f"{'Marked' if self.value else 'Unmarked'} {len(changed)} bone(s)"
+        if skipped:
+            msg += f"; skipped {len(skipped)} bone(s) of the game model ({', '.join(skipped[:5])}" + \
+                   ("...)" if len(skipped) > 5 else ")")
+        self.report({"WARNING"} if skipped else {"INFO"}, msg)
+        return {"FINISHED"} if changed else {"CANCELLED"}
 
 
 _choice_items = []   # dynamic enum items must stay referenced while Blender shows them

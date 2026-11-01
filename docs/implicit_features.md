@@ -22,7 +22,9 @@ Panels mentioned here are in the Properties editor (Object / Bone tabs) unless a
   effects refer to) with the joint's name when it has one, and for a bone added in Blender what the number is in the
   player skeleton ("Player skeleton: thigh_r, under 13 hips") plus a search button next to the number that lists
   the player joints by name (each marked free or with the bone that has it) and gives the picked one, its **Mirror Bone** (empty = automatic: the bone at the mirrored position across X = 0), and
-  **Not a Game Joint** (a helper bone that isn't exported). Bones named `root_motion`, `IKP_…` or `IK_Foot…` are
+  **Not a Game Joint** (a helper bone that isn't exported; **Mark Selected / Unmark Selected** set it on every
+  selected bone at once; the imported game model's own bones can't be marked, since its animations, chains and
+  collision refer to them). Bones named `root_motion`, `IKP_…` or `IK_Foot…` are
   always helpers.
 - **Rename or reorder bones freely.** Export matches the model's bones by joint number, not name or order. Deleting
   one of the model's own bones is refused, because animations, chains, .col and effects refer to it.

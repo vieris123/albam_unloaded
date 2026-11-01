@@ -151,6 +151,31 @@ try:
     check(("operator", "albam.pick_joint_number", "") in layout.lines and
           (f"Player skeleton: {hint}" if hint else "Not a player skeleton joint") in texts,
           f"the Game Joint panel shows the picker and what the number is ({texts})")
+
+    # Mark Selected: the selected new bones become Not a Game Joint, the game model's bones are skipped
+    bpy.ops.object.mode_set(mode="EDIT")
+    eb = nero.data.edit_bones.new("extra2")
+    eb.head, eb.tail, eb.parent = (0, 0, 1.2), (0, 0, 1.3), nero.data.edit_bones["extra"]
+    bpy.ops.object.mode_set(mode="POSE")
+    picked = {"extra", "extra2", "thigh_r"}
+    for b in nero.data.bones:
+        pb = nero.pose.bones[b.name]
+        if compat.POSE_BONE_SELECT:
+            pb.select = b.name in picked
+        else:
+            b.select = b.name in picked
+    with bpy.context.temp_override(object=nero, active_object=nero):
+        marked = bpy.ops.albam.set_not_joint(value=True)
+    helpers = {b.name for b in nero.data.bones if joints.is_helper(b)}
+    check(marked == {"FINISHED"} and {"extra", "extra2"} <= helpers and "thigh_r" not in helpers,
+          f"Mark Selected marks the new bones, not the game model's ({sorted(helpers)})")
+    nero.pose.bones["thigh_r"].albam_joint.not_joint = True
+    check(not joints.is_helper(nero.data.bones["thigh_r"]), "the checkbox refuses a game model bone")
+    check(export(nero) == named_bytes, "the marked bones aren't exported")
+    with bpy.context.temp_override(object=nero, active_object=nero):
+        unmarked = bpy.ops.albam.set_not_joint(value=False)
+    check(unmarked == {"FINISHED"} and not any(joints.is_helper(nero.data.bones[n]) for n in ("extra", "extra2")),
+          "Unmark Selected makes them joints again")
 except Exception:
     traceback.print_exc()
     failures.append("exception")

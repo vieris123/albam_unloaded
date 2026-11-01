@@ -286,7 +286,10 @@ This reproduces the game's player foot planting (`cLegIkCtrl` + `cCnsIK`, see `V
     matches by joint number / vertex group name, so the .mod and LMT bytes don't change (test). Older rigs: Bone
     Properties > Game Joint > **Name Bones by Joint**; `joint_label` / the Effect Editor's ParentNo show names. A
     bone added in Blender shows `player_joint_hint` (its number in the player skeleton, with the expected parent) and
-    a search picker of the player joints (`albam.pick_joint_number`, `joint_choices`, used ones marked and refused). The
+    a search picker of the player joints (`albam.pick_joint_number`, `joint_choices`, used ones marked and refused).
+    Not a Game Joint: Mark / Unmark Selected (`albam.set_not_joint`); bones from the game file (`from_game_file`:
+    a joint number without `mtfw.added`) can't be marked, by the operator or the checkbox (export would refuse
+    them as deleted). Export ignores bone visibility on purpose (hiding is a view state). The
     upstream Tools > Autorename bones uses another (Mod156-based) table. Test: `tests/blender/test_joint_names.py`.
   - **New model** (`engines/mtfw/new_model.py`, 2026-10-28; user guide `docs/new_model.md`): Object Properties >
     DMC4 Model > **New DMC4 Model** (`albam.mod_new`, dmc4 selected) on an armature, an Empty or a mesh (a lone mesh
