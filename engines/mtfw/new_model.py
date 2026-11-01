@@ -11,24 +11,29 @@ built by the export as for an imported model:
 - part records (`mesh._serialize_groups`): one per part number the meshes use;
 - meshes: transform, triangles and seams are handled at export (mesh_prep.py).
 
-`setup_new_model` also makes the root's materials exportable: a material without the "MT Framework shader" group
-gets it (`convert_material`), with the image feeding its Principled BSDF's Base Color as the basemap and shader
-functions that exist in XfMaterialStandard.bfx for that vertex layout (skinned up to 4 weights: SKIN_4WT + vtype
-0, more: SKIN_8WT + vtype 1, no armature: SKIN_NONE + vtype 2; lighting SH4SPOT, no normal / specular map:
-every combination checked in the .bfx permutation table at 0x56C). Its images get the dmc4 app and a game path
-next to the model. What it can't do is reported: images that aren't DDS (export needs DDS), normal maps (the game
-wants DXT5nm, X in alpha), materials with no base texture.
+`update_model` makes the model's materials and textures exportable, and runs again at every export, so whatever was
+added since is picked up:
+- a material without the "MT Framework shader" group gets it (`convert_material`): the Principled BSDF's (or any other
+  shader's) Base Color, Alpha, Normal, Specular and Roughness inputs become the game's base, normal and mask maps,
+  following packed channels through Separate Color nodes; functions that exist in XfMaterialStandard.bfx for that
+  vertex layout (skinned up to 4 weights: SKIN_4WT + vtype 0, more: SKIN_8WT + vtype 1, no armature: SKIN_NONE + vtype
+  2; lighting SH4SPOT; normal map and specular as found: every combination is in the .bfx table at 0x56C and most are
+  common in the game's files);
+- images that aren't DDS are converted (texture_convert.py);
+- images get the dmc4 app and a game path next to the model.
+New DMC4 Model also splits meshes with several materials: a mesh record has one material.
 """
 import struct
 from pathlib import PureWindowsPath
 from types import SimpleNamespace
 
+import bmesh
 import bpy
 
 from albam.exceptions import AlbamCheckFailure
 from albam.lib.blender import is_blimage_dds
 from albam.registry import blender_registry
-from . import joints
+from . import joints, texture_convert
 from .model_settings import model_root, set_light_group, set_lod_distances
 
 APP_ID = "dmc4"
@@ -37,6 +42,12 @@ DEFAULT_LIGHT_GROUP = 3
 DEFAULT_LOD = (1000, 3000)
 HEADER_SIZE = 0x90   # header (72) + reserved_01 / 02 + bsphere + bbox_min / max + model_info: what rModel reads first
 MAX_SKIN_4 = 4       # weights per vertex SKIN_4WT (vtype 0) holds; up to 8 need SKIN_8WT (vtype 1)
+MAX_JOINTS = 254     # joint numbers 0-253
+MAX_PATH = 63        # a texture path in the .mod's 64-byte table
+ATTR = {"NONE": ("0x10", 8), "TEST": ("0x8", 100), "BLEND": ("0x40", 8)}   # alpha use -> attr, alpha_ref (DX9 models)
+DEFAULT_POWER = 16.0 # SpecularPow when a roughness image varies over the surface
+WARNING = "! "       # notes starting with this are things to fix
+SEPARATE_NODES = ("SEPARATE_COLOR", "SEPRGB", "SEPARATE_XYZ")
 
 
 def blank_mod153(light_group=DEFAULT_LIGHT_GROUP, lod=DEFAULT_LOD):
@@ -72,20 +83,32 @@ def _armature_of(mesh_ob):
     return None
 
 
+def _armature_under(ob):
+    """the only armature among an Empty's descendants, else None"""
+    found = [c for c in ob.children_recursive if c.type == "ARMATURE"]
+    return found[0] if len(found) == 1 else None
+
+
 def root_candidate(ob):
-    """the object New DMC4 Model turns into the model's root for the active object ob: an armature or an Empty is
-    its own root; a mesh's root is its armature (parent, else its Armature modifier's object), else its parent
-    Empty, else None (a new Empty is made for it)"""
+    """the object New DMC4 Model turns into the model's root for the active object ob. An armature is its own root,
+    and so is an Empty unless it holds a rig (imported models are often Empty > armature > meshes: the rig is what
+    makes the model skinned). A mesh's root is the armature deforming it, else its parent armature or Empty, else
+    None (a new Empty is made for it)."""
     if ob is None:
         return None
-    if ob.type in ("ARMATURE", "EMPTY"):
+    if ob.type == "ARMATURE":
         return ob
+    if ob.type == "EMPTY":
+        return _armature_under(ob) or ob
     if ob.type != "MESH":
         return None
+    armature = _armature_of(ob)
+    if armature is not None:
+        return armature
     for parent in _ancestors(ob):
         if parent.type in ("ARMATURE", "EMPTY"):
-            return parent
-    return _armature_of(ob)
+            return root_candidate(parent)
+    return None
 
 
 def default_path(name):
@@ -111,6 +134,8 @@ def _meshes_to_adopt(context, root, selected):
     for ob in candidates:
         if ob.type != "MESH" or ob == root or ob in adopt or _taken(ob):
             continue
+        if _armature_of(ob) not in (None, root):   # selected, but another rig's
+            continue
         if root is not None and root in _ancestors(ob):
             continue
         adopt.append(ob)
@@ -134,93 +159,340 @@ def shader_functions(skinned, weights):
     return (0, 3) if weights <= MAX_SKIN_4 else (1, 4)
 
 
-def _upstream_image(socket, depth=4):
-    """the Image Texture node feeding socket, directly or through up to `depth` nodes"""
+def _upstream(socket, depth=6):
+    """(Image Texture node, channel) feeding socket, directly or through a few nodes; channel: 0-2 through a Separate
+    Color node, 3 from the image's Alpha output, None for its colour. A mix factor is only followed last."""
     if depth < 0 or not socket.is_linked:
+        return None, None
+    link = socket.links[0]
+    node = link.from_node
+    if node.type == "TEX_IMAGE":
+        return node, 3 if link.from_socket.name == "Alpha" else None
+    if node.type in SEPARATE_NODES:
+        found, _channel = _upstream(node.inputs[0], depth - 1)
+        return found, list(node.outputs).index(link.from_socket) if found is not None else None
+    for inp in sorted(node.inputs, key=lambda i: i.name in ("Fac", "Factor")):
+        found, channel = _upstream(inp, depth - 1)
+        if found is not None:
+            return found, channel
+    return None, None
+
+
+def _upstream_image(socket, depth=6):
+    """the Image Texture node feeding socket, directly or through a few nodes"""
+    return _upstream(socket, depth)[0]
+
+
+def _normal_source(socket, mat, notes):
+    """the normal map behind a shader's Normal input: through a Normal Map node, past a Bump node, which is a height
+    map and has nothing the game can read"""
+    if not socket.is_linked:
         return None
     node = socket.links[0].from_node
-    if node.type == "TEX_IMAGE":
-        return node
-    for inp in node.inputs:
-        found = _upstream_image(inp, depth - 1)
-        if found is not None:
-            return found
-    return None
+    if node.type == "BUMP":
+        notes.append(f"{WARNING}{mat.name}: a bump map isn't converted (the game takes normal maps)")
+        return _normal_source(node.inputs["Normal"], mat, notes)
+    if node.type == "NORMAL_MAP":
+        return _upstream(node.inputs["Color"])[0]
+    return _upstream(socket)[0]
 
 
-def convert_material(mat, skinned, weights, notes):
-    """give mat the MT Framework shader group and DMC4 properties (see the module doc); returns its image nodes"""
+def _surface_shader(nt, output):
+    """the shader to read a material from: its Principled BSDF, else what feeds the output, past Mix / Add Shaders"""
+    principled = next((n for n in nt.nodes if n.type == "BSDF_PRINCIPLED"), None)
+    if principled is not None or output is None or not output.inputs["Surface"].is_linked:
+        return principled
+    node = output.inputs["Surface"].links[0].from_node
+    while node.type in ("MIX_SHADER", "ADD_SHADER"):
+        linked = [i.links[0].from_node for i in node.inputs if i.is_linked and i.name != "Fac"]
+        linked = [n for n in linked if n.type != "BSDF_TRANSPARENT"]
+        if not linked:
+            return None
+        node = linked[0]
+    return node
+
+
+def _alpha_source(nt, shader):
+    """(node, channel) of the opacity: the Alpha input, or the factor of a Mix Shader with a Transparent BSDF"""
+    alpha = shader.inputs.get("Alpha") if shader is not None else None
+    if alpha is not None and alpha.is_linked:
+        return _upstream(alpha)
+    for node in nt.nodes:
+        if node.type == "MIX_SHADER" and any(
+                i.is_linked and i.links[0].from_node.type == "BSDF_TRANSPARENT" for i in node.inputs):
+            return _upstream(node.inputs[0])
+    return None, None
+
+
+def _specular_power(shader):
+    """SpecularPow for a shader's Roughness: the display's roughness = sqrt(2 / (power + 2)) turned around"""
+    rough = shader.inputs.get("Roughness") if shader is not None else None
+    if rough is None or rough.is_linked:
+        return DEFAULT_POWER
+    return min(max(2.0 / max(rough.default_value, 0.01) ** 2 - 2.0, 1.0), 100.0)
+
+
+def _image_node(nt, image, like, location):
+    """a new Image Texture node for image with the UVs of `like` (a source node, kept apart: a packed image feeds
+    several slots)"""
+    node = nt.nodes.new("ShaderNodeTexImage")
+    node.image = image
+    node.location = location
+    if like is not None:
+        node.interpolation, node.extension = like.interpolation, like.extension
+        if like.inputs[0].is_linked:
+            nt.links.new(like.inputs[0].links[0].from_socket, node.inputs[0])
+    return node
+
+
+def _prune(nt, output):
+    """remove what no longer leads to the material's output (the old shader, its image and Normal Map nodes)"""
+    keep, todo = set(), [output]
+    while todo:
+        node = todo.pop()
+        if node.name in keep:
+            continue
+        keep.add(node.name)
+        todo.extend(link.from_node for inp in node.inputs for link in inp.links)
+    for node in list(nt.nodes):
+        if node.name not in keep and node.type != "FRAME":
+            nt.nodes.remove(node)
+
+
+def convert_material(mat, skinned, weights, notes, flip_green=False):
+    """give mat the MT Framework shader group and DMC4 properties, from what its shader shows (see the module doc)"""
     from . import material as mtfw_material
     mat.use_nodes = True
     nt = mat.node_tree
     mtfw_material._create_mtfw_shader()
-    principled = next((n for n in nt.nodes if n.type == "BSDF_PRINCIPLED"), None)
-    base = _upstream_image(principled.inputs["Base Color"]) if principled else None
-    alpha = bool(principled and principled.inputs["Alpha"].is_linked)
-    normal = _upstream_image(principled.inputs["Normal"]) if principled else None
-    colour = tuple(principled.inputs["Base Color"].default_value) if principled else (0.8, 0.8, 0.8, 1.0)
+    output = next((n for n in nt.nodes if n.type == "OUTPUT_MATERIAL" and n.is_active_output), None) or \
+        next((n for n in nt.nodes if n.type == "OUTPUT_MATERIAL"), None)
+    shader = _surface_shader(nt, output)
+    colour_in = (shader.inputs.get("Base Color") or shader.inputs.get("Color")) if shader is not None else None
+    base = _upstream(colour_in)[0] if colour_in is not None else None
+    if base is None and colour_in is None:   # an unknown shader: its largest image is the best guess
+        images = [n for n in nt.nodes if n.type == "TEX_IMAGE" and n.image is not None]
+        base = max(images, key=lambda n: n.image.size[0] * n.image.size[1], default=None)
+    colour = tuple(colour_in.default_value) if colour_in is not None else (0.8, 0.8, 0.8, 1.0)
+    alpha_node, alpha_channel = _alpha_source(nt, shader)
+    normal = _normal_source(shader.inputs["Normal"], mat, notes) \
+        if shader is not None and "Normal" in shader.inputs else None
+    spec_in = (shader.inputs.get("Specular IOR Level") or shader.inputs.get("Specular")) if shader is not None else None
+    specular, spec_channel = _upstream(spec_in) if spec_in is not None else (None, None)
+    rough_in = shader.inputs.get("Roughness") if shader is not None else None
+    rough, rough_channel = _upstream(rough_in) if rough_in is not None else (None, None)
+    power = _specular_power(shader)
+    for name in ("Metallic", "Emission Color", "Emission"):
+        socket = shader.inputs.get(name) if shader is not None else None
+        if socket is not None and socket.is_linked and _upstream_image(socket) is not None:
+            notes.append(f"{mat.name}: its {name.lower()} map isn't used (the game has no slot for it)")
 
+    if output is None:
+        output = nt.nodes.new("ShaderNodeOutputMaterial")
     group = nt.nodes.new("ShaderNodeGroup")
     group.node_tree = bpy.data.node_groups[mtfw_material.MTFW_SHADER_NODEGROUP_NAME]
     group.name = "MTFrameworkGroup"
     group.width = 300
-    output = next((n for n in nt.nodes if n.type == "OUTPUT_MATERIAL" and n.is_active_output), None) or \
-        nt.nodes.new("ShaderNodeOutputMaterial")
     group.location = (output.location[0] - 400, output.location[1])
     nt.links.new(group.outputs[0], output.inputs["Surface"])
-    if base is not None:
-        nt.links.new(base.outputs["Color"], group.inputs["Diffuse BM"])
-        if alpha:
-            nt.links.new(base.outputs["Alpha"], group.inputs["Alpha BM"])
-    else:
-        group.inputs["Diffuse BM"].default_value = colour
-        notes.append(f"{mat.name}: no base texture (the game draws it untextured)")
-    if normal is not None:
-        notes.append(f"{mat.name}: normal map {normal.image.name if normal.image else ''} not connected: DMC4 "
-                     "wants DXT5nm (X in alpha, Y in green); connect a converted one to Normal NM")
-    if principled is not None:
-        nt.nodes.remove(principled)
+    x, y = group.location[0] - 350, group.location[1]
+
+    use = "NONE"
+    image = None
+    has_alpha = alpha_node is not None and alpha_node.image is not None
+    if base is not None and base.image is not None:
+        if is_blimage_dds(base.image) and not base.image.get(texture_convert.RECIPE_PROP):
+            image, use = base.image, "TEST" if has_alpha else "NONE"
+        else:
+            other = alpha_node.image if has_alpha and alpha_node.image != base.image else None
+            sources = [base.image, other] if other is not None else [base.image]
+            channels = [None, alpha_channel] if other is not None else [None]
+            image, use = texture_convert.convert(texture_convert.BASE, sources, channels, use_alpha=has_alpha)
+            if image is None:
+                notes.append(f"{WARNING}{mat.name}: can't read {base.image.name} (a missing file?)")
+    if image is None:
+        image = texture_convert.solid_image(mat.name, colour)
+        notes.append(f"{mat.name}: no base texture, made a flat colour one")
+    node = _image_node(nt, image, base, (x, y))
+    nt.links.new(node.outputs["Color"], group.inputs["Diffuse BM"])
+
+    has_normal = False
+    if normal is not None and normal.image is not None:
+        image = normal.image
+        if not (is_blimage_dds(image) and texture_convert.is_game_normal(image)):
+            image = texture_convert.convert(texture_convert.NORMAL, [image], flip_green=flip_green)[0]
+        if image is None:
+            notes.append(f"{WARNING}{mat.name}: can't read {normal.image.name} (a missing file?)")
+        else:
+            node = _image_node(nt, image, normal, (x, y - 300))
+            nt.links.new(node.outputs["Color"], group.inputs["Normal NM"])
+            nt.links.new(node.outputs["Alpha"], group.inputs["Alpha NM"])
+            has_normal = True
+
+    has_mask = False
+    spec_image = specular.image if specular is not None else None
+    rough_image = rough.image if rough is not None else None
+    if spec_image is not None or rough_image is not None:
+        image = texture_convert.convert(texture_convert.MASK, [spec_image, rough_image],
+                                        [spec_channel, rough_channel])[0]
+        if image is not None:
+            node = _image_node(nt, image, specular or rough, (x, y - 600))
+            nt.links.new(node.outputs["Color"], group.inputs["Specular MM"])
+            has_mask = True
+    _prune(nt, output)
 
     props = mat.albam_custom_properties.get_custom_properties_for_appid(APP_ID)
     vtype, func_skin = shader_functions(skinned, weights)
     props.vtype = hex(vtype)
     props.func_skin = hex(func_skin)
     props.func_lighting = "0x2"      # SH4SPOT
-    props.func_normalmap = "0x0"
-    props.func_specular = "0x0"
+    props.func_normalmap = "0x1" if has_normal else "0x0"
+    props.func_specular = "0x1" if has_mask else "0x0"
     props.func_lightmap = "0x0"
     props.func_multitexture = "0x0"
-    props.attr = "0x8" if alpha else "0x10"   # alpha test (NUKI) when the alpha was used, else solid
+    props.attr, props.alpha_ref = ATTR[use]
+    props.fresnel_factor = (0.0, 0.0, power, 0.0)   # no fresnel loss, no environment map
     record = SimpleNamespace()
     props.copy_custom_properties_to(record)
     mtfw_material.setup_dmc4_material(record, mat)
-    return [base] if base is not None else []
 
 
 def _image_nodes(mat):
     return [n for n in mat.node_tree.nodes if n.type == "TEX_IMAGE" and n.image is not None] if mat.node_tree else []
 
 
+def _update_images(mat, flip_green, notes):
+    """bring the images of a DMC4 material up to date: converted ones with their sources, new ones in a slot converted"""
+    from .material import _group_socket_name
+    from .texture import MISSING_TEXTURE_PROP
+    nt = mat.node_tree
+    for node in _image_nodes(mat):
+        image = node.image
+        if image.get(MISSING_TEXTURE_PROP) or image.albam_asset.render_target:
+            continue
+        if image.get(texture_convert.RECIPE_PROP):
+            node.image = texture_convert.refresh(image)
+            continue
+        if is_blimage_dds(image):
+            continue
+        socket = _group_socket_name(node.outputs["Color"])
+        if socket is None:
+            continue
+        kind = texture_convert.SOCKET_KINDS.get(socket, texture_convert.BASE)
+        props = mat.albam_custom_properties.get_custom_properties_for_appid(APP_ID)
+        new = texture_convert.convert(kind, [image], flip_green=flip_green,
+                                      use_alpha=int(props.attr, 16) != 0x10)[0]
+        if new is None:
+            notes.append(f"{WARNING}{mat.name}: can't read {image.name} (a missing file?)")
+            continue
+        node.image = new
+        notes.append(f"{image.name}: converted to {new.name}")
+        if socket == "Normal NM":
+            group = nt.nodes.get("MTFrameworkGroup")
+            if group is not None:
+                nt.links.new(node.outputs["Alpha"], group.inputs["Alpha NM"])
+
+
 def _prepare_images(mat, folder, notes):
-    """the material's images: the dmc4 app and, without one, a game path in the model's folder (no extension: the
-    export adds .tex); images that aren't DDS are reported"""
+    """the material's images: the dmc4 app and, without one, a game path in the model's folder, unique and short
+    enough for the .mod's path table (no extension in the table: the export adds .tex)"""
     for node in _image_nodes(mat):
         im = node.image
         if im.albam_asset.original_bytes and im.albam_asset.app_id != APP_ID:
-            notes.append(f"{im.name}: a texture of another game ({im.albam_asset.app_id})")
+            notes.append(f"{WARNING}{im.name}: a texture of another game ({im.albam_asset.app_id})")
             continue
         im.albam_asset.app_id = APP_ID
-        if not im.albam_asset.relative_path:
-            stem = "".join(c if c.isalnum() or c in "_-" else "_" for c in im.name.rsplit(".", 1)[0]) or "texture"
-            im.albam_asset.relative_path = f"{folder}\\{stem}.tex"
-            im.albam_asset.extension = "tex"
-        if not im.albam_asset.original_bytes and not is_blimage_dds(im):
-            notes.append(f"{im.name}: not a DDS image; export needs DDS (save it as .dds and reload it)")
+        if im.albam_asset.relative_path:
+            continue
+        used = {other.albam_asset.relative_path.lower() for other in bpy.data.images}
+        stem = texture_convert.stem_of(im.name)[:max(1, MAX_PATH - len(folder) - 1)]
+        path, n = f"{folder}\\{stem}.tex", 1
+        while path.lower() in used:
+            n += 1
+            path = f"{folder}\\{stem[:max(1, MAX_PATH - len(folder) - 4)]}_{n}.tex"
+        im.albam_asset.relative_path = path
+        im.albam_asset.extension = "tex"
 
 
-def setup_new_model(context, ob, path):
+def _keep_material(ob, index):
+    """reduce a mesh to the faces of one material slot, which becomes its only slot"""
+    me = ob.data
+    material = ob.material_slots[index].material
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    bmesh.ops.delete(bm, geom=[f for f in bm.faces if f.material_index != index], context="FACES")
+    for face in bm.faces:
+        face.material_index = 0
+    bm.to_mesh(me)
+    bm.free()
+    me.materials.clear()
+    me.materials.append(material)
+
+
+def split_by_material(meshes, notes):
+    """one material per mesh: a mesh using several becomes one object per material, with its modifiers and weights.
+    Unused slots go too: export reads a mesh's first slot. Returns the new objects."""
+    made = []
+    for ob in meshes:
+        used = sorted({p.material_index for p in ob.data.polygons})
+        used = [i for i in used if i < len(ob.material_slots)]
+        if len(ob.material_slots) < 2 or not used:
+            continue
+        for index in used[1:]:
+            copy = ob.copy()
+            copy.data = ob.data.copy()
+            material = ob.material_slots[index].material
+            copy.name = f"{ob.name}_{material.name if material else index}"
+            for collection in ob.users_collection:
+                collection.objects.link(copy)
+            _keep_material(copy, index)
+            made.append(copy)
+        if len(used) > 1:
+            notes.append(f"{ob.name}: split into {len(used)} meshes, one per material")
+        _keep_material(ob, used[0])
+    return made
+
+
+def update_model(root, default_material=False):
+    """Make everything under a model's root exportable (see the module doc); nothing to do on a model that already
+    is. default_material: meshes without a material get one (New DMC4 Model; at export that's left to its check, a
+    mesh with none is more likely a mistake). Returns notes, those starting with WARNING need the user."""
+    from . import material as mtfw_material
+    notes = []
+    skinned = root.type == "ARMATURE"
+    joint_names = {b.name for b in joints.joint_bones(root)} if skinned else set()
+    flip_green = bool(root.get("mod_normal_directx"))
+    folder = str(PureWindowsPath(root.albam_asset.relative_path).parent)
+    default = None
+    to_convert, ready = {}, []
+    for mesh_ob in (c for c in root.children_recursive if c.type == "MESH"):
+        if default_material and not any(slot.material for slot in mesh_ob.material_slots):
+            if default is None:
+                default = bpy.data.materials.new(f"{root.name}_material")
+            if mesh_ob.material_slots:
+                mesh_ob.material_slots[0].material = default
+            else:
+                mesh_ob.data.materials.append(default)
+            notes.append(f"{mesh_ob.name}: had no material, got {default.name}")
+        for mat in (slot.material for slot in mesh_ob.material_slots if slot.material is not None):
+            if mat.node_tree and mtfw_material._has_mtfw_shader_group(mat):
+                if mat not in ready:
+                    ready.append(mat)
+                continue
+            weights = _weights_per_vertex(mesh_ob, joint_names) if skinned else 0
+            to_convert[mat] = max(to_convert.get(mat, 0), weights)
+    for mat, weights in to_convert.items():
+        convert_material(mat, skinned, weights, notes, flip_green)
+        notes.append(f"{mat.name}: converted to a DMC4 material")
+        _prepare_images(mat, folder, notes)
+    for mat in ready:
+        _update_images(mat, flip_green, notes)
+        _prepare_images(mat, folder, notes)
+    return notes
+
+
+def setup_new_model(context, ob, path, normal_directx=False):
     """Make a new DMC4 model of ob (see root_candidate) at game path `path`. Returns (root, notes)."""
-    from albam.engines.mtfw import material as mtfw_material
     path = path.strip().replace("/", "\\")
     if not path.lower().endswith(".mod"):
         path += ".mod"
@@ -234,7 +506,15 @@ def setup_new_model(context, ob, path):
     elif _taken(root):
         raise AlbamCheckFailure(f"{root.name} already belongs to an Albam file", details=root.name,
                                 solution="Pick an armature, Empty or mesh that isn't part of an imported file")
+    elif ob is not None and ob != root and ob.type == "EMPTY":   # Empty > armature: meshes beside the rig come along
+        selected += [c for c in ob.children_recursive if c.type == "MESH" and c not in selected]
     # checked before anything changes: a refused operator leaves no undo step
+    if root is not None and root.type == "ARMATURE" and len(joints.joint_bones(root)) > MAX_JOINTS:
+        raise AlbamCheckFailure(
+            f"{root.name} has too many bones",
+            details=f"{len(joints.joint_bones(root))} bones, a model holds {MAX_JOINTS}",
+            solution="Select the helper bones in Pose Mode and use Bone Properties > Game Joint > Mark Selected, or "
+                     "move part of the model (hair, cloth) to its own armature and model")
     adopt = _meshes_to_adopt(context, root, selected)
     owned = [c for c in root.children_recursive if c.type == "MESH"] if root is not None else []
     if not owned and not adopt:
@@ -251,42 +531,24 @@ def setup_new_model(context, ob, path):
         _parent_keep_transform(mesh_ob, root)
     if adopt:
         notes.append(f"parented {len(adopt)} mesh(es) to {root.name}: " + ", ".join(o.name for o in adopt))
-    meshes = [c for c in root.children_recursive if c.type == "MESH"]
+    if any(abs(s - 1.0) > 1e-3 for s in root.scale):
+        notes.append(f"{WARNING}{root.name} is scaled {tuple(round(s, 3) for s in root.scale)}: bones ignore that "
+                     "scale. Apply it (Object > Apply > Scale)")
 
-    skinned = root.type == "ARMATURE"
-    if skinned:
+    split_by_material([c for c in root.children_recursive if c.type == "MESH"], notes)
+    if root.type == "ARMATURE":
         numbered = joints.number_new_rig(root)
         if numbered:
             notes.append(f"numbered {len(numbered)} bones as game joints {numbered[0][1]}-{numbered[-1][1]}")
-    joint_names = {b.name for b in joints.joint_bones(root)} if skinned else set()
-
-    folder = str(PureWindowsPath(path).parent)
-    default_material = None
-    weights_of = {}
-    for mesh_ob in meshes:
-        if not any(slot.material for slot in mesh_ob.material_slots):
-            if default_material is None:
-                default_material = bpy.data.materials.new(f"{root.name}_material")
-            if mesh_ob.material_slots:
-                mesh_ob.material_slots[0].material = default_material
-            else:
-                mesh_ob.data.materials.append(default_material)
-            notes.append(f"{mesh_ob.name}: had no material, got {default_material.name}")
-        weights = _weights_per_vertex(mesh_ob, joint_names) if skinned else 0
-        for slot in mesh_ob.material_slots:
-            if slot.material is not None:
-                weights_of[slot.material] = max(weights_of.get(slot.material, 0), weights)
-    for mat, weights in weights_of.items():
-        if not mat.node_tree or not mtfw_material._has_mtfw_shader_group(mat):
-            convert_material(mat, skinned, weights, notes)
-            notes.append(f"{mat.name}: converted to a DMC4 material")
-        _prepare_images(mat, folder, notes)
 
     asset = root.albam_asset
     asset.app_id = APP_ID
     asset.relative_path = path
     asset.extension = "mod"
     asset.original_bytes = blank_mod153()
+    if normal_directx:
+        root["mod_normal_directx"] = 1
+    notes += update_model(root, default_material=True)
     set_light_group(root.albam_mod, DEFAULT_LIGHT_GROUP)
     set_lod_distances(root.albam_mod, *DEFAULT_LOD)
     exportable = context.scene.albam.exportable.file_list.add()
@@ -295,10 +557,20 @@ def setup_new_model(context, ob, path):
     return root, notes
 
 
+def _report_notes(op, root, notes, done):
+    for note in notes:
+        print(f"[Albam] {root.name}: {note}")
+    root["mod_new_notes"] = "\n".join(notes)
+    warn = [n for n in notes if n.startswith(WARNING)]
+    op.report({"WARNING" if warn else "INFO"},
+              done + (f"; {len(warn)} thing(s) to fix, see the DMC4 Model panel" if warn else ""))
+
+
 @blender_registry.register_blender_type
 class ALBAM_OT_ModNew(bpy.types.Operator):
     """Make a new DMC4 model (.mod) from this armature, Empty or mesh, with no game file to start from: its meshes
-    (and a rig's bones) become the model, materials get the DMC4 shader, and it's added to the Export list"""
+    (and a rig's bones) become the model, materials and textures are converted to the game's, and it's added to the
+    Export list"""
     bl_idname = "albam.mod_new"
     bl_label = "New DMC4 Model"
     bl_options = {"REGISTER", "UNDO"}
@@ -307,11 +579,16 @@ class ALBAM_OT_ModNew(bpy.types.Operator):
         name="Game Path",
         description="Where the model goes in the game, with .mod (e.g. model\\game\\mymodel\\mymodel.mod). Its new "
                     "textures go in the same folder")
+    normal_directx: bpy.props.BoolProperty(
+        name="DirectX Normal Maps",
+        description="Turn on if the model's normal maps are made the DirectX way (green pointing down, usual for "
+                    "models taken from other games). Off for maps that look right in Blender's Normal Map node")
 
     @classmethod
     def poll(cls, context):
         ob = context.object
-        return ob is not None and ob.type in ("ARMATURE", "EMPTY", "MESH") and not _taken(ob)
+        return ob is not None and ob.type in ("ARMATURE", "EMPTY", "MESH") and not _taken(ob) and \
+            not _taken(root_candidate(ob) or ob)
 
     def invoke(self, context, event):
         root = root_candidate(context.object)
@@ -322,17 +599,30 @@ class ALBAM_OT_ModNew(bpy.types.Operator):
         if context.object is not None and context.object.mode != "OBJECT":
             bpy.ops.object.mode_set(mode="OBJECT")
         try:
-            root, notes = setup_new_model(context, context.object, self.path)
+            root, notes = setup_new_model(context, context.object, self.path, self.normal_directx)
         except AlbamCheckFailure:
             bpy.ops.albam.error_handler_popup("INVOKE_DEFAULT")
             return {"CANCELLED"}
-        for note in notes:
-            print(f"[Albam] {root.name}: {note}")
-        root["mod_new_notes"] = "\n".join(notes)
-        warn = [n for n in notes if "not a DDS" in n or "not connected" in n or "another game" in n]
-        self.report({"WARNING" if warn else "INFO"},
-                    f"{root.name} is a new DMC4 model ({root.albam_asset.relative_path}); "
-                    + (f"{len(warn)} thing(s) to fix before export, see the panel" if warn else "export it from the Export list"))
+        _report_notes(self, root, notes, f"{root.name} is a new DMC4 model ({root.albam_asset.relative_path})")
+        return {"FINISHED"}
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_ModUpdate(bpy.types.Operator):
+    """Convert what's new on this model now: materials without the DMC4 shader, images that aren't DDS, and textures
+    whose source image changed. Export does this by itself; use it to see the result in the viewport first"""
+    bl_idname = "albam.mod_update"
+    bl_label = "Update Materials & Textures"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return context.object is not None and model_root(context.object) is not None
+
+    def execute(self, context):
+        root = model_root(context.object)
+        notes = update_model(root)
+        _report_notes(self, root, notes, f"{root.name}: {len(notes)} change(s)" if notes else f"{root.name} is up to date")
         return {"FINISHED"}
 
 
@@ -346,11 +636,10 @@ class ALBAM_PT_NewModel(bpy.types.Panel):
     @classmethod
     def poll(cls, context):
         ob = context.object
-        if ob is None or context.scene.albam.apps.app_selected != APP_ID:
+        if ob is None:
             return False
         root = model_root(ob)
-        return (root is not None and root.get("mod_new_notes") is not None) or \
-            (ob.type in ("ARMATURE", "EMPTY", "MESH") and not _taken(ob))
+        return (root is not None and root.get("mod_new_notes") is not None) or ALBAM_OT_ModNew.poll(context)
 
     def draw(self, context):
         layout = self.layout
@@ -358,10 +647,10 @@ class ALBAM_PT_NewModel(bpy.types.Panel):
         if root is not None:
             notes = root.get("mod_new_notes", "")
             layout.label(text=f"New model: {root.albam_asset.relative_path}", icon="OBJECT_DATA")
+            layout.operator("albam.mod_update", icon="FILE_REFRESH")
             for note in notes.split("\n") if notes else []:
-                icon = "ERROR" if ("not a DDS" in note or "not connected" in note or "another game" in note) \
-                    else "INFO"
-                layout.label(text=note, icon=icon)
+                warn = note.startswith(WARNING)
+                layout.label(text=note[len(WARNING):] if warn else note, icon="ERROR" if warn else "INFO")
             return
         col = layout.column()
         col.label(text="Not part of a game model yet.")

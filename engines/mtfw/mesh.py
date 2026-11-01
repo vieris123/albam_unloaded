@@ -1,6 +1,7 @@
 from binascii import crc32
 from collections import namedtuple, OrderedDict
 import ctypes
+import functools
 import math
 from itertools import chain
 from io import BytesIO
@@ -850,6 +851,18 @@ def _get_material_hash(mod, mesh):
     return material_hash
 
 
+def _update_dmc4_model(func):
+    """Convert what was added to a DMC4 model since it was made (new_model.update_model), before the checks refuse it"""
+    @functools.wraps(func)
+    def wrapper(bl_obj):
+        if bl_obj.albam_asset.app_id == "dmc4":
+            from .new_model import update_model
+            for note in update_model(bl_obj):
+                print(f"[Albam] {bl_obj.name}: {note}")
+        return func(bl_obj)
+    return wrapper
+
+
 @blender_registry.register_export_function(app_id="re0", extension="mod")
 @blender_registry.register_export_function(app_id="re1", extension="mod")
 @blender_registry.register_export_function(app_id="re5", extension="mod")
@@ -858,6 +871,7 @@ def _get_material_hash(mod, mesh):
 @blender_registry.register_export_function(app_id="rev2", extension="mod")
 @blender_registry.register_export_function(app_id="dd", extension="mod")
 @blender_registry.register_export_function(app_id="dmc4", extension="mod")
+@_update_dmc4_model
 @check_dds_textures
 @check_mtfw_shader_group
 def export_mod(bl_obj):
@@ -1788,6 +1802,8 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
 
     bytes_empty = b'\x00\x00'
     uv_filler = b'\xff\xff' if dst_mod.header.version == 153 else bytes_empty   # unused UV slots in DX9 files
+    if dst_mod.header.version == 153 and vertex_format in (2, 3, 6, 8) and not uvs_per_vertex_2:
+        uvs_per_vertex_2 = uvs_per_vertex   # static meshes sample normal and mask maps here: a copy in every DX9 file
     skin_color = dst_mod.header.version == 153 and vertex_format == 5
     for vertex_index, vertex in enumerate(bl_mesh.data.vertices):
         vertex_struct = VertexCls(_parent=mesh, _root=mesh._root)

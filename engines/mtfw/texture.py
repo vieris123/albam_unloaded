@@ -136,6 +136,7 @@ TEX_FORMAT_MAPPER = {
     "\x15\x00\x00\x00": b"",  # tex 112 D3DFMT_A8R8G8B8 (DMC4 skies / trees)
 }
 TEX112_A8R8G8B8 = "\x15\x00\x00\x00"
+TEX_REVISION_BY_SOCKET = {"Normal NM": 0x32, "Detail DNM": 0x32, "Specular MM": 0x2}
 MISSING_TEXTURE_PROP = "albam_missing"   # placeholder for a texture the .mod references but that isn't available
 
 # FIXME: take into account type of texture (BM/NM/MM, etc.)
@@ -543,6 +544,19 @@ def serialize_textures(app_id, bl_materials):
     return exported_textures
 
 
+def _new_tex_revision(dict_tex, dds_header):
+    """the revision of a texture with no source file, by the slot it's used in (DX9 files: 0x22 colour, 0x32 normal,
+    2 mask)"""
+    from .material import _group_socket_name
+    if dds_header.image_count > 1:
+        return 0x23
+    for _mat, node in dict_tex["materials"].values():
+        socket = _group_socket_name(node.outputs["Color"])
+        if socket in TEX_REVISION_BY_SOCKET:
+            return TEX_REVISION_BY_SOCKET[socket]
+    return 0x22
+
+
 def _serialize_texture_156(app_id, dict_tex):
     bl_im = dict_tex["image"]
     is_rtex = bl_im.albam_asset.render_target
@@ -576,7 +590,7 @@ def _serialize_texture_156(app_id, dict_tex):
         tex.id_magic = b"TEX\x00"
         tex.version = 112
         # revision packs the texture kind (DMC4: 0x22 2D, 0x32 normal map, 0x02 mask, 0x13/0x23 cube): keep it
-        tex.revision = original.revision if original is not None else (0x23 if dds_header.image_count > 1 else 34)
+        tex.revision = original.revision if original is not None else _new_tex_revision(dict_tex, dds_header)
         tex.num_mipmaps_per_image = dds_header.dwMipMapCount
         tex.num_images = dds_header.image_count
         tex.width = bl_im.size[0]
@@ -757,10 +771,11 @@ def _calculate_cube_faces_data(tex):
 class Tex112CustomProperties(bpy.types.PropertyGroup):
     unk_02: bpy.props.IntProperty(default=0)  # TODO u1
     unk_03: bpy.props.IntProperty(default=0)  # TODO u1
-    red: bpy.props.FloatProperty(default=0.7)
-    green: bpy.props.FloatProperty(default=0.7)
-    blue: bpy.props.FloatProperty(default=0.7)
-    alpha: bpy.props.FloatProperty(default=0.7)
+    # the header colour range: the shader multiplies the base colour by it; 1 on nearly every DX9 texture
+    red: bpy.props.FloatProperty(default=1.0)
+    green: bpy.props.FloatProperty(default=1.0)
+    blue: bpy.props.FloatProperty(default=1.0)
+    alpha: bpy.props.FloatProperty(default=1.0)
 
     # XXX copy paste in mesh, material
     def set_from_source(self, mesh):

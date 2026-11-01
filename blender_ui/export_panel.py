@@ -227,6 +227,8 @@ class ALBAM_PT_ExportSection(bpy.types.Panel):
         row = self.layout.row()
         row.operator("albam.export", text="Export")
         row.operator("wm.export_options", icon="OPTIONS", text="")
+        if bpy.ops.albam.mod_new.poll():   # the active object isn't part of a game file yet
+            self.layout.operator("albam.mod_new", icon="ADD")
 
 
 @blender_registry.register_blender_type

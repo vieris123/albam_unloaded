@@ -26,6 +26,9 @@ Panels mentioned here are in the Properties editor (Object / Bone tabs) unless a
   selected bone at once; the imported game model's own bones can't be marked, since its animations, chains and
   collision refer to them). Bones named `root_motion`, `IKP_…` or `IK_Foot…` are
   always helpers.
+- **Export converts a model's new materials and textures by itself** (DMC4 models): a material without the DMC4 shader,
+  a PNG / TGA / JPG put in a shader slot, a source image repainted after conversion. The image in the node is replaced
+  by a packed `.dds` (the source stays in the file). New DMC4 Model does this the first time.
 - **Rename or reorder bones freely.** Export matches the model's bones by joint number, not name or order. Deleting
   one of the model's own bones is refused, because animations, chains, .col and effects refer to it.
 - **Move a mesh object** (relative to its model's root) and it exports where you see it. Quads, n-gons, UV seams,

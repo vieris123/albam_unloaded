@@ -5,37 +5,39 @@ with its own rig. (Before 2026-10-28 a model could only be exported if it had be
 
 ## Quick start
 
-1. Pick **DMC4** as the app in the Albam panel.
-2. Build the model as usual:
+1. Build the model as usual, or open one you already have:
    - **Static prop:** one or more meshes. Parent them to an Empty, or just select them.
    - **Skinned model:** an armature, with meshes weighted to its bones (vertex groups named after the bones) and an
      Armature modifier on them, or parented to it.
-3. Give each mesh one material. The material's **Base Color** image (an Image Texture node into the Principled BSDF)
-   becomes the model's texture. It must be a **DDS** image (see Textures below).
-4. Select the armature, the Empty or a mesh, and in **Object Properties > DMC4 Model** click **New DMC4 Model**. Type
-   the game path, e.g. `model\game\mymodel\mymodel.mod`.
-5. Read the panel's list of what was done and what needs fixing (red lines), fix those, then export from the
+2. Select the armature, the Empty or a mesh, and click **New DMC4 Model**, in **Object Properties > DMC4 Model** or in
+   the sidebar's Albam **Export** panel. Type the game path, e.g. `model\game\mymodel\mymodel.mod`.
+3. Read the panel's list of what was done and what needs fixing (red lines), fix those, then export from the
    **Export** list like any imported model (Export, then Save / Save to Game Folder).
+
+Materials and textures are converted for you: ordinary Blender materials with PNG, TGA or JPG images are fine.
 
 ## What New DMC4 Model does
 
-- **The root.** The armature or Empty becomes the model. A lone mesh gets a new Empty named after the file. Meshes
-  that belong to the model but aren't under it yet are parented to it, staying where they are: the selected meshes,
-  and for an armature every mesh its Armature modifier deforms.
+- **The root.** The armature or Empty becomes the model. An Empty holding one armature (how model importers often
+  leave things) uses that armature, so the model is skinned. A lone mesh gets a new Empty named after the file. Meshes
+  that belong to the model but aren't under it yet are parented to it, staying where they are: the selected meshes
+  (unless another armature deforms them), and for an armature every mesh its Armature modifier deforms.
+- **Several materials on one mesh:** the mesh is split into one object per material, keeping its weights and
+  modifiers (the game's mesh records have one material each).
 - **Bones** without a joint number get 0, 1, 2... in the armature's order (parents first), so the root bone is
   joint 0, as in the game's models. Bones that already have a number (a rig taken from a game model) keep it, so
   their animations still fit. Numbers are shown, and can be changed, in Bone Properties > Game Joint. The search
   button next to the number lists the player skeleton's joints by name (14 thigh_r, 100 thumb_1_r ...): give your
   bones those numbers and the rig can play Nero's / Dante's animations.
-- **Materials** without the DMC4 shader get it: the Base Color image is wired to *Diffuse BM*; if the Principled
-  Alpha was used, the material becomes alpha-tested. The DMC4 material settings are chosen to match the mesh:
+- **Materials** without the DMC4 shader get it, read from what the material shows (a Principled BSDF, or another
+  shader's colour input). See Materials and textures below. The settings match the mesh:
   - static (no armature): no skinning;
   - skinned with up to 4 bone weights per vertex: 4-weight skinning;
   - more than 4: 8-weight skinning.
-  Lighting is the game's usual one; there is no normal map or specular map. Every combination used exists in the
-  game's shader. Materials already set up for DMC4 (e.g. copied from an imported model) are left alone.
-- **Images** get a game path next to the model (`model\game\mymodel\<image name>.tex`). Change it in the Image
-  Editor's Albam tab if you want it elsewhere.
+  Lighting is the game's usual one. Every combination used exists in the game's shader. Materials already set up for
+  DMC4 (e.g. copied from an imported model) are left alone. The old shader nodes are removed (Undo brings them back).
+- **Images** become DDS and get a game path next to the model (`model\game\mymodel\<image name>_BM.tex`). Change it
+  in the Image Editor's Albam tab if you want it elsewhere.
 - The model is added to the **Export** list. Its settings (light group, level of detail) are in Object Properties >
   Albam Asset > Model Settings, with the game's usual values.
 
@@ -54,19 +56,37 @@ You can model the normal way: export makes a temporary copy of each mesh that ne
 **Not handled yet:** modifiers (Mirror, Subdivision...) are ignored: apply them before exporting. The Armature
 modifier and the vertex groups are what skinning uses, so keep those.
 
-## Textures
+## Materials and textures
 
-- **Export needs DDS images.** Albam can't convert PNG / TGA yet. Save the texture as `.dds` with an image tool
-  (e.g. DXT1 for opaque, DXT5 for alpha), then open that file in the Image Texture node. A non-DDS image is listed in
-  red in the panel and export refuses it.
-- **Normal maps** aren't connected automatically: DMC4 reads them in the DXT5nm layout (X in the alpha channel,
-  Y in green), which ordinary normal maps aren't. Convert one to that layout, then connect it to the shader group's
-  *Normal NM* input, and set the material's normal map function in its DMC4 properties.
+| In your material | In the game |
+|---|---|
+| Base Color image | base map: DXT1, or DXT5 if the alpha is used |
+| Alpha (the base image's or another image; or a Mix Shader with a Transparent BSDF) | alpha test for cut-outs (hair, lace), blending if the image is mostly half transparent; opaque if it has no real transparency |
+| Base Color with no image | a small flat colour texture |
+| Normal Map node with an image | normal map, in the game's layout (X in alpha, Y in green) |
+| Specular image | mask map (specular colour) |
+| Roughness image | mask map, as 1 - roughness (multiplied with a Specular image if there's both). Channels of packed images are followed through a Separate Color node |
+| Roughness value | the specular highlight's sharpness |
+
+Not used (the panel says so): Bump nodes (the game takes normal maps), Metallic and Emission maps. A material with no
+Specular or Roughness image has no specular at all.
+
+- **DirectX normal maps:** Blender's Normal Map node expects green pointing up. Maps made for DirectX, as most games'
+  are, have it down: turn on **DirectX Normal Maps** in the New DMC4 Model dialog for those.
+- **Sizes:** textures go to the nearest power of two (up to 4096), with full mipmaps. A 2048 texture takes a few
+  seconds; the console shows each one.
+- **Your images stay:** the conversion makes a packed `.dds` image and leaves the source in the file. The viewport then
+  shows the compressed result, as the game will.
+- **Keeping things up to date:** export converts what changed by itself: a PNG put in a shader slot, a material
+  added to the model, or a source image you repainted. **Update Materials & Textures** in the DMC4 Model panel does
+  the same at any time, to see the result first.
+- Existing `.dds` images are used as they are.
 
 ## Limits and notes
 
-- One material per mesh (separate by material: Edit Mode > Mesh > Separate > By Material).
-- Up to 32 bones influence one mesh, 255 bones per model, 8 weights per vertex.
+- One material per mesh. New DMC4 Model splits meshes; one you add to the model later needs Separate > By Material.
+- Up to 32 bones influence one mesh, 254 bones per model, 8 weights per vertex. A rig with more bones is refused:
+  mark its helper bones with Bone Properties > Game Joint > **Mark Selected** first (that panel shows on any armature).
 - The model's part number (`Group ID` in the mesh's DMC4 properties, 0 by default) decides the level-of-detail part a
   mesh belongs to; export writes a part record for each one used, centred on its meshes. Leave it at 0 unless you
   need parts switched separately.

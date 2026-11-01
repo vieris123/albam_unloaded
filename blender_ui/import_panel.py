@@ -39,7 +39,7 @@ def update_app_caches(self, context):
 
 @blender_registry.register_blender_prop_albam(name="apps")
 class AlbamApps(bpy.types.PropertyGroup):
-    app_selected : bpy.props.EnumProperty(name="", items=APPS, update=update_app_data)
+    app_selected : bpy.props.EnumProperty(name="", items=APPS, default="dmc4", update=update_app_data)
     app_dir : bpy.props.StringProperty(name="", description="", update=update_app_caches)
     app_config_filepath : bpy.props.StringProperty(name="", update=update_app_caches)
     mouse_x: bpy.props.IntProperty()
@@ -428,12 +428,7 @@ class ALBAM_OT_AppConfigPopup(bpy.types.Operator):
         layout = self.layout
 
         apps = context.scene.albam.apps
-        try:
-            app_index = apps["app_selected"]
-        except KeyError:
-            # default, before actually selecting
-            app_index = 0
-        app_selected_name = apps.bl_rna.properties["app_selected"].enum_items[app_index].name
+        app_selected_name = apps.bl_rna.properties["app_selected"].enum_items[apps.app_selected].name
         layout.label(text=f"{app_selected_name}")
         layout.row()
 

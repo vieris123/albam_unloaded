@@ -487,7 +487,9 @@ class ALBAM_PT_GameJoint(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return is_game_armature(context.object) and (context.bone is not None or context.edit_bone is not None)
+        # any armature: a rig too big for a model has its helper bones marked before New DMC4 Model numbers it
+        ob = context.object
+        return ob is not None and ob.type == "ARMATURE" and (context.bone is not None or context.edit_bone is not None)
 
     def draw(self, context):
         layout = self.layout

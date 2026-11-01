@@ -157,6 +157,10 @@ The game behaviour is known; Blender only approximates it. The other preview gap
   joint numbers and go after the model's own; renamed / reordered bones are fine. Check in the game: a model with a
   new bone weighted to some vertices, animated by an LMT track and driving a chain. Still refused: deleting a model's
   own bones (needs remapping every LMT / chain / .col / effect that refers to them).
+- [x] **Convert existing models.** Done 2026-11-01 (`new_model.update_model`, `texture_convert.py`, `lib/dxt.py`): New
+  DMC4 Model reads Base Color / Alpha / Normal / Specular / Roughness (packed channels too), encodes DDS itself (DXT1,
+  DXT5, DXT5nm, mips, the game's revisions) and splits multi-material meshes; export converts what's added later.
+  Green direction of normal maps follows the shader notes: not checked in the game yet.
 - [x] **Bones named after their joints.** Done 2026-10-31 (`joints.PLAYER_JOINTS`, `name_bones`): player-type
   skeletons import as `thumb_1_r`, `thigh_l` ... (checked on pl000 / pl006); Name Bones by Joint for older rigs;
   the Effect Editor's ParentNo shows the joint's name; a new bone's Game Joint panel says what its number is in the
