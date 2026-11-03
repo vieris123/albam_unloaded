@@ -21,8 +21,10 @@ added since is picked up:
   common in the game's files);
 - images that aren't DDS are converted (texture_convert.py);
 - images get the dmc4 app and a game path next to the model.
-New DMC4 Model also splits meshes with several materials: a mesh record has one material.
+New DMC4 Model and Update Materials & Textures also split meshes: a mesh record has one material and a bone palette of
+32 bones. Export doesn't (it changes no objects): its checks name the meshes instead.
 """
+from array import array
 import struct
 from pathlib import PureWindowsPath
 from types import SimpleNamespace
@@ -47,6 +49,8 @@ MAX_PATH = 63        # a texture path in the .mod's 64-byte table
 ATTR = {"NONE": ("0x10", 8), "TEST": ("0x8", 100), "BLEND": ("0x40", 8)}   # alpha use -> attr, alpha_ref (DX9 models)
 DEFAULT_POWER = 16.0 # SpecularPow when a roughness image varies over the surface
 WARNING = "! "       # notes starting with this are things to fix
+CUT_NORMALS = "albam_cut_normals"   # corner normals carried through a mesh split
+AUTO_PATH = "_albam_auto_path"      # on an image: the game path this code gave it, so a path set by hand is left alone
 SEPARATE_NODES = ("SEPARATE_COLOR", "SEPRGB", "SEPARATE_XYZ")
 
 
@@ -112,8 +116,34 @@ def root_candidate(ob):
 
 
 def default_path(name):
-    stem = "".join(c if c.isalnum() or c in "_-" else "_" for c in name.split(".")[0]).lower() or "model"
+    stem = texture_convert.game_name(name.split(".")[0], "model").lower()
     return f"model\\game\\{stem}\\{stem}.mod"
+
+
+def ascii_path(path):
+    """a game path with its non-ASCII parts replaced (ASCII parts are kept as they are, dots and all)"""
+    *folders, name = path.split("\\")
+    stem, dot, ext = name.rpartition(".")
+    parts = [p if p.isascii() else texture_convert.game_name(p, "model") for p in folders + [stem]]
+    return "\\".join(parts) + dot + ext
+
+
+def _path_in_use(path, root=None):
+    return any(model_root(o) is o and o is not root and o.albam_asset.relative_path.lower() == path.lower()
+               for o in bpy.data.objects)
+
+
+def _fix_model_path(root, notes):
+    """a model from before default_path kept to ASCII: the path, and with it the folder its textures get"""
+    old = root.albam_asset.relative_path
+    if old.isascii():
+        return
+    new, stem, n = ascii_path(old), ascii_path(old)[:-len(".mod")], 1
+    while _path_in_use(new, root):
+        n += 1
+        new = f"{stem}_{n}.mod"
+    root.albam_asset.relative_path = new
+    notes.append(f"game path changed to {new}: game paths are ASCII only")
 
 
 def _parent_keep_transform(ob, root):
@@ -311,6 +341,7 @@ def convert_material(mat, skinned, weights, notes, flip_green=False):
             if image is None:
                 notes.append(f"{WARNING}{mat.name}: can't read {base.image.name} (a missing file?)")
     if image is None:
+        use = "NONE"
         image = texture_convert.solid_image(mat.name, colour)
         notes.append(f"{mat.name}: no base texture, made a flat colour one")
     node = _image_node(nt, image, base, (x, y))
@@ -393,40 +424,81 @@ def _update_images(mat, flip_green, notes):
                 nt.links.new(node.outputs["Alpha"], group.inputs["Alpha NM"])
 
 
+def _follows_model(im, folder):
+    """True if the image's game path should move with its model: one made here (images converted before the path was
+    recorded count), not a game texture or a path set by hand"""
+    path = im.albam_asset.relative_path
+    if not path or im.albam_asset.original_bytes or str(PureWindowsPath(path).parent).lower() == folder.lower():
+        return False
+    stamp = im.get(AUTO_PATH)
+    return stamp == path if stamp is not None else texture_convert.RECIPE_PROP in im
+
+
 def _prepare_images(mat, folder, notes):
     """the material's images: the dmc4 app and, without one, a game path in the model's folder, unique and short
-    enough for the .mod's path table (no extension in the table: the export adds .tex)"""
+    enough for the .mod's path table (no extension in the table: the export adds .tex). A model given another path
+    takes its textures along (the .mod's table holds their full paths)."""
     for node in _image_nodes(mat):
         im = node.image
         if im.albam_asset.original_bytes and im.albam_asset.app_id != APP_ID:
             notes.append(f"{WARNING}{im.name}: a texture of another game ({im.albam_asset.app_id})")
             continue
         im.albam_asset.app_id = APP_ID
-        if im.albam_asset.relative_path:
+        old = im.albam_asset.relative_path
+        follow = _follows_model(im, folder)
+        if old and old.isascii() and not follow:
             continue
-        used = {other.albam_asset.relative_path.lower() for other in bpy.data.images}
-        stem = texture_convert.stem_of(im.name)[:max(1, MAX_PATH - len(folder) - 1)]
+        used = {other.albam_asset.relative_path.lower() for other in bpy.data.images if other != im}
+        name = PureWindowsPath(old).stem if follow else im.name
+        stem = texture_convert.stem_of(name)[:max(1, MAX_PATH - len(folder) - 1)]
         path, n = f"{folder}\\{stem}.tex", 1
         while path.lower() in used:
             n += 1
             path = f"{folder}\\{stem[:max(1, MAX_PATH - len(folder) - 4)]}_{n}.tex"
         im.albam_asset.relative_path = path
         im.albam_asset.extension = "tex"
+        im[AUTO_PATH] = path
+        if old:
+            notes.append(f"{im.name}: game path changed to {path}" + ("" if follow else ": game paths are ASCII only"))
 
 
-def _keep_material(ob, index):
-    """reduce a mesh to the faces of one material slot, which becomes its only slot"""
+def _keep_faces(ob, faces, slot=None):
+    """reduce a mesh to some of its faces (indices), and to one material slot if slot is given. The normals are kept as
+    they were: along the cut Blender would recompute them from fewer faces, and the game would show a seam."""
     me = ob.data
-    material = ob.material_slots[index].material
+    keep = set(faces)
+    cut = len(keep) < len(me.polygons)
+    material = ob.material_slots[slot].material if slot is not None else None
+    if cut:
+        normals = array("f", bytes(4 * 3 * len(me.loops)))
+        me.corner_normals.foreach_get("vector", normals)
+        me.attributes.new(CUT_NORMALS, "FLOAT_VECTOR", "CORNER").data.foreach_set("vector", normals)
     bm = bmesh.new()
     bm.from_mesh(me)
-    bmesh.ops.delete(bm, geom=[f for f in bm.faces if f.material_index != index], context="FACES")
-    for face in bm.faces:
-        face.material_index = 0
+    bmesh.ops.delete(bm, geom=[f for f in bm.faces if f.index not in keep], context="FACES")
+    if slot is not None:
+        for face in bm.faces:
+            face.material_index = 0
     bm.to_mesh(me)
     bm.free()
-    me.materials.clear()
-    me.materials.append(material)
+    if cut:
+        normals = array("f", bytes(4 * 3 * len(me.loops)))
+        me.attributes[CUT_NORMALS].data.foreach_get("vector", normals)
+        me.attributes.remove(me.attributes[CUT_NORMALS])
+        me.normals_split_custom_set([tuple(normals[i:i + 3]) for i in range(0, len(normals), 3)])
+    if slot is not None:
+        me.materials.clear()
+        me.materials.append(material)
+
+
+def _copy_mesh(ob, name):
+    """a copy of a mesh object with its own data: same parent, modifiers and collections"""
+    copy = ob.copy()
+    copy.data = ob.data.copy()
+    copy.name = name
+    for collection in ob.users_collection:
+        collection.objects.link(copy)
+    return copy
 
 
 def split_by_material(meshes, notes):
@@ -438,19 +510,66 @@ def split_by_material(meshes, notes):
         used = [i for i in used if i < len(ob.material_slots)]
         if len(ob.material_slots) < 2 or not used:
             continue
+        faces = {i: [p.index for p in ob.data.polygons if p.material_index == i] for i in used}
         for index in used[1:]:
-            copy = ob.copy()
-            copy.data = ob.data.copy()
             material = ob.material_slots[index].material
-            copy.name = f"{ob.name}_{material.name if material else index}"
-            for collection in ob.users_collection:
-                collection.objects.link(copy)
-            _keep_material(copy, index)
+            copy = _copy_mesh(ob, f"{ob.name}_{material.name if material else index}")
+            _keep_faces(copy, faces[index], index)
             made.append(copy)
         if len(used) > 1:
             notes.append(f"{ob.name}: split into {len(used)} meshes, one per material")
-        _keep_material(ob, used[0])
+        _keep_faces(ob, faces[used[0]], used[0])
     return made
+
+
+def _bone_parts(ob, names):
+    """[faces (indices)] per part, each weighted to at most MAX_MESH_BONES bones. Faces are grouped by the bones they
+    use, biggest sets first, each set going to the part it adds the fewest bones to: bones are local, so parts stay
+    in one piece. A single face over the limit (an n-gon) stays alone: export's check names it."""
+    limit = joints.MAX_MESH_BONES
+    bone_of = {vg.index: vg.name for vg in ob.vertex_groups if vg.name in names}
+    vertex_bones = [frozenset(bone_of[g.group] for g in v.groups if g.weight > 0 and g.group in bone_of)
+                    for v in ob.data.vertices]
+    by_bones = {}
+    for poly in ob.data.polygons:
+        key = frozenset().union(*(vertex_bones[i] for i in poly.vertices))
+        by_bones.setdefault(key, []).append(poly.index)
+    parts = []
+    for key in sorted(by_bones, key=lambda k: (-len(k), sorted(k))):
+        fitting = [p for p in parts if len(p["bones"] | key) <= limit]
+        part = min(fitting, key=lambda p: len(key - p["bones"]), default=None)
+        if part is None:
+            part = {"bones": set(), "faces": []}
+            parts.append(part)
+        part["bones"] |= key
+        part["faces"] += by_bones[key]
+    return [p["faces"] for p in parts]
+
+
+def split_by_bones(root, notes):
+    """split the meshes weighted to more bones than a bone palette holds. Returns the new objects."""
+    made = []
+    if root.type != "ARMATURE":
+        return made
+    names = {b.name for b in joints.joint_bones(root)}
+    for ob in joints.model_meshes(root):
+        count = len(joints.weighted_bones(ob, names))
+        if count <= joints.MAX_MESH_BONES:
+            continue
+        parts = _bone_parts(ob, names)
+        for n, faces in enumerate(parts[1:], 2):
+            copy = _copy_mesh(ob, f"{ob.name}_{n}")
+            _keep_faces(copy, faces)
+            made.append(copy)
+        _keep_faces(ob, parts[0])
+        notes.append(f"{ob.name}: weighted to {count} bones, split into {len(parts)} meshes")
+    return made
+
+
+def split_meshes(root, notes):
+    """one material and at most 32 bones per mesh"""
+    split_by_material(joints.model_meshes(root), notes)
+    split_by_bones(root, notes)
 
 
 def update_model(root, default_material=False):
@@ -459,13 +578,14 @@ def update_model(root, default_material=False):
     mesh with none is more likely a mistake). Returns notes, those starting with WARNING need the user."""
     from . import material as mtfw_material
     notes = []
+    _fix_model_path(root, notes)
     skinned = root.type == "ARMATURE"
     joint_names = {b.name for b in joints.joint_bones(root)} if skinned else set()
     flip_green = bool(root.get("mod_normal_directx"))
     folder = str(PureWindowsPath(root.albam_asset.relative_path).parent)
     default = None
     to_convert, ready = {}, []
-    for mesh_ob in (c for c in root.children_recursive if c.type == "MESH"):
+    for mesh_ob in joints.model_meshes(root):
         if default_material and not any(slot.material for slot in mesh_ob.material_slots):
             if default is None:
                 default = bpy.data.materials.new(f"{root.name}_material")
@@ -496,7 +616,8 @@ def setup_new_model(context, ob, path, normal_directx=False):
     path = path.strip().replace("/", "\\")
     if not path.lower().endswith(".mod"):
         path += ".mod"
-    if any(model_root(o) is o and o.albam_asset.relative_path.lower() == path.lower() for o in bpy.data.objects):
+    typed, path = path, ascii_path(path)
+    if _path_in_use(path):
         raise AlbamCheckFailure(f"{path} is already a model in this file", details=path,
                                 solution="Pick another game path")
     selected = [o for o in context.selected_objects if o.type == "MESH"]
@@ -516,12 +637,12 @@ def setup_new_model(context, ob, path, normal_directx=False):
             solution="Select the helper bones in Pose Mode and use Bone Properties > Game Joint > Mark Selected, or "
                      "move part of the model (hair, cloth) to its own armature and model")
     adopt = _meshes_to_adopt(context, root, selected)
-    owned = [c for c in root.children_recursive if c.type == "MESH"] if root is not None else []
+    owned = joints.model_meshes(root) if root is not None else []
     if not owned and not adopt:
         name = root.name if root is not None else (ob.name if ob is not None else "")
         raise AlbamCheckFailure(f"{name} has no meshes", details=name,
                                 solution="Parent the model's meshes to it first, or select them too")
-    notes = []
+    notes = [f"game path changed to {path}: game paths are ASCII only"] if path != typed else []
     if root is None:
         root = bpy.data.objects.new(PureWindowsPath(path).stem, None)
         root.empty_display_type = "PLAIN_AXES"
@@ -535,7 +656,6 @@ def setup_new_model(context, ob, path, normal_directx=False):
         notes.append(f"{WARNING}{root.name} is scaled {tuple(round(s, 3) for s in root.scale)}: bones ignore that "
                      "scale. Apply it (Object > Apply > Scale)")
 
-    split_by_material([c for c in root.children_recursive if c.type == "MESH"], notes)
     if root.type == "ARMATURE":
         numbered = joints.number_new_rig(root)
         if numbered:
@@ -546,6 +666,7 @@ def setup_new_model(context, ob, path, normal_directx=False):
     asset.relative_path = path
     asset.extension = "mod"
     asset.original_bytes = blank_mod153()
+    split_meshes(root, notes)
     if normal_directx:
         root["mod_normal_directx"] = 1
     notes += update_model(root, default_material=True)
@@ -578,7 +699,7 @@ class ALBAM_OT_ModNew(bpy.types.Operator):
     path: bpy.props.StringProperty(
         name="Game Path",
         description="Where the model goes in the game, with .mod (e.g. model\\game\\mymodel\\mymodel.mod). Its new "
-                    "textures go in the same folder")
+                    "textures go in the same folder. English letters, digits, _ and - only: anything else is replaced")
     normal_directx: bpy.props.BoolProperty(
         name="DirectX Normal Maps",
         description="Turn on if the model's normal maps are made the DirectX way (green pointing down, usual for "
@@ -609,8 +730,9 @@ class ALBAM_OT_ModNew(bpy.types.Operator):
 
 @blender_registry.register_blender_type
 class ALBAM_OT_ModUpdate(bpy.types.Operator):
-    """Convert what's new on this model now: materials without the DMC4 shader, images that aren't DDS, and textures
-    whose source image changed. Export does this by itself; use it to see the result in the viewport first"""
+    """Bring this model up to date: split meshes with several materials or more than 32 bones, and convert materials
+    without the DMC4 shader, images that aren't DDS and textures whose source image changed. Export does the
+    conversions by itself, but only this splits meshes"""
     bl_idname = "albam.mod_update"
     bl_label = "Update Materials & Textures"
     bl_options = {"REGISTER", "UNDO"}
@@ -621,7 +743,9 @@ class ALBAM_OT_ModUpdate(bpy.types.Operator):
 
     def execute(self, context):
         root = model_root(context.object)
-        notes = update_model(root)
+        notes = []
+        split_meshes(root, notes)
+        notes += update_model(root)
         _report_notes(self, root, notes, f"{root.name}: {len(notes)} change(s)" if notes else f"{root.name} is up to date")
         return {"FINISHED"}
 
@@ -639,15 +763,17 @@ class ALBAM_PT_NewModel(bpy.types.Panel):
         if ob is None:
             return False
         root = model_root(ob)
-        return (root is not None and root.get("mod_new_notes") is not None) or ALBAM_OT_ModNew.poll(context)
+        return (root is not None and root.albam_asset.app_id == APP_ID) or ALBAM_OT_ModNew.poll(context)
 
     def draw(self, context):
         layout = self.layout
         root = model_root(context.object)
         if root is not None:
             notes = root.get("mod_new_notes", "")
-            layout.label(text=f"New model: {root.albam_asset.relative_path}", icon="OBJECT_DATA")
+            layout.label(text=f"Model: {root.albam_asset.relative_path}", icon="OBJECT_DATA")
             layout.operator("albam.mod_update", icon="FILE_REFRESH")
+            if root.type == "ARMATURE":
+                layout.operator("albam.match_skeleton", icon="ARMATURE_DATA")
             for note in notes.split("\n") if notes else []:
                 warn = note.startswith(WARNING)
                 layout.label(text=note[len(WARNING):] if warn else note, icon="ERROR" if warn else "INFO")

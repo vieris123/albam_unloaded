@@ -132,6 +132,16 @@ The game behaviour is known; Blender only approximates it. The other preview gap
   - [ ] Effects picked from Game Files / the scene's effects; joints by name (the runner reads self / weapon only).
   - [ ] Check an authored move in the game (Write XML + Reload in the runner's panel). Nothing tested in-game yet.
 
+- [ ] **ModelExtension lists: Albam's share (started 2026-11-03).** `nativePC\model_ext\*.xml`, run by dmc4_hook's
+  ModelExtension, which owns the format.
+  - [x] **Lists in Blender** (`engines/mtfw/movedef/ext_list.py`, `engines/mtfw/model_ext.py`): `EXT_<file>` objects in
+    the Export list, byte-for-byte text, Object Properties panel, checks (including a collision model that isn't out
+    when its chain spawns), Fill from Scene, attachment preview (skin, rigid). Tests: `test_model_ext`,
+    `corpus/ext_list_check`. On Ellen's file Fill gives all 14 installed entries; her 4 lists round-trip.
+  - [ ] **Check the rigid preview against the game.** The formula comes from the runner and the joint-frame rule; no
+    rigid attachment has been compared in-game.
+  - [ ] **Constraints (Cns):** new list elements and their preview, once the runner's spec lands (`Vibed\ModelExt\schema.md`).
+
 - [ ] **Hitboxes (saved for later, 2026-10-10).** Four file types keyed to a model's joints, already mined in IDA
   (per the user) and described by 010 templates in `E:\DMC mod stuffs\DMC4 templates`:
   - `.col` = `rCollisionShape` (shapes): codec done (`dmc4xml/col.py`, byte-exact on 110 DX9 files); Blender import,
@@ -157,9 +167,15 @@ The game behaviour is known; Blender only approximates it. The other preview gap
   joint numbers and go after the model's own; renamed / reordered bones are fine. Check in the game: a model with a
   new bone weighted to some vertices, animated by an LMT track and driving a chain. Still refused: deleting a model's
   own bones (needs remapping every LMT / chain / .col / effect that refers to them).
+- [x] **Match Game Skeleton.** Done 2026-11-02 (`skeleton_match.py`, `docs/new_model.md`): a rig from elsewhere takes a
+  game model's parents and rest frames, is posed (T-pose, shape keys too) and scaled to it, so its LMTs play as on the
+  game's model. Check in the game: a matched model replacing `pl006`, shoulders and wrists first. Twist bones stay in the
+  mesh without a track (MMD's Transform constraints are muted), so forearm twist collapses as it does on any
+  skinned model without them; a rig could feed them from the hand's rotation at export if it shows.
 - [x] **Convert existing models.** Done 2026-11-01 (`new_model.update_model`, `texture_convert.py`, `lib/dxt.py`): New
   DMC4 Model reads Base Color / Alpha / Normal / Specular / Roughness (packed channels too), encodes DDS itself (DXT1,
-  DXT5, DXT5nm, mips, the game's revisions) and splits multi-material meshes; export converts what's added later.
+  DXT5, DXT5nm, mips, the game's revisions) and splits multi-material meshes and meshes over 32 bones; export converts what's added later and names what
+  it can't take.
   Green direction of normal maps follows the shader notes: not checked in the game yet.
 - [x] **Bones named after their joints.** Done 2026-10-31 (`joints.PLAYER_JOINTS`, `name_bones`): player-type
   skeletons import as `thumb_1_r`, `thigh_l` ... (checked on pl000 / pl006); Name Bones by Joint for older rigs;

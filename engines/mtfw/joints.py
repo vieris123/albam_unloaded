@@ -33,6 +33,7 @@ MIRROR_PROP = "mtfw.mirror"        # a new bone's mirror: bone name, "" = automa
 NOT_JOINT_PROP = "mtfw.not_joint"  # helper bones the game shouldn't get
 RESERVED = (254, 255)              # 255 = root motion in LMTs, 254 = skipped by LMT import
 MAX_BONES = 255                    # indices 0-254; 255 means "no parent / no mirror"
+MAX_MESH_BONES = 32                # bones a mesh can be weighted to: a bone palette's size
 HELPER_NAMES = ("root_motion",)
 HELPER_PREFIXES = ("IKP_", "IK_Foot")
 # the game's model space (Y up) in Blender's armature space: a root joint's frame (animation.GAME_FRAME)
@@ -55,6 +56,19 @@ def is_helper(bone):
 def joint_bones(armature_ob):
     """the armature's bones that are game joints, in Blender's order (parents before children)"""
     return [b for b in armature_ob.data.bones if not is_helper(b)]
+
+
+def model_meshes(root):
+    """the meshes of a model: under its root, without the wire tubes that show a .col's capsules (col_shapes), which sit
+    under the armature too but aren't part of it"""
+    return [c for c in root.children_recursive if c.type == "MESH" and "col_root" not in c]
+
+
+def weighted_bones(mesh_ob, names):
+    """the bones of `names` a mesh is really weighted to: what its bone palette needs. A zero weight never reaches
+    the game (the vertex export skips it)"""
+    groups = {g.group for v in mesh_ob.data.vertices for g in v.groups if g.weight > 0}
+    return {vg.name for vg in mesh_ob.vertex_groups if vg.index in groups and vg.name in names}
 
 
 def is_game_armature(armature_ob):
@@ -101,7 +115,19 @@ def _player_joints():
 
 
 PLAYER_JOINTS = _player_joints()
+# numbers the player LMTs have tracks for without a joint in the body's table: the face model's, which shares the LMT.
+# A new bone on them would follow the face tracks (every pl000 motion file, 2026-11-02)
+PLAYER_FACE_TRACKS = range(155, 166)
 CORE_JOINTS = range(22)   # body, arms and legs: a rig is a player-type skeleton when these all match
+# Body joints the game's code reads straight from mJointTable, with no check that the joint exists: 255 gives a null
+# joint and a cCnsMatrix source of 0x50, read on the first frame (cCnsMatrix::adjust 0x443430). The face, hair and coat
+# pin to them (uPlayerDante::setupDanteModel 0x7B54D0, setupMajinModel 0x7B61C0, uPlayerNero::initModel 0x7E3760), and
+# so do Lucifer's and Gilgamesh's parts (setCnstJoint 0x835E10 / 0x833760).
+_DANTE_NEEDS = (0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 16, 20, 200, 204)
+NEEDED_JOINTS = {"pl006": _DANTE_NEEDS, "pl009": _DANTE_NEEDS, "pl000": (2, 3, 4, 5, 9)}
+# what weapons hang on (uCoord mParentNo): the hands' props, and the back (the Red Queen's table dword_C3BB18 = 152, 150,
+# 151). These are looked up safely, so a missing one crashes nothing: the weapon just sits at the model's root
+WEAPON_JOINTS = (150, 151, 152)
 UNNAMED = "joint_{}"      # what Name Bones calls a joint the table has no name for
 
 
@@ -289,6 +315,8 @@ def ensure_joint_numbers(armature_ob):
     renumbered = {b.name for b in needs}
     taken = {joint_of(b) for b in bones if b.name not in renumbered and joint_of(b) is not None}
     taken |= set(RESERVED) | _reserved_by_lmts(armature_ob)
+    if game_joint_names(armature_ob):       # the LMTs may not be imported, but the game plays them all the same
+        taken |= set(PLAYER_JOINTS) | set(PLAYER_FACE_TRACKS)
     free = [j for j in range(253, -1, -1) if j not in taken]
     if len(free) < len(needs):
         raise AlbamCheckFailure(
@@ -427,17 +455,26 @@ def _get_number(self):
     return -1 if j is None else j
 
 
-def _set_number(self, value):
-    """refuses numbers another bone of the armature has, and the reserved ones (no way to report from a setter:
-    the field just keeps its value)"""
-    bone = _data_bone(self)
-    if bone is None or value in RESERVED or not 0 <= value <= 253:
-        return
-    arm = bone.id_data
-    if any(joint_of(b) == value for b in arm.bones if b != bone):
-        return
+def take_number(bone, value):
+    """give bone a joint number; bones that have it lose theirs (-1: the next export gives them a free one). Returns
+    their names, or None if one is from the game file (fixed): export needs it, so nothing changes."""
+    holders = [b for b in bone.id_data.bones if b != bone and joint_of(b) == value]
+    if any(from_game_file(b) for b in holders):
+        return None
+    for b in holders:
+        del b[JOINT_PROP]
+        b.pop(ADDED_PROP, None)
     bone[JOINT_PROP] = str(value)
     bone[ADDED_PROP] = 1
+    return [b.name for b in holders]
+
+
+def _set_number(self, value):
+    """refuses the reserved numbers and game-file bones' (no way to report from a setter: the field just keeps its
+    value)"""
+    bone = _data_bone(self)
+    if bone is not None and value not in RESERVED and 0 <= value <= 253:
+        take_number(bone, value)
 
 
 def _get_mirror(self):
@@ -467,7 +504,8 @@ class AlbamGameJoint(bpy.types.PropertyGroup):
     number: bpy.props.IntProperty(
         name="Joint Number", get=_get_number, set=_set_number, min=-1, max=253,
         description="The number LMT tracks, chains, collision shapes and effects use for this bone. -1: none yet "
-                    "(given on export, the highest free number). Another bone's number, 254 and 255 are refused")
+                    "(given on export, the highest free number). A number another bone has moves to this bone and "
+                    "that bone goes to -1. Refused: a game file bone's number, 254 and 255")
     mirror: bpy.props.StringProperty(
         name="Mirror Bone", get=_get_mirror, set=_set_mirror,
         description="The bone mirrored animations swap this one with (left / right pairs). Empty: automatic (the "
@@ -598,7 +636,7 @@ def _joint_items(self, context):
         if user == self.bone:
             label += "  (this bone)"
         elif user is not None:
-            label += f"  (used by {user})"
+            label += f"  (game bone {user}, fixed)" if from_game_file(ob.data.bones[user]) else f"  (replaces {user})"
         _choice_items.append((str(j), label, ""))
     return _choice_items
 
@@ -608,8 +646,9 @@ class ALBAM_OT_PickJointNumber(bpy.types.Operator):
     bl_idname = "albam.pick_joint_number"
     bl_label = "Pick Joint Number"
     bl_description = ("Search the player skeleton's joint numbers by name (14 thigh_r, 100 thumb_1_r ...) and give "
-                      "one to this bone. Numbers another bone already has are marked and refused. A rig that uses "
-                      "the player's numbers can play the player's animations")
+                      "one to this bone. A bone that has the number goes to -1 and gets a free one at the next "
+                      "export; bones of the game file are fixed and refused. A rig that uses the player's numbers can "
+                      "play the player's animations")
     bl_options = {"REGISTER", "UNDO", "INTERNAL"}
     bl_property = "joint"
 
@@ -628,13 +667,13 @@ class ALBAM_OT_PickJointNumber(bpy.types.Operator):
             self.report({"ERROR"}, "The bone is gone")
             return {"CANCELLED"}
         value = int(self.joint)
-        user = next((b.name for b in joint_bones(ob) if joint_of(b) == value and b.name != self.bone), None)
-        if user is not None:
-            self.report({"ERROR"}, f"Joint {value} is already bone {user}'s")
+        replaced = take_number(pose_bone.bone, value)
+        if replaced is None:
+            self.report({"ERROR"}, f"Joint {value} belongs to a bone of the game file, which can't be replaced")
             return {"CANCELLED"}
-        pose_bone.albam_joint.number = value
         hint = player_joint_hint(value)
-        self.report({"INFO"}, f"{self.bone}: joint {value}" + (f" ({hint})" if hint else ""))
+        self.report({"INFO"}, f"{self.bone}: joint {value}" + (f" ({hint})" if hint else "") +
+                    (f"; {', '.join(replaced)} now has none (-1)" if replaced else ""))
         return {"FINISHED"}
 
 

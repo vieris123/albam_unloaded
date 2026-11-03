@@ -17,6 +17,7 @@ from albam.lib.dds import DDSHeader
 from albam.registry import blender_registry
 from albam.vfs import VirtualFileData
 # from .defines import get_shader_objects
+from .joints import model_meshes
 from .structs.tex_112 import Tex112
 from .structs.tex_157 import Tex157
 from .structs.rtex_112 import Rtex112
@@ -843,7 +844,7 @@ def check_dds_textures(func):
         if not bl_objects:
             result = func(*args, **kwargs)
         # No more than one root object in export functions
-        meshes = [c for c in bl_objects[0].children_recursive if c.type == "MESH"]
+        meshes = model_meshes(bl_objects[0])
         materials = get_bl_materials(meshes)
         images = get_bl_teximage_nodes(materials)
         non_dds = []

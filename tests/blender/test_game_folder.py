@@ -1,4 +1,5 @@
-"""Headless test: Save to Game Folder writes an export's files at their game paths."""
+"""Headless test: Save to Game Folder writes an export's files at their game paths. Save (one file) only offers a file
+row: an export's top row and folders have no file of their own."""
 import os, sys  # noqa: E401
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # tests/: common.py
 import common  # noqa: E402  (game data / add-on / output paths)
@@ -67,6 +68,19 @@ try:
     vfs.file_list_selected_index = len(vfs.file_list) - 1   # a leaf: the whole export is still saved
     bpy.ops.albam.save_to_game_folder()
     check(open(efl_path, "rb").read() == data, "saving again replaces the file (leaf selected)")
+
+    # Save writes the one selected file; a row without a file of its own isn't offered
+    rows = list(vfs.file_list)
+    vfs.file_list_selected_index = root_index
+    check(not bpy.ops.albam.save_file_exported.poll(), "Save is off on the export's top row")
+    vfs.file_list_selected_index = next(i for i, vf in enumerate(rows) if vf.is_expandable and not vf.is_root)
+    check(not bpy.ops.albam.save_file_exported.poll(), "Save is off on a folder row")
+    leaf = next(i for i, vf in enumerate(rows) if vf.relative_path.lower().endswith(".efl"))
+    vfs.file_list_selected_index = leaf
+    check(bpy.ops.albam.save_file_exported.poll(), "Save is on for a file row")
+    single = os.path.join(OUT, "single.efl")
+    bpy.ops.albam.save_file_exported(filepath=single)
+    check(open(single, "rb").read() == data, "Save writes the selected file")
 
     # paths that would leave the folder are refused
     check(export_panel.target_path(OUT, "../evil.efl") is None, "'..' is refused")

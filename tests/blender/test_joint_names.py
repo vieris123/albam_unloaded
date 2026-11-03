@@ -130,10 +130,32 @@ try:
             bpy.ops.albam.pick_joint_number("EXEC_DEFAULT", armature=nero.name, bone="extra", joint="14")
             refused = False
         except RuntimeError as e:   # an ERROR report raises from bpy.ops
-            refused = "already" in str(e)
+            refused = "game file" in str(e)
     check(free is not None and result == {"FINISHED"} and joints.joint_of(nero.data.bones["extra"]) == free,
           f"picking a free joint ({free}) numbers the bone")
-    check(refused and joints.joint_of(nero.data.bones["extra"]) == free, "a used joint is refused")
+    check(refused and joints.joint_of(nero.data.bones["extra"]) == free, "a game file bone's joint is refused")
+
+    # a number another added bone has moves over: that bone goes to -1, and export numbers it again
+    bpy.ops.object.mode_set(mode="EDIT")
+    eb = nero.data.edit_bones.new("extra2")
+    eb.head, eb.tail, eb.parent = (0, 0, 1), (0, 0, 1.1), nero.data.edit_bones["extra"]
+    bpy.ops.object.mode_set(mode="POSE")
+    with bpy.context.temp_override(object=nero, active_object=nero):
+        result = bpy.ops.albam.pick_joint_number("EXEC_DEFAULT", armature=nero.name, bone="extra2", joint=str(free))
+    extra, extra2 = nero.data.bones["extra"], nero.data.bones["extra2"]
+    check(result == {"FINISHED"} and joints.joint_of(extra2) == free and joints.joint_of(extra) is None and
+          nero.pose.bones["extra"].albam_joint.number == -1, "the picker replaces another added bone, which goes to -1")
+    nero.pose.bones["extra"].albam_joint.number = free
+    check(joints.joint_of(extra) == free and nero.pose.bones["extra2"].albam_joint.number == -1,
+          "so does typing the number")
+    game_bone = nero.data.bones[by_joint(nero)[14]]
+    nero.pose.bones["extra"].albam_joint.number = 14
+    check(joints.joint_of(extra) == free and joints.joint_of(game_bone) == 14, "typing a game file bone's number is refused")
+    numbered = dict(joints.ensure_joint_numbers(nero))
+    check(numbered.get("extra2") not in (None, free), f"the replaced bone gets a free number on export ({numbered})")
+    bpy.ops.object.mode_set(mode="EDIT")
+    nero.data.edit_bones.remove(nero.data.edit_bones["extra2"])
+    bpy.ops.object.mode_set(mode="POSE")
 
     class Stub:
         def __init__(self):

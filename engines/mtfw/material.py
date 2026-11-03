@@ -13,6 +13,7 @@ from albam.registry import blender_registry
 from albam.vfs import VirtualFileData, VirtualFile
 from albam.rfs import RealFile
 from .defines import get_shader_objects
+from .joints import model_meshes
 from .structs.mrl import Mrl
 from .texture import (
     assign_textures,
@@ -1764,7 +1765,7 @@ def check_mtfw_shader_group(func):
         if not bl_objects:
             result = func(*args, **kwargs)
         # No more than one root object in export functions
-        meshes = [c for c in bl_objects[0].children_recursive if c.type == "MESH"]
+        meshes = model_meshes(bl_objects[0])
         materials = get_bl_materials(meshes)
         checks = [_has_mtfw_shader_group(m) for m in materials]
         if not all(checks):

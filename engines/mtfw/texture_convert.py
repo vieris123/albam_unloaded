@@ -39,10 +39,16 @@ _EXTENSIONS = re.compile(r"\.(png|jpe?g|tga|bmp|tiff?|exr|hdr|dds|webp)$", re.IG
 _COPY_SUFFIX = re.compile(r"\.\d{3,}$")
 
 
+def game_name(name, fallback):
+    """name as one part of a game path: the .mod's path table is ASCII. A name with no ASCII letter or digit (a Japanese
+    one, say) gives fallback, not a row of underscores"""
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", name)
+    return safe if re.search(r"[A-Za-z0-9]", safe) else fallback
+
+
 def stem_of(name):
     """an image name as a file stem: no Blender .001 suffix, no extension, only characters safe in a game path"""
-    stem = _EXTENSIONS.sub("", _COPY_SUFFIX.sub("", name))
-    return re.sub(r"[^A-Za-z0-9_-]", "_", stem) or "texture"
+    return game_name(_EXTENSIONS.sub("", _COPY_SUFFIX.sub("", name)), "texture")
 
 
 def _linear_to_srgb(c):

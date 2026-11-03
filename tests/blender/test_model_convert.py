@@ -6,7 +6,9 @@
   alpha), mask (1 - roughness from a packed channel), with the game's .tex revision, mips, power-of-two size and range;
 - a mesh with two materials is split, a colour-only material gets a flat texture, a static mesh's second UV is its
   first (the game's files have it so, its shader samples normal maps there);
-- a PNG put in a slot later is converted by the export, and a repainted source is re-encoded (only then)."""
+- a PNG put in a slot later is converted by the export, and a repainted source is re-encoded (only then);
+- a mesh weighted to more than 32 bones is split, with its normals along the cuts unchanged; added later, export names
+  it instead of changing it, and Update Materials & Textures splits it; zero weights don't count."""
 import os, sys  # noqa: E401
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # tests/: common.py
 import common  # noqa: E402  (game data / add-on / output paths)
@@ -287,6 +289,133 @@ try:
     check(node.image.name == name and np.abs(read(node.image)[..., 0] - 255).max() < 6,
           "repainting the source re-encodes it, under the same name")
     check(node.image.albam_asset.relative_path, "it keeps its game path")
+
+    # more bones than a palette holds: a smooth strip with a bone per row
+    def strip(name, arm, rows=80):
+        verts = [(x * 0.1, y * 0.1, 0.1 * np.sin(y * 0.4) + 0.05 * np.sin(x * 2.0)) for y in range(rows + 1) for x in range(4)]
+        faces = [(y * 4 + x, y * 4 + x + 1, (y + 1) * 4 + x + 1, (y + 1) * 4 + x) for y in range(rows) for x in range(3)]
+        me = bpy.data.meshes.new(name)
+        me.from_pydata(verts, [], faces)
+        me.update()
+        me.polygons.foreach_set("use_smooth", [True] * len(faces))
+        ob = bpy.data.objects.new(name, me)
+        scene.collection.objects.link(ob)
+        me.materials.append(material(name + "_mat", colour=(0.5, 0.5, 0.5, 1.0)))
+        for y in range(rows):
+            group = ob.vertex_groups.new(name=f"b{y}")
+            group.add([y * 4 + x for x in range(8)], 1.0, "REPLACE")
+        ob.parent = arm
+        ob.modifiers.new("Armature", "ARMATURE").object = arm
+        return ob
+
+    def normals_at(ob):
+        """position -> corner normals, rounded"""
+        me = ob.data
+        out = {}
+        for loop in me.loops:
+            key = tuple(round(c, 4) for c in me.vertices[loop.vertex_index].co)
+            out.setdefault(key, set()).add(tuple(round(c, 2) for c in me.corner_normals[loop.index].vector))
+        return out
+
+    long_rig = rig("long", bones=80)
+    hair = strip("hair", long_rig)
+    wanted = normals_at(hair)
+    bpy.ops.object.select_all(action="DESELECT")
+    bpy.context.view_layer.objects.active = long_rig
+    long_root, notes = new_model.setup_new_model(bpy.context, long_rig, r"model\game\mine\long.mod")
+    parts = [c for c in long_root.children_recursive if c.type == "MESH"]
+    names = {b.name for b in joints.joint_bones(long_root)}
+    counts = [len(joints.weighted_bones(p, names)) for p in parts]
+    check(len(parts) > 1 and max(counts) <= 32, f"a mesh on 80 bones is split, each part on at most 32 ({counts})")
+    check(sum(len(p.data.polygons) for p in parts) == 240, "no faces lost")
+    check(set().union(*(joints.weighted_bones(p, names) for p in parts)) == names, "every bone still used")
+    seen = {}
+    for p in parts:
+        for key, value in normals_at(p).items():
+            seen.setdefault(key, set()).update(value)
+    check(set(seen) == set(wanted) and all(seen[k] <= wanted[k] for k in wanted), "normals along the cuts are unchanged")
+    check(export(long_root) and all(len(p.vertex_groups) == 80 for p in parts), "the split model exports")
+
+    late = strip("late_hair", long_root)
+    try:
+        export(long_root)
+        check(False, "export refuses a mesh over 32 bones")
+    except AlbamCheckFailure as e:
+        check("late_hair (80 bones)" in e.details and "Update Materials" in e.solution,
+              f"export names the mesh over 32 bones ({e.details})")
+    check(len(late.data.polygons) == 240, "and leaves it alone")
+    bpy.context.view_layer.objects.active = late
+    with bpy.context.temp_override(object=late, active_object=late):
+        result = bpy.ops.albam.mod_update()
+    check(result == {"FINISHED"} and export(long_root), "Update Materials & Textures splits it and the model exports")
+
+    light = strip("light", rig("zero", bones=80))
+    keep = {vg.name for vg in light.vertex_groups[:10]}
+    for vg in light.vertex_groups:
+        if vg.name not in keep:
+            vg.add(list(range(len(light.data.vertices))), 0.0, "REPLACE")
+    check(len(joints.weighted_bones(light, {f"b{i}" for i in range(80)})) == 10, "zero weights don't count")
+    # names outside ASCII (models from Japanese tools): the .mod's path table can't hold them
+    jp = "初音"
+    check(new_model.default_path(jp) == r"model\game\model\model.mod" and
+          new_model.default_path(jp + "_v2.001") == r"model\game\___v2\___v2.mod", "default paths are ASCII")
+    check(new_model.ascii_path("model\\game\\" + jp + "\\a.b.mod") == r"model\game\model\a.b.mod" and
+          new_model.ascii_path("model\\game\\a.b\\" + jp + ".mod") == r"model\game\a.b\model.mod",
+          "only the parts outside ASCII change")
+    kanji = png("skin_jp", (8, 8), lambda x, y: (x, y, 0 * x, 1.0 + 0 * x))
+    kanji.name = "髪.png"
+    arm_jp = rig(jp)
+    mesh_jp = grid(jp + "_mesh", [material(jp + "_mat", kanji)])
+    weigh(mesh_jp, arm_jp)
+    bpy.context.view_layer.objects.active = arm_jp
+    root_jp, notes_jp = new_model.setup_new_model(bpy.context, arm_jp, new_model.default_path(arm_jp.name))
+    files = export(root_jp)
+    check(root_jp.albam_asset.relative_path == r"model\game\model\model.mod" and
+          parse(files, root_jp).materials_data.textures == [r"model\game\model\texture_BM"],
+          "a model with Japanese names exports with ASCII paths")
+    arm_typed = rig("typed")
+    weigh(grid("typed_mesh", [material("typed_mat", colour=(1, 0, 0, 1))]), arm_typed)
+    bpy.context.view_layer.objects.active = arm_typed
+    root_typed, notes_typed = new_model.setup_new_model(bpy.context, arm_typed, "model\\game\\typed\\" + jp + ".mod")
+    check(root_typed.albam_asset.relative_path == r"model\game\typed\model.mod" and
+          any("game path changed" in n for n in notes_typed), "a typed path is made ASCII, and says so")
+
+    # a file saved with the old default path: Export alone puts it right
+    bad_folder = "model\\game\\" + jp
+    root_jp.albam_asset.relative_path = bad_folder + "\\" + jp + ".mod"
+    dds_jp = texture_of(mesh_jp.material_slots[0].material, "Diffuse BM").image
+    dds_jp.albam_asset.relative_path = bad_folder + "\\texture_BM.tex"
+    entry = next(i for i in scene.albam.exportable.file_list if i.bl_object == root_jp)
+    ALBAM_OT_Export._execute(bpy.context, entry)
+    check(root_jp.albam_asset.relative_path == r"model\game\model\model.mod" and
+          dds_jp.albam_asset.relative_path == r"model\game\model\texture_BM.tex",
+          "an old non-ASCII path is fixed by the Export button")
+
+    # an image that can't be read (a file that's gone): a warning and a flat colour, not a crash
+    gone = bpy.data.images.new("gone", 4, 4)
+    gone.source = "FILE"
+    gone.filepath = "//not_on_disk.png"
+    arm_gone = rig("gone_rig")
+    weigh(grid("gone_mesh", [material("gone_mat", gone)]), arm_gone)
+    bpy.context.view_layer.objects.active = arm_gone
+    _, notes_gone = new_model.setup_new_model(bpy.context, arm_gone, r"model\game\gone\gone.mod")
+    check(any(n.startswith(new_model.WARNING) and "can't read" in n for n in notes_gone), "an unreadable image is reported, not a crash")
+
+    # a model given another path takes its textures with it: the .mod's table holds their full paths
+    root_jp.albam_asset.relative_path = r"model\game\other\other.mod"
+    files = export(root_jp)
+    check(dds_jp.albam_asset.relative_path == r"model\game\other\texture_BM.tex" and
+          parse(files, root_jp).materials_data.textures == [r"model\game\other\texture_BM"] and
+          any(f.relative_path.lower() == r"model\game\other\texture_bm.tex" for f in files),
+          "textures follow the model's new folder")
+    del dds_jp[new_model.AUTO_PATH]             # converted before the path was recorded, as in older files
+    root_jp.albam_asset.relative_path = r"model\game\third\third.mod"
+    export(root_jp)
+    check(dds_jp.albam_asset.relative_path == r"model\game\third\texture_BM.tex", "older converted textures follow too")
+    dds_jp.albam_asset.relative_path = r"model\game\shared\skin.tex"
+    export(root_jp)
+    check(dds_jp.albam_asset.relative_path == r"model\game\shared\skin.tex", "a path set by hand stays")
+
 except Exception:
     traceback.print_exc()
     failures.append("exception")

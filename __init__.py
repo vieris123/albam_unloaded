@@ -40,6 +40,7 @@ def register():
     importlib.import_module("albam.engines.mtfw.mesh")
     importlib.import_module("albam.engines.mtfw.model_settings")
     importlib.import_module("albam.engines.mtfw.new_model")
+    importlib.import_module("albam.engines.mtfw.skeleton_match")
     importlib.import_module("albam.engines.mtfw.effect")
     importlib.import_module("albam.engines.mtfw.effect_export")
     importlib.import_module("albam.engines.mtfw.effect_editor")
@@ -53,6 +54,7 @@ def register():
     importlib.import_module("albam.engines.mtfw.col_shapes")
     importlib.import_module("albam.engines.mtfw.cns_chain_preview")
     importlib.import_module("albam.engines.mtfw.movedef_blender")
+    importlib.import_module("albam.engines.mtfw.model_ext")
     importlib.import_module("albam.blender_ui.foot_ik")
     if os.getenv("ALBAM_ENABLE_REEN"):
         importlib.import_module("albam.engines.reng.archive")

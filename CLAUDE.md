@@ -264,8 +264,9 @@ This reproduces the game's player foot planting (`cLegIkCtrl` + `cCnsIK`, see `V
     its new parent. Bones added in Blender go after them, parents first (`export_layout`; Blender itself orders
     bones by hierarchy, so a new child shifts its indices: palettes, vertex weights and weight bounds all use the
     layout's name -> index map, `dst_mod._albam_bone_index`, not Blender's order). A new bone gets the highest free
-    joint number below 254 (`ensure_joint_numbers`: skips the armature's numbers and the joints the scene's LMTs
-    keep for the character's other models; also run by LMT export, New Chain, chain export / preview / a bone assigned to a
+    joint number below 254 (`ensure_joint_numbers`: skips the armature's numbers, the joints the scene's LMTs
+    keep for the character's other models and, on a player-type rig, the player table and the face tracks 155-165 whether
+    an LMT is imported or not (skirt bones landed on them and followed the face); also run by LMT export, New Chain, chain export / preview / a bone assigned to a
     chain's collection, Add Sphere / Capsule and effect parenting, so a new bone can be animated / chained / collided / effect-parented before the .mod is exported);
     a Shift+D copy carries its original's number and is renumbered (the bone without a `.001` suffix keeps it).
     New-bone fields: parent index, mirror (Bone Properties > Game Joint pick, else the bone at the reflected
@@ -286,7 +287,8 @@ This reproduces the game's player foot planting (`cLegIkCtrl` + `cCnsIK`, see `V
     matches by joint number / vertex group name, so the .mod and LMT bytes don't change (test). Older rigs: Bone
     Properties > Game Joint > **Name Bones by Joint**; `joint_label` / the Effect Editor's ParentNo show names. A
     bone added in Blender shows `player_joint_hint` (its number in the player skeleton, with the expected parent) and
-    a search picker of the player joints (`albam.pick_joint_number`, `joint_choices`, used ones marked and refused).
+    a search picker of the player joints (`albam.pick_joint_number`, `joint_choices`; `take_number`: a number an added bone has moves over and that bone goes to -1, a game-file bone's
+    is refused, since export would miss it).
     Not a Game Joint: Mark / Unmark Selected (`albam.set_not_joint`); bones from the game file (`from_game_file`:
     a joint number without `mtfw.added`) can't be marked, by the operator or the checkbox (export would refuse
     them as deleted). Export ignores bone visibility on purpose (hiding is a view state). The
@@ -300,7 +302,10 @@ This reproduces the game's player foot planting (`cLegIkCtrl` + `cCnsIK`, see `V
     generated blank v153 file (`blank_mod153`: 0x90 bytes, no bones / groups / meshes, LOD 1000 / 3000, light group 3,
     the values every DX9 model has); export then builds everything as for an imported model. Bones without a joint
     number get 0, 1, 2... in bone order (`joints.number_new_rig`; `ensure_joint_numbers` counts down from 253, for
-    bones added to game rigs). Multi-material meshes are split (`split_by_material`, bmesh, one object per material).
+    bones added to game rigs). Meshes are split (`split_meshes`: `split_by_material`, and `split_by_bones` over 32 weighted
+    bones, `_bone_parts` packs faces by bone set; `_keep_faces`: bmesh, corner normals kept as custom normals so the cut
+    shows no seam) by New DMC4 Model and `albam.mod_update`, never by export, which names such meshes
+    (`joints.weighted_bones`: weight > 0 only, as the palettes since 2026-11-02; the vertex export skips zero weights).
     `update_model` (also run by `mesh._update_dmc4_model` before every dmc4 .mod export, and `albam.mod_update`) converts
     materials without the MT Framework group (`convert_material`: from the Principled or any shader, Base Color, Alpha or
     a Mix Shader's Transparent factor, the Normal Map node's image, Specular and Roughness images, through Separate Color
@@ -310,12 +315,48 @@ This reproduces the game's player foot planting (`cLegIkCtrl` + `cCnsIK`, see `V
     (`texture_convert.py`: DXT1 / DXT5 / DXT5nm from `lib/dxt.py`, full mips, power-of-two sizes, `albam_recipe` +
     `albam_source_<n>` on the image, re-encoded only if the pixels' crc changed; `.tex` revision by slot,
     `texture._new_tex_revision`; `Tex112CustomProperties` range now defaults to 1, the old 0.7 darkened new textures). A
-    mesh with no material still fails at export (only New DMC4 Model gives one). Imported models pass through
+    mesh with no material still fails at export (only New DMC4 Model gives one; every walk over a model's meshes goes through `joints.model_meshes`, because a `.col`'s capsule tubes are meshes under the armature too). Imported models pass through
     untouched (pl000 / pl000_03: no notes, same bytes). A static mesh with one UV map writes it as its second UV too (the
     game's vtype 2 files have the copy, skinned vtype 0 files have filler). Reported (panel + console,
     `root["mod_new_notes"]`, `WARNING` prefix = to fix): unreadable images, bump maps, a scaled root. Checked before any
     change, so a refusal leaves nothing behind (no meshes, a root that's part of another Albam file, a path in use, over
-    254 bones). Test: `tests/blender/test_model_convert.py`. Normal-map green direction not checked in the game.
+    254 bones). The .mod's texture table is ASCII (`_check` raised UnicodeEncodeError on a rig with a Japanese name:
+    `str.isalnum` is true for kanji), so paths go through `texture_convert.game_name` / `ascii_path`; `update_model`
+    corrects older files' paths (`_fix_model_path`, `_prepare_images`). A model's textures follow it when its path
+    changes (`_follows_model`: images made here, known by `_albam_auto_path` or their recipe; not game textures or
+    paths set by hand), because the .mod's table holds full paths. Test: `tests/blender/test_model_convert.py`.
+    Normal-map green direction not checked in the game.
+  - **Match Game Skeleton** (`engines/mtfw/skeleton_match.py`, `albam.match_skeleton`, 2026-11-02, DMC4 Model panel; user
+    guide `docs/new_model.md`): the right joint numbers don't make a rig play the game's LMTs. Tracks are local to the
+    parent, in the joint's frame, and the root's position is absolute, so the parents, rest frames, rest pose and size
+    must match too. `build_plan` (changes nothing) -> `apply_plan`, against a `.mod` from the Game Files
+    (`reference_skeleton`, read with the import's own `build_blender_armature`): joints the reference has take its parent
+    and rest frame, keeping their position (the root goes to the hips: 0, 1 and 13 share a point in the game); the mesh
+    and shape keys are posed by `_skin` (the Armature modifier's normalised weights, to 2e-7 m, not the modifier:
+    it can't be applied over shape keys) through `_deltas` (down the old hierarchy, each joint turns its children's mean
+    onto the reference's; hands also about that axis by the index / little finger line; feet and toes keep their
+    pitch); uniform scale from the hips' height. Only body and fingers (`_trusted`) are taken on trust: others keep their
+    number only if they're under the right joint at about the right distance, since `number_new_rig` lands on game
+    joints (a breast bone on 204), and the palms 109 / 125 too (`_misplaced` also wants the same direction from the
+    parent: `_dummy_手捩2.L` up the forearm held 125). `_already_matched` (every joint in the reference's frame) leaves
+    the pose alone on a second run: `game_` bones at the reference's offsets in the children's mean leaned Ellen's spine
+    4.4 deg and turned her left hand 86 deg. Bones outside the match get numbers the reference lacks (its LMTs animate its joints),
+    unweighted ones become Not a Game Joint (the free numbers wouldn't stretch: 254 - the reference's), constraints are
+    muted, joint 13 moves to the thighs' common parent. Editing a rest doesn't move a mesh, which is why frames can be
+    set directly. LMTs imported before are stale. Joints the reference has and the rig lacks are added (`game_<name>`,
+    unweighted): the game reads body joints unchecked (`joints.NEEDED_JOINTS`; `mJointTable[n]` 255 -> null joint ->
+    cCnsMatrix mpMat 0x50 -> access violation at 0x443467 in cCnsMatrix::adjust on the first frame: Dante's coat pins to
+    200 and 204, 2026-11-02, Ellen matched against pl000 and exported as pl006, the tool had stripped both), and
+    v153 export refuses `pl000` / `pl006` / `pl009` without them, and without the weapon joints
+    (`joints.WEAPON_JOINTS`: looked up safely, a missing one drops the weapon to the model's root). `other_character` warns when the reference isn't the
+    character the rig exports as. On Ellen (MMD, 225 bones, 60 shape keys): 56 joints, scale 1.39, every joint
+    within 0.0 deg of Dante on pl006_01 except the ring / little fingers of the hand without a palm joint (1.54 deg). In
+    that LMT only root, props and weapon_back have location tracks, so proportions survive. Not checked in the game.
+    Test: `tests/blender/test_match_skeleton.py`. Extra parts with physics (Ellen's dress / tail / danglies, 2026-11-03): own
+    `.mod`s attached by ModelExtension `<attach>` (SKIN), chains `<model>`-listed on them, `docs/new_model.md` has the
+    recipe and the chain values that worked (lists: `engines/mtfw/model_ext.py`, format `movedef/ext_list.py`, an `EXT_<file>` Empty in the Export list, text patched like MoveDef's); the preview follows the body through `ALBAM_FollowBody` Copy Transforms on
+    the shared joints, which never export. Skirt in the game showed a panel kicked out over the hip capsule, and
+    the preview showed it too: check chains with textures on, a grey render hid it.
   - **Mesh preparation at export** (`engines/mtfw/mesh_prep.py`, dmc4): the vertex export writes one UV / normal per
     vertex (the first corner's) and the strip builder needs triangles, and both read the mesh data in its own
     frame. `prepared_meshes` swaps in a temporary copy (removed after the export, the user's mesh is never changed)

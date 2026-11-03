@@ -348,7 +348,9 @@ class ALBAM_OT_VirtualFileSystemSaveFileExported(
         ALBAM_OT_VirtualFileSystemSaveFileBase, bpy.types.Operator):
     bl_idname = "albam.save_file_exported"
     bl_label = "Save files"
+    bl_description = "Save the file selected in the list to a location you pick"
     VFS_ID = "exported"
+    NOT_A_FILE = "Select a file in the list. To save the whole export, use Save to Game Folder"
 
 
 @blender_registry.register_blender_type

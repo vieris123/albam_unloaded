@@ -5,6 +5,7 @@ import functools
 import math
 from itertools import chain
 from io import BytesIO
+from pathlib import PureWindowsPath
 from struct import pack, unpack
 try:
     from math import dist as get_dist
@@ -884,7 +885,7 @@ def export_mod(bl_obj):
     src_mod = Mod.from_bytes(asset.original_bytes)
     src_mod._read()
     # TODO: export options like visibility
-    bl_meshes = [c for c in bl_obj.children_recursive if c.type == "MESH"]
+    bl_meshes = joints.model_meshes(bl_obj)
     if export_settings.export_visible:
         bl_meshes = [mesh for mesh in bl_meshes if mesh.visible_get()]
     if src_mod.header.version == 153 and not bl_meshes:
@@ -897,12 +898,35 @@ def export_mod(bl_obj):
         if mixed:
             raise AlbamCheckFailure(
                 "Some meshes use more than one material", details=", ".join(mixed),
-                solution="Separate them by material (Edit Mode > Mesh > Separate > By Material)")
+                solution="Object Properties > DMC4 Model > Update Materials & Textures splits them (or Edit Mode > Mesh > "
+                         "Separate > By Material)")
         bare = [m.name for m in bl_meshes if not any(slot.material for slot in m.material_slots)]
         if bare:
             raise AlbamCheckFailure(
                 "Some meshes have no material", details=", ".join(bare),
                 solution="Give each mesh a material (Material Properties > New); New DMC4 Model sets them up")
+        if bl_obj.type == "ARMATURE":   # before anything is built, with every mesh named
+            names = {b.name for b in joints.joint_bones(bl_obj)}
+            counts = {m.name: len(joints.weighted_bones(m, names)) for m in bl_meshes}
+            over = [f"{name} ({count} bones)" for name, count in counts.items() if count > joints.MAX_MESH_BONES]
+            if over:
+                raise AlbamCheckFailure(
+                    f"Some meshes are weighted to more than {joints.MAX_MESH_BONES} bones", details=", ".join(over),
+                    solution="Object Properties > DMC4 Model > Update Materials & Textures splits them, or separate "
+                             "them yourself (P in Edit Mode), or merge helper bones' weights")
+            needed = joints.NEEDED_JOINTS.get(PureWindowsPath(asset.relative_path).stem.lower(), ())
+            lacking = sorted(set(needed) - {joints.joint_of(b) for b in joints.joint_bones(bl_obj)})
+            if lacking:
+                raise AlbamCheckFailure(
+                    "The game would crash on this model: it pins the character's parts to joints the model lacks",
+                    details="missing joints: " + ", ".join(str(j) for j in lacking),
+                    solution="Object Properties > DMC4 Model > Match Game Skeleton adds them")
+            lacking = sorted(set(joints.WEAPON_JOINTS) - {joints.joint_of(b) for b in joints.joint_bones(bl_obj)}) if needed else []
+            if lacking:
+                raise AlbamCheckFailure(
+                    "Weapons would sit at this model's root: it lacks the joints they hang on",
+                    details="missing joints: " + ", ".join(str(j) for j in lacking),
+                    solution="Object Properties > DMC4 Model > Match Game Skeleton adds them")
     temporary = []
     if app_id == "dmc4":
         # temporary triangulated / seam-split copies of meshes made in Blender (mesh_prep.py); imported meshes
@@ -1451,11 +1475,12 @@ def _create_bone_palettes(src_mod, bl_armature, bl_meshes, bone_index=None):
     bone_palette = {'mesh_indices': set(), 'bone_indices': set()}
     for i, mesh in enumerate(bl_meshes):
 
-        mesh_vertex_groups = get_mesh_vertex_groups(mesh)
+        # weights of 0 aren't written (get_bone_indices_and_weights_per_vertex), so they need no palette slot
+        weighted = {g.group for v in mesh.data.vertices for g in v.groups if g.weight > 0}
         bone_indices = {
             (bone_index.get(mesh.vertex_groups[vgi].name, -1) if bone_index is not None
              else bl_armature.pose.bones.find(mesh.vertex_groups[vgi].name))
-            for vgi, vertices in mesh_vertex_groups.items() if vertices
+            for vgi in weighted
         }
         bone_indices = {bi for bi in bone_indices if bi != -1}
 

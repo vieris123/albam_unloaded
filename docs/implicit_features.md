@@ -21,7 +21,10 @@ Panels mentioned here are in the Properties editor (Object / Bone tabs) unless a
 - **Bone Properties > Game Joint** shows and sets a bone's **Joint Number** (what LMT tracks, chains, .col shapes and
   effects refer to) with the joint's name when it has one, and for a bone added in Blender what the number is in the
   player skeleton ("Player skeleton: thigh_r, under 13 hips") plus a search button next to the number that lists
-  the player joints by name (each marked free or with the bone that has it) and gives the picked one, its **Mirror Bone** (empty = automatic: the bone at the mirrored position across X = 0), and
+  the player joints by name (each marked free or with the bone that has it) and gives the picked one. Typing or
+  picking a number another added bone has moves it to this bone, and that bone goes to -1 (it gets a free number at
+  the next export); a number held by a bone of the game file is refused, since export needs that bone. Also its
+  **Mirror Bone** (empty = automatic: the bone at the mirrored position across X = 0), and
   **Not a Game Joint** (a helper bone that isn't exported; **Mark Selected / Unmark Selected** set it on every
   selected bone at once; the imported game model's own bones can't be marked, since its animations, chains and
   collision refer to them). Bones named `root_motion`, `IKP_…` or `IK_Foot…` are

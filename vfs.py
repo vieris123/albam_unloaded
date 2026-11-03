@@ -256,6 +256,7 @@ class ALBAM_OT_VirtualFileSystemSaveFileBase:
     filepath: FILEPATH
 
     VFS_ID = "vfs"
+    NOT_A_FILE = "Select a file in the list: this row is a folder"
 
     def invoke(self, context, event):  # pragma: no cover
         vfs = self.get_vfs(self, context)
@@ -272,7 +273,14 @@ class ALBAM_OT_VirtualFileSystemSaveFileBase:
 
     @classmethod
     def poll(cls, context):
-        return bool(cls.get_vfs(cls, context).selected_vfile)
+        vfile = cls.get_vfs(cls, context).selected_vfile
+        if not vfile:
+            return False
+        # a folder row, or an export's top row: no file of its own (an archive's top row is the archive on disk)
+        if vfile.is_expandable and not vfile.absolute_path:
+            cls.poll_message_set(cls.NOT_A_FILE)
+            return False
+        return True
 
     @staticmethod
     def get_vfs(cls_or_self, context):

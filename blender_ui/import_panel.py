@@ -207,6 +207,7 @@ class ALBAM_UL_RealFileSystemUI(bpy.types.UIList):
         "SCHEDULE": "TIME",
         "CHAIN": "LINKED",
         "HITBOX": "MESH_CAPSULE",
+        "MODEL_EXT": "FILE_TEXT",
         "MATERIAL": "MATERIAL",
         "TEXTURE": "TEXTURE",
     }

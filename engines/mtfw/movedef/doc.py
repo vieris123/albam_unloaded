@@ -252,11 +252,12 @@ def _attrs(head):
     return [(m.group(2), unescape(m.group(4)[1:-1])) for m in _ATTR.finditer(head)]
 
 
-def parse(text):
-    """Doc of a MoveDef file's text (a `<move>` or a `<commands>` file)"""
+def parse(text, roots=ROOTS):
+    """Doc of a file's text: a `<move>` or a `<commands>` file, or one whose root is in `roots` (ext_list.py)"""
     _, root, _, nodes = _tokenize(text)
-    if root.tag not in ROOTS:
-        raise MoveDefError(f"the root element is <{root.tag}>, not <move> or <commands>")
+    if root.tag not in roots:
+        names = " or ".join(f"<{r}>" for r in roots)
+        raise MoveDefError(f"the root element is <{root.tag}>, not {names}")
     index = {id(n): i for i, n in enumerate(nodes)}
     parents = {}
     for node in nodes:

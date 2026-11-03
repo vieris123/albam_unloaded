@@ -259,8 +259,12 @@ try:
     settings = arm.pose.bones["tail_a"].albam_joint
     taken = joint(arm, "tail_b")
     before = settings.number
+    other = arm.pose.bones["tail_b"].albam_joint
     settings.number = taken
-    check(settings.number == before, "the panel refuses another bone's joint number")
+    check(settings.number == taken and other.number == -1, "the panel moves another added bone's number, that bone goes to -1")
+    other.number = taken
+    settings.number = before
+    check(settings.number == before and other.number == taken, "and they can be swapped back")
     used = {joint(arm, bn.name) for bn in arm.data.bones if joints.JOINT_PROP in bn}
     free = next(n for n in range(200, 254) if n not in used)
     settings.number = free

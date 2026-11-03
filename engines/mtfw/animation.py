@@ -518,8 +518,11 @@ def _get_or_create_root_motion_bone(armature):
 
     if ROOT_BONE_NAME in armature.pose.bones.keys():
         pose_bone = armature.pose.bones[ROOT_BONE_NAME]
-    else:
+    elif ROOT_BONE_RENAMED in armature.pose.bones.keys():
         pose_bone = armature.pose.bones[ROOT_BONE_RENAMED]
+    else:   # a rig made elsewhere: its root goes by joint number
+        root = next(b for b in armature.data.bones if b.name != bone_name and (b.get('mtfw.anim_retarget') == '0' or b.parent is None))
+        pose_bone = armature.pose.bones[root.name]
     constraint = pose_bone.constraints.new('COPY_LOCATION')
     constraint.target = armature
     constraint.subtarget = bone_name
