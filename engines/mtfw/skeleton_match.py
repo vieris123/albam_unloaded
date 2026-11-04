@@ -294,7 +294,7 @@ def build_plan(ob, ref, match_size=True):
     weighted = _weighted(meshes)
     matched = {b.name for b in kept.values()}
     helpers = [b.name for b in joints.joint_bones(ob)
-               if b.name not in matched and b.name not in weighted and not _in_chain(b)]
+               if b.name not in matched and b.name not in weighted and not _in_chain(b) and not b.get(SIZE_PROP)]
     others = [b for b in joints.joint_bones(ob) if b.name not in matched and b.name not in helpers]
     keep_numbers = {joints.joint_of(b) for b in others if joints.joint_of(b) not in ref} - {None}
     needs = [b.name for b in others if joints.joint_of(b) is None or joints.joint_of(b) in ref]
@@ -449,10 +449,92 @@ def apply_plan(context, ob, plan, ref):
     return notes
 
 
-def match_skeleton(context, ob, path, match_size=True):
+def match_skeleton(context, ob, path, match_size=True, own_size=True):
     ref = reference_skeleton(context, path)
     plan = build_plan(ob, ref, match_size)
-    return apply_plan(context, ob, plan, ref), plan
+    notes = apply_plan(context, ob, plan, ref)
+    if not match_size and own_size:
+        notes += keep_own_size(context, ob, ref)
+    else:
+        notes += remove_own_size(context, ob)
+    return notes, plan
+
+
+# ---- own size: Nero's / Dante's animations at the model's height --------------------------------------------------
+# The root track is an absolute position, so a model smaller than the game's would have its feet in the air. A new
+# root joint above joint 0 scaled by s (ModelExtension <offset>, dmc4_hook) scales that position, and an offset of
+# 1 / s on joint 0 takes the scale off again for everything below: joint 0's world is P . T . R . S^-1 = the track's
+# rotation at s times its position (uniform scale commutes with rotation). Chains keep their lengths, which come from
+# the rest pose (Vibed/RE/chain_cnschain.md 3.2c). Root motion (joint 255) isn't scaled: the feet slide by 1 - s.
+
+SIZE_ROOT = "game_size_root"
+SIZE_PROP = "albam_size_root"
+SAME_SIZE = 0.01
+
+
+def size_root(ob):
+    return next((b for b in ob.data.bones if b.get(SIZE_PROP)), None)
+
+
+def _free_root_number(context, ob, ref):
+    """a number no LMT of the character animates and no model of the scene has"""
+    used = set(ref) | set(joints.PLAYER_JOINTS) | set(joints.PLAYER_FACE_TRACKS) | set(joints.RESERVED)
+    used |= joints._reserved_by_lmts(ob)
+    for arm in (o for o in context.scene.objects if o.type == "ARMATURE"):
+        used |= {joints.joint_of(b) for b in arm.data.bones if b.get(SIZE_PROP) is None} - {None}
+    free = [j for j in range(253, -1, -1) if j not in used]
+    if not free:
+        _refuse("No joint number left for the size root", "every number is used or animated",
+                "Turn Match Size on, or free a number")
+    return free[0]
+
+
+def keep_own_size(context, ob, ref):
+    """the size root under joint 0 at the game's model frame, and the list offsets; returns notes"""
+    from . import model_ext
+    by = {joints.joint_of(b): b.name for b in joints.joint_bones(ob) if joints.joint_of(b) is not None}
+    hips_z = (ob.matrix_world @ ob.data.bones[by[HIPS]].head_local).z
+    s = hips_z / _head(ref, HIPS).z
+    if abs(s - 1.0) < SAME_SIZE:
+        return remove_own_size(context, ob) + ["the model is the game model's size: no size root needed"]
+    existing = size_root(ob)
+    number = joints.joint_of(existing) if existing is not None else _free_root_number(context, ob, ref)
+    context.view_layer.objects.active = ob
+    bpy.ops.object.mode_set(mode="EDIT")
+    edit = ob.data.edit_bones
+    eb = edit.get(existing.name) if existing is not None else edit.new(SIZE_ROOT)
+    eb.parent = None
+    eb.head, eb.tail, eb.roll = (0.0, 0.0, 0.0), (0.0, 0.0, 0.1), 0.0     # rest = the game's model frame
+    eb.use_deform = False
+    hips_root = edit[by[ROOT]]
+    hips_root.parent, hips_root.use_connect = eb, False
+    name = eb.name
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bone = ob.data.bones[name]
+    bone[SIZE_PROP] = 1
+    bone[joints.JOINT_PROP] = str(number)
+    bone[joints.ADDED_PROP] = 1
+    lst = model_ext.set_size_offsets(context, ob.albam_asset.relative_path, number, s)
+    return [f"own size {s:.3f} of the game model's: joint {number} ({name}) scales the animations, joint 0 undoes it "
+            f"below ({lst.albam_asset.relative_path}, needs dmc4_hook)",
+            f"{WARNING}moves carry her the game model's distances: the feet slide a little"]
+
+
+def remove_own_size(context, ob):
+    from . import model_ext
+    bone = size_root(ob)
+    if bone is None:
+        return []
+    number, name = joints.joint_of(bone), bone.name
+    context.view_layer.objects.active = ob
+    bpy.ops.object.mode_set(mode="EDIT")
+    edit = ob.data.edit_bones
+    for child in edit[name].children:
+        child.parent = None
+    edit.remove(edit[name])
+    bpy.ops.object.mode_set(mode="OBJECT")
+    model_ext.clear_size_offsets(context, ob.albam_asset.relative_path, number)
+    return [f"the size root (joint {number}) and its offsets are gone"]
 
 
 def _model_paths(context):
@@ -503,8 +585,12 @@ class ALBAM_OT_MatchSkeleton(bpy.types.Operator):
                     "replaces. Dante's and Nero's joints differ, and the game looks up the joints of the model it loads")
     match_size: bpy.props.BoolProperty(
         name="Match Size", default=True,
-        description="Scale the model so its hips stand as high as the game model's. Off: animations lift the hips to "
-                    "the game model's height anyway, so the feet of a smaller model leave the floor")
+        description="Scale the model so its hips stand as high as the game model's. Off: it keeps its own size")
+    own_size: bpy.props.BoolProperty(
+        name="Animations at Own Size", default=True,
+        description="With Match Size off: add a root joint above the hips and a ModelExtension list that scale the "
+                    "game's animations to this model's height, so its feet stay on the floor (needs dmc4_hook). "
+                    "Off: the animations lift the hips to the game model's height")
 
     @classmethod
     def poll(cls, context):
@@ -530,6 +616,8 @@ class ALBAM_OT_MatchSkeleton(bpy.types.Operator):
         layout = self.layout
         layout.prop(self, "reference")
         layout.prop(self, "match_size")
+        if not self.match_size:
+            layout.prop(self, "own_size")
         warning = other_character(model_root(context.object), self.reference)
         for line in _preview + ([warning] if warning else []):
             warn = line.startswith(WARNING)
@@ -541,7 +629,7 @@ class ALBAM_OT_MatchSkeleton(bpy.types.Operator):
         root = model_root(context.object)
         context.view_layer.objects.active = root
         try:
-            notes, plan = match_skeleton(context, root, self.reference, self.match_size)
+            notes, plan = match_skeleton(context, root, self.reference, self.match_size, self.own_size)
         except AlbamCheckFailure:
             bpy.ops.albam.error_handler_popup("INVOKE_DEFAULT")
             return {"CANCELLED"}

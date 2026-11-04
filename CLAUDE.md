@@ -376,9 +376,23 @@ This reproduces the game's player foot planting (`cLegIkCtrl` + `cCnsIK`, see `V
     character the rig exports as. On Ellen (MMD, 225 bones, 60 shape keys): 56 joints, scale 1.39, every joint
     within 0.0 deg of Dante on pl006_01 except the ring / little fingers of the hand without a palm joint (1.54 deg). In
     that LMT only root, props and weapon_back have location tracks, so proportions survive. Not checked in the game.
+    **Own size** (Match Size off + Animations at Own Size, `keep_own_size`, 2026-11-03):
+    - **Setup:** a root `game_size_root` (`SIZE_PROP`, rest = `GAME_FRAME`, a number no LMT animates) above joint 0,
+      plus `<offset>`s in the model's list (`model_ext.set_size_offsets`, else a new `model_ext\<model>_size.xml`): the
+      root scaled s = own hips / reference hips, joint 0 by 1 / s.
+    - **Effect:** joint 0's world is P . T . R . S^-1, the track's rotation with its position at s; bones below are
+      unscaled, so chains and .col sizes stay right. Root motion (255) isn't scaled (feet slide). Needs dmc4_hook's
+      constraints.
+    - **Re-runs:** keep the root (excluded from the helpers); Match Size on removes it and the offsets
+      (`remove_own_size`).
+    - **Export:** P is index 0, and the chest can then only be index 3 (`joints._chest_first`, boss cameras read
+      mpJoint[2]). Joint 0 at index 1 also crashed Dante's DT swap (setModel race: readers only survive the missing
+      joint array at index 0); dmc4_hook's ModelExtension fixes it from 2026-11-03 (`Vibed/RE/model_constraints.md`),
+      so own-size models need that build.
+    - **Status:** tested in `test_match_skeleton`; Ellen's in-game test is pending.
     Test: `tests/blender/test_match_skeleton.py`. Extra parts with physics (Ellen's dress / tail / danglies, 2026-11-03): own
     `.mod`s attached by ModelExtension `<attach>` (SKIN), chains `<model>`-listed on them, `docs/new_model.md` has the
-    recipe and the chain values that worked (lists: `engines/mtfw/model_ext.py`, format `movedef/ext_list.py`, an `EXT_<file>` Empty in the Export list, text patched like MoveDef's); the preview follows the body through `ALBAM_FollowBody` Copy Transforms on
+    recipe and the chain values that worked (lists: `engines/mtfw/model_ext.py`, format `movedef/ext_list.py`, an `EXT_<file>` Empty in the Export list, text patched like MoveDef's); the list's Preview Attachments makes the body-following `ALBAM_FollowBody` Copy Transforms on
     the shared joints, which never export. Skirt in the game showed a panel kicked out over the hip capsule, and
     the preview showed it too: check chains with textures on, a grey render hid it.
   - **Mesh preparation at export** (`engines/mtfw/mesh_prep.py`, dmc4): the vertex export writes one UV / normal per

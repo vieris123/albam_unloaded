@@ -291,6 +291,31 @@ try:
     except AlbamCheckFailure as err:
         check("deleted" in err.message and "index 20" in err.details,
               f"deleting a model bone is refused ({err.message}: {err.details})")
+
+    # -- a new rig puts the chest at index 2 (the boss cameras read mpJoint[2]), even under a new root ------------------
+    for extra_root in (False, True):
+        data = bpy.data.armatures.new("chest")
+        rig = bpy.data.objects.new("chest", data)
+        bpy.context.collection.objects.link(rig)
+        bpy.context.view_layer.objects.active = rig
+        bpy.ops.object.mode_set(mode="EDIT")
+        made = {}
+        for name, parent in (("top", None), ("hips", "top" if extra_root else None), ("thigh", "hips"),
+                             ("spine", "hips"), ("chest", "spine"), ("neck", "chest")):
+            if name == "top" and not extra_root:
+                continue
+            e = data.edit_bones.new(name)
+            e.head, e.tail = (0, 0, len(made) * 0.1), (0, 0, len(made) * 0.1 + 0.05)
+            e.parent = made.get(parent)
+            made[name] = e
+        bpy.ops.object.mode_set(mode="OBJECT")
+        for name, number in (("top", 73), ("hips", 0), ("thigh", 14), ("spine", 1), ("chest", 2), ("neck", 3)):
+            if name in data.bones:
+                data.bones[name][joints.JOINT_PROP] = str(number)
+        order = [b.name for b, _ in joints.export_layout(rig, [])]
+        want = ["top", "hips", "spine", "chest"] if extra_root else ["hips", "spine", "chest"]
+        check(order[:len(want)] == want and order.index("thigh") > order.index("chest"),
+              f"chest first {'under a new root' if extra_root else ''}: {order}")
 except Exception:
     traceback.print_exc()
     failures.append("exception")

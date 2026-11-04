@@ -351,6 +351,26 @@ def number_new_rig(armature_ob):
     return assigned
 
 
+CHEST_JOINT = 2     # uPlayer::GetChestJoint returns 2 as a bone-table INDEX: the boss cameras read mpJoint[2]
+
+
+def _chest_first(bones):
+    """`bones` (parents first) with the chest's ancestors and the chest itself moved to the front, so that on a
+    player-type rig the chest lands at table index 2 (root, spine, chest)"""
+    chest = next((b for b in bones if joint_of(b) == CHEST_JOINT), None)
+    if chest is None:
+        return bones
+    names = {b.name for b in bones}
+    path = []
+    b = chest
+    while b is not None:
+        if b.name in names:
+            path.append(b)
+        b = b.parent
+    front = {b.name for b in path}
+    return path[::-1] + [b for b in bones if b.name not in front]
+
+
 def export_layout(armature_ob, src_bones):
     """[(bone, source index or None)] in .mod bone-table order: the source file's bones by joint number, then the
     bones added in Blender, parents first. Raises AlbamCheckFailure for deleted source bones, too many bones, and a
@@ -375,7 +395,7 @@ def export_layout(armature_ob, src_bones):
             "Bones of the source model were deleted", "Missing: " + ", ".join(missing[:20]),
             "Undo the deletion. Removing a game model's bones isn't supported yet: its animations, chains, collision "
             "shapes and effects refer to them by joint number")
-    entries += [(b, None) for b in bones if b.name not in taken]
+    entries += [(b, None) for b in _chest_first([b for b in bones if b.name not in taken])]
     if len(entries) > MAX_BONES:
         raise AlbamCheckFailure(
             "Too many bones", f"{len(entries)} joints, the .mod bone table holds {MAX_BONES}",

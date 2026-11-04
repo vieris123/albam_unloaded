@@ -52,7 +52,7 @@ def posed_rest(head, joint, shoulders):
 
 
 def make_rig(dante):
-    source = {joints.joint_of(b): b for b in dante.data.bones}
+    source = {joints.joint_of(b): b for b in dante.data.bones if joints.joint_of(b) is not None}   # not root_motion
     numbers = [j for j in source if skeleton_match._trusted(j) or j in (109, 125, 150, 151, 153)]
     shoulders = {"r": source[6].head_local.copy(), "l": source[10].head_local.copy()}
     place = {j: posed_rest(source[j].head_local.copy(), j, shoulders) for j in numbers}
@@ -232,10 +232,12 @@ try:
             return lambda *args, **kw: self.lines.append((name, args[0] if args else None, kw.get("text")))
     skeleton_match._preview[:] = skeleton_match.summary(plan) + plan.notes
     layout = Stub()
-    skeleton_match.ALBAM_OT_MatchSkeleton.draw(SimpleNamespace(layout=layout, reference=PATH), bpy.context)
+    skeleton_match.ALBAM_OT_MatchSkeleton.draw(SimpleNamespace(layout=layout, reference=PATH, match_size=False), bpy.context)
     texts = [t for name, _, t in layout.lines if name == "label"]
     check(any("joints match" in t for t in texts) and any("hips" in t for t in texts),
           f"the dialog says what will happen ({len(texts)} lines)")
+    check(("prop", None, None) in [(n, None, None) for n, a, _ in layout.lines if n == "prop"] and
+          sum(1 for n, _, _ in layout.lines if n == "prop") == 3, "with Match Size off it offers Animations at Own Size")
     model_layout = Stub()
     model_layout.row = model_layout.column = lambda *a, **k: model_layout
     new_model.ALBAM_PT_NewModel.draw(SimpleNamespace(layout=model_layout), SimpleNamespace(object=rig))
@@ -330,6 +332,65 @@ try:
     scene.frame_set(0)
     for pb in rig.pose.bones:
         pb.matrix_basis = Matrix.Identity(4)
+
+    # own size: Match Size off keeps the rig at 0.7 of Dante, and a root joint with a list scales his animation to it
+    from albam.engines.mtfw import model_ext
+    from albam.engines.mtfw.movedef import ext_list
+    small, small_body = make_rig(dante)
+    bpy.context.view_layer.objects.active = small
+    new_model.setup_new_model(bpy.context, small, r"model\game\small\small.mod")
+    bpy.context.view_layer.objects.active = small
+    result = bpy.ops.albam.match_skeleton("EXEC_DEFAULT", reference=PATH, match_size=False)
+    size_root = skeleton_match.size_root(small)
+    sby = {joints.joint_of(b): b for b in joints.joint_bones(small) if joints.joint_of(b) is not None}
+    number = joints.joint_of(size_root) if size_root else None
+    check(result == {"FINISHED"} and size_root is not None and size_root.parent is None and
+          number not in ref and number not in joints.PLAYER_JOINTS, f"a size root joint ({number}) is added")
+    check(sby[0].parent == size_root and not size_root.use_deform, "the root joint hangs from it")
+    check(max(abs(a - b) for ra, rb in zip(size_root.matrix_local, joints.GAME_FRAME) for a, b in zip(ra, rb)) < 1e-6,
+          "at the game's model frame")
+    s = sby[13].head_local.z / ref[13].matrix.to_translation().z
+    lst = next((o for o in bpy.data.objects if model_ext.is_list(o) and o.albam_asset.relative_path == r"model_ext\small_size.xml"), None)
+    offsets = {}
+    if lst is not None:
+        d = model_ext.list_doc(lst)
+        offsets = {ext_list.joint_number(e): float(e.get("scale")) for e, _ in ext_list.constraints(d)}
+    check(abs(offsets.get(number, 0) - s) < 1e-5 and abs(offsets.get(0, 0) - 1 / s) < 1e-4 and lst.albam_ext.preview,
+          f"its list scales the root by {s:.3f} and joint 0 back ({offsets})")
+    check(not [i for i in model_ext.all_issues(bpy.context, lst) if i[0] == "error"], "the list checks clean")
+    scene.albam.import_options_lmt.armature = small
+    animation.load_lmt(lmt_item, bpy.context)
+    index = next(i for i, a in enumerate(group_of(dante).actions) if a.action == action_d)
+    compat.assign_action(small, group_of(small).actions[index].action)
+    sby = {joints.joint_of(b): b.name for b in joints.joint_bones(small) if joints.joint_of(b) is not None}
+    worst_turn = worst_hip = worst_foot = 0.0
+    for frame in (0, 12, 30):
+        scene.frame_set(frame)
+        bpy.context.view_layer.update()
+        for j in matched:
+            a, d3 = small.pose.bones[sby[j]].matrix.to_3x3().normalized(), dante.pose.bones[dby[j]].matrix.to_3x3()
+            worst_turn = max(worst_turn, angle(d3.inverted() @ a))
+        worst_hip = max(worst_hip, abs(small.pose.bones[sby[13]].head.z - s * dante.pose.bones[dby[13]].head.z))
+        for foot in (16, 20):
+            worst_foot = max(worst_foot, abs(small.pose.bones[sby[foot]].head.z - SIZE * dante.pose.bones[dby[foot]].head.z))
+    check(worst_turn < 0.1, f"Dante's LMT turns every joint as his ({worst_turn:.4f} deg)")
+    check(worst_hip < 1e-3, f"the hips at {s:.3f} of his height ({worst_hip:.5f} m)")
+    check(worst_foot < 0.03, f"so the feet stay on the floor ({worst_foot:.3f} m off where a 0.7 Dante's would be)")
+    scale_of = small.pose.bones[sby[13]].matrix.to_scale()
+    check(all(abs(c - 1) < 1e-4 for c in scale_of), f"and the bones below aren't scaled ({tuple(scale_of)})")
+    scene.frame_set(0)
+    bpy.ops.albam.match_skeleton("EXEC_DEFAULT", reference=PATH, match_size=False)
+    check(skeleton_match.size_root(small) is not None and
+          len([e for e, _ in ext_list.constraints(model_ext.list_doc(lst))]) == 2, "running it again keeps one root and two offsets")
+    bpy.ops.albam.match_skeleton("EXEC_DEFAULT", reference=PATH, match_size=True)
+    sby = {joints.joint_of(b): b for b in joints.joint_bones(small) if joints.joint_of(b) is not None}
+    check(skeleton_match.size_root(small) is None and sby[0].parent is None and
+          not ext_list.constraints(model_ext.list_doc(lst)), "Match Size on takes the root and its offsets away")
+    check(abs(sby[13].head_local.z - ref[13].matrix.to_translation().z) < 1e-4, "and scales the model up instead")
+    for ob in [o for o in bpy.data.objects if o.name.startswith(("small", "rig.", "body."))] + [lst]:
+        if ob.name in bpy.data.objects and ob not in (rig, body, dante):
+            bpy.data.objects.remove(ob)
+    scene.albam.exportable.file_list.update()
 
     # a capsule on the rig: its wire tube is a mesh under the armature, not a part of the model
     root_col = col_shapes._new_root(bpy.context, "shapes", "dmc4", r"chains\shapes.col", b"", rig)
