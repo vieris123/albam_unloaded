@@ -69,7 +69,15 @@ def load_lmt(file_item, context):
     lmt_group.export_path = getattr(file_item, "absolute_path", "")
     kept_joints, kept_usages = set(), set()
 
-    context.scene.render.fps = FRAMERATE
+    # an armature already playing an action keeps it, with its pose, rotation modes and the scene's frame rate: the
+    # import used to put its first animation on (follow_action turned Euler bones to quaternions) and set 60 fps,
+    # which looked like the user's animations were overwritten. Picking a row in the LMT list still switches
+    playing = armature.animation_data.action if armature.animation_data else None
+    if playing is None:
+        context.scene.render.fps = FRAMERATE
+    else:
+        print(f"LMT {file_item.display_name}: {armature.name} keeps playing {playing.name} at "
+              f"{context.scene.render.fps} fps (LMT animations are 60 fps: pick one in the LMT list to play it)")
 
     # DEBUG_BLOCK = 2
     DEBUG_BLOCK = None
@@ -238,7 +246,8 @@ def load_lmt(file_item, context):
               f"{armature.name} doesn't have {sorted(kept_joints)}, other kinds {sorted(kept_usages)}")
     lmt_groups = context.scene.albam.lmt_groups
     lmt_groups.active_group_id = len(lmt_groups.anim_group) - 1
-    lmt_groups.anim_group[-1].active_id = 0
+    if playing is None:
+        lmt_groups.anim_group[-1].active_id = 0     # plays the first animation (an update callback)
 
 
 def _create_bone_mapping(armature_obj):
@@ -527,8 +536,70 @@ def _get_or_create_root_motion_bone(armature):
     constraint.target = armature
     constraint.subtarget = bone_name
     constraint.use_offset = True
+    # armature space: in world space an armature object away from the origin added its own position again
+    constraint.target_space = constraint.owner_space = 'POSE'
 
     return bone_name
+
+
+def hips_travel(armature, action):
+    """How far joint 0's location keys carry it across the floor (m, armature space, rest frames: an estimate for
+    the dialog), 0 without location keys"""
+    hips = next((b for b in armature.data.bones if b.get('mtfw.anim_retarget') == '0'), None)
+    if hips is None:
+        return 0.0
+    curves = [compat.fcurve_find(action, f'pose.bones["{hips.name}"].location', i, armature) for i in range(3)]
+    if not any(curves):
+        return 0.0
+    space = hips.matrix_local.to_3x3()      # the parent's rest times the hips' rest in it
+    frames = sorted({kp.co[0] for fc in curves if fc for kp in fc.keyframe_points})
+    points = [space @ Vector([fc.evaluate(f) if fc else 0.0 for fc in curves]) for f in frames]
+    return max(((p - points[0]).xy.length for p in points), default=0.0)
+
+
+def extract_root_motion(context, armature, action):
+    """Move joint 0's travel across the floor (armature X / Y) from its location keys to the root_motion bone (joint
+    255, which moves the character in the game; the hips keep their height). The preview looks the same: joint 0
+    follows root_motion (Copy Location with offset). Turning stays with the hips. Returns the distance moved (m), or
+    None when there is nothing to move."""
+    hips = next((b for b in armature.data.bones if b.get('mtfw.anim_retarget') == '0'), None)
+    if hips is None:
+        raise AlbamCheckFailure("The armature has no joint 0", "", "Give its root bone joint number 0")
+    if ROOT_MOTION_BONE_NAME in armature.data.bones and any(
+            fc.data_path.startswith(f'pose.bones["{ROOT_MOTION_BONE_NAME}"]') for fc in compat.action_fcurves(action)):
+        raise AlbamCheckFailure(f"{action.name} already has root motion", "", "Nothing to do")
+    path = f'pose.bones["{hips.name}"].location'
+    curves = [compat.fcurve_find(action, path, i, armature) for i in range(3)]
+    if not any(curves):
+        return None
+    curves = [fc or compat.fcurve_new(action, path, i, hips.name, owner=armature) for i, fc in enumerate(curves)]
+    frames = sorted({kp.co[0] for fc in curves for kp in fc.keyframe_points})
+    # the hips' position is linear in their location (use_local_location): parent pose . rest in parent . location.
+    # Their parent doesn't animate (none, or the own-size root), so its current pose holds for every frame
+    pose = armature.pose.bones[hips.name]
+    rest = hips.parent.matrix_local.inverted() @ hips.matrix_local if hips.parent else hips.matrix_local
+    space = (pose.parent.matrix.to_3x3() if pose.parent else Matrix.Identity(3)) @ rest.to_3x3()
+    locs = [Vector([fc.evaluate(f) for fc in curves]) for f in frames]
+    start = space @ locs[0]
+    travel = [Vector(((space @ v).x - start.x, (space @ v).y - start.y, 0.0)) for v in locs]
+    back = space.inverted()
+    root = _get_or_create_root_motion_bone(armature)
+    for fc in curves:                       # a curve's keys move by its share of the travel at that frame
+        for kp in fc.keyframe_points:
+            delta = (back @ travel[frames.index(kp.co[0])])[fc.array_index]
+            kp.co.y -= delta
+            kp.handle_left.y -= delta
+            kp.handle_right.y -= delta
+        fc.update()
+    to_root = armature.data.bones[root].matrix_local.to_3x3().inverted()
+    for i in range(3):
+        fc = compat.fcurve_new(action, f'pose.bones["{root}"].location', i, root, owner=armature)
+        fc.keyframe_points.add(len(frames))
+        for kp, f, t in zip(fc.keyframe_points, frames, travel):
+            kp.co = (f, (to_root @ t)[i])
+            kp.interpolation = 'LINEAR'
+        fc.update()
+    return max(t.length for t in travel)
 
 
 # the game's model space (Y up, cm) in Blender's armature space (Z up): the frame a joint without a parent is
@@ -655,9 +726,11 @@ class ExportTiming:
 
 
 def game_length(action):
-    """Length of the action in game frames, for the Frames property"""
+    """Length of the action in game frames, for the Frames property: the last key's game frame + 1, as the game's
+    files have it (Dante's run: last key 110, 111 frames; until 2026-11-03 Albam left out the + 1, so the last key fell
+    off the clip and the root-motion end was a frame short)"""
     timing = ExportTiming(action)
-    return max(0, int(round(timing.to_game(action.frame_range[1]))))
+    return max(0, int(round(timing.to_game(action.frame_range[1]))) + 1)
 
 
 def _event_game_frame(timing, marker):
@@ -719,6 +792,24 @@ def _check_lmt_group(lmt_group, timings):
             "and at most one event of each type per frame)")
 
 
+def root_motion_end(armature, action, props, timing):
+    """The block header's root-motion end (game cm) the way Dante's pl006_01 has it: the joint 255 position on the last
+    frame, or, for a loop from a later frame, the travel of one loop (the position one frame past the end minus the
+    one at the loop frame). updateFrame adds it when the motion wraps, so looping motions keep travelling"""
+    curves = [compat.fcurve_find(action, f'pose.bones["{ROOT_MOTION_BONE_NAME}"].location', i, armature) for i in range(3)]
+    if not any(curves):
+        return (0.0, 0.0, 0.0)
+
+    def at(game_frame):
+        return Vector([fc.evaluate(timing.to_action(game_frame)) if fc else 0.0 for fc in curves]) * 100.0
+
+    last = max(props.num_frames - 1, 0)
+    if props.loop_frames > 0:
+        step = at(last) - at(max(last - 1, 0))
+        return tuple(at(last) + step - at(props.loop_frames))
+    return tuple(at(last))
+
+
 def _serialize_top_level_lmt(dst_lmt, lmt_group):
     dst_lmt.id_magic = bytearray('\x4c\x4d\x54\x00', encoding='utf-8')
     dst_lmt.version = 49
@@ -752,16 +843,18 @@ def _serialize_block(dst_lmt, lmt_group, header_size, timings, notes):
         cml_size = track_bf_size
         block.tracks = tracks
         block.num_tracks = len(tracks)
+        end_pos, end_quat = tuple(custom_property.end_pos), tuple(custom_property.end_quat)
+        # never set (an animation made in Blender; import always sets it): what the game's own files hold. Albam
+        # wrote 0 0 0 0 here until 2026-11-03, a zero rotation the game multiplies the root by on every wrap
+        if not custom_property.is_property_set("end_quat") or not any(end_quat):
+            end_pos, end_quat = root_motion_end(lmt_group.armature, action, custom_property, timing), (0.0, 0.0, 0.0, 1.0)
+            if any(abs(v) > 1e-3 for v in end_pos):
+                notes.append(f"{action.name}: root motion end {tuple(round(v, 1) for v in end_pos)} cm")
         block.end_pos = dst_lmt.Vec4(_parent=block, _root=dst_lmt._root)
-        block.end_pos.x = custom_property.end_pos[0]
-        block.end_pos.y = custom_property.end_pos[1]
-        block.end_pos.z = custom_property.end_pos[2]
+        block.end_pos.x, block.end_pos.y, block.end_pos.z = end_pos
         block.end_pos.w = 0
         block.end_quat = dst_lmt.Vec4(_parent=block, _root=dst_lmt._root)
-        block.end_quat.x = custom_property.end_quat[0]
-        block.end_quat.y = custom_property.end_quat[1]
-        block.end_quat.z = custom_property.end_quat[2]
-        block.end_quat.w = custom_property.end_quat[3]
+        block.end_quat.x, block.end_quat.y, block.end_quat.z, block.end_quat.w = end_quat
 
         events01, events02 = _serialize_events(dst_lmt, block, action, timing)
         block.events_01 = events01
@@ -1328,8 +1421,15 @@ class Lmt49ActionCustomProperties(bpy.types.PropertyGroup):
         default=FRAMERATE,
         min=1.0,
     )
-    end_pos: bpy.props.FloatVectorProperty(name='End Position', size=3)
-    end_quat: bpy.props.FloatVectorProperty(name='End Rotation', size=4)
+    end_pos: bpy.props.FloatVectorProperty(
+        name='End Position', size=3,
+        description="Root motion at the end (game cm): the joint 255 position on the last frame, or for a loop from a "
+                    "later frame the travel of one loop. The game adds it when the motion wraps. Left at zero with "
+                    "End Rotation, export works it out from the root_motion curves")
+    end_quat: bpy.props.FloatVectorProperty(
+        name='End Rotation', size=4, default=(0.0, 0.0, 0.0, 1.0),
+        description="Root rotation at the end (x y z w; the game's files all have 0 0 0 1). All zero: export writes "
+                    "0 0 0 1 and works out End Position")
     events_params_01: bpy.props.IntVectorProperty(name="Hitbox Slot Values", size=EVENT_SLOT_COUNT, min=0, max=0xFFFF)
     events_params_02: bpy.props.IntVectorProperty(name="Sound Slot Values", size=EVENT_SLOT_COUNT, min=0, max=0xFFFF)
     event_markers: bpy.props.CollectionProperty(type=DMC4EventGroup)

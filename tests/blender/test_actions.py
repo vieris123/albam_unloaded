@@ -66,8 +66,10 @@ try:
     lmt = scene.albam.lmt_groups.anim_group[scene.albam.lmt_groups.active_group_id]
     actions = [row.action for row in lmt.actions if row.action is not None]
     check(len(actions) > 1, f"{len(actions)} animations imported from {LMT}")
+    check(arm.animation_data.action == own, "the import leaves the armature playing its own action")
+    lmt.active_id = 0       # picking the first row plays it
     check(arm.animation_data.action != own and own.use_fake_user and own.users >= 1,
-          "the action the armature played before the import keeps a user (it would be dropped on save)")
+          "the action the armature played before keeps a user once a row is picked (it would be dropped on save)")
     if not compat.LEGACY_ACTIONS:
         # slots named after the armature: picking the action in Blender's own Action editor finds its slot
         check(all(s.identifier == f"OB{arm.name}" for a in actions for s in a.slots),
@@ -176,6 +178,14 @@ try:
           f"property plus the kept ones ({written} = {len(tracks)} + {kept}; source "
           f"{len(src_lmt.block_offsets[0].block_header.tracks)})")
     check(animation.game_length(first) > 0, f"game_length reads the curves ({animation.game_length(first)})")
+    fps_kept = scene.render.fps
+    scene.render.fps = 60
+    rows = [(animation.game_length(r.action), animation.get_lmt_props(r.action).num_frames) for r in lmt.actions if r.action]
+    scene.render.fps = fps_kept
+    over = [r for r in rows if r[0] > r[1]]
+    same = sum(1 for a, b in rows if a == b)
+    check(not over and same >= 0.8 * len(rows),
+          f"Frames From Action gives the file's frame count: last key + 1 ({same} of {len(rows)} equal, over: {over[:3]})")
 
     # -- foot IK ghost plays the same action --------------------------------------------------------------
     ground = bpy.data.objects.new("ground", bpy.data.meshes.new("ground"))

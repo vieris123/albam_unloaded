@@ -158,6 +158,7 @@ class ALBAM_PT_AlbamActionSection(LmtPanelBase, bpy.types.Panel):
         )
         col = row.column(align=True)
         col.operator("albam.add_anim", icon="ADD", text="")
+        col.operator("albam.add_existing_anim", icon="ACTION", text="")
         col.operator("albam.remove_anim", icon="REMOVE", text="")
 
         action = _active_action(context)
@@ -176,6 +177,7 @@ class ALBAM_PT_AlbamActionSection(LmtPanelBase, bpy.types.Panel):
         sub.operator("albam.lmt_frames_from_action", text="", icon="FILE_REFRESH")
         col.prop(props, "loop_frames")
         col.prop(props, "source_fps")
+        layout.operator("albam.lmt_root_motion", icon="CON_LOCLIKE")
 
 
 @blender_registry.register_blender_type
@@ -332,16 +334,81 @@ class ALBAM_OT_LmtRemove(bpy.types.Operator):
         return {"FINISHED"}
 
 
-_ACTION_ITEMS = []  # Blender needs a reference to dynamic enum items
+def _curve_bones(action):
+    """{bone name: curve count} of an action's pose bone curves, and its count of other curves (the object's own)"""
+    bones, other = {}, 0
+    for fc in blender_compat.action_fcurves(action):
+        if fc.data_path.startswith('pose.bones["'):
+            name = fc.data_path.split('"')[1]
+            bones[name] = bones.get(name, 0) + 1
+        else:
+            other += 1
+    return bones, other
 
 
-def _get_action_items(self, context):
-    _ACTION_ITEMS.clear()
+_COMPATIBLE = {"key": None, "names": []}
+ROOT_MOTION_MIN = 0.1      # m of hips travel from which Add Existing Animation offers root motion
+
+
+def compatible_actions(lmt):
+    """names of the actions that animate at least one game joint of the LMT's armature and aren't in it yet"""
+    armature = lmt.armature
+    if armature is None:
+        return []
+    key = (armature.name, len(bpy.data.actions), len(lmt.actions), len(armature.data.bones))
+    if _COMPATIBLE["key"] != key:
+        joints = {b.name for b in armature.data.bones if b.get("mtfw.anim_retarget") is not None}
+        in_lmt = {item.action for item in lmt.actions}
+        names = []
+        for action in bpy.data.actions:
+            if action in in_lmt:
+                continue
+            bones, _ = _curve_bones(action)
+            if joints.intersection(bones):
+                names.append(action.name)
+        _COMPATIBLE.update(key=key, names=sorted(names, key=str.lower))
+    return _COMPATIBLE["names"]
+
+
+def action_summary(action, armature):
+    """what an action will give an LMT on this armature: lines for the Add Existing Animation dialog, and whether any
+    is a warning (prefixed '!')"""
+    from albam.engines.mtfw import joints as mjoints
+    bones, other = _curve_bones(action)
+    names = armature.data.bones.keys()
+    game = [n for n in bones if n in names and not mjoints.is_helper(armature.data.bones[n])
+            and armature.data.bones[n].get("mtfw.anim_retarget") is not None]
+    missing = [n for n in bones if n not in names]
+    helpers = [n for n in bones if n in names and n not in game]
+    lo, hi = action.frame_range
+    lines = [f"{len(game)} joints animated, frames {lo:g} to {hi:g}"]
+    if missing:
+        lines.append(f"!{len(missing)} bones the armature doesn't have ({', '.join(sorted(missing)[:3])}...): not exported")
+    if helpers:
+        lines.append(f"{len(helpers)} helper or unnumbered bones: not exported")
+    if other:
+        lines.append("!It moves the armature object itself: that motion isn't exported (bake it into the bones)")
+    return lines
+
+
+def _on_existing_action(self, context):
+    action = bpy.data.actions.get(self.action)
+    if action is None:
+        return
     lmt = get_active_lmt(context)
-    in_lmt = {item.action for item in lmt.actions} if lmt else set()
-    for i, action in enumerate(a for a in bpy.data.actions if a not in in_lmt):
-        _ACTION_ITEMS.append((action.name, action.name, "", "ACTION", i))
-    return _ACTION_ITEMS
+    if lmt is not None and lmt.armature is not None:
+        self.root_motion = _animation().hips_travel(lmt.armature, action) > ROOT_MOTION_MIN
+    props = get_lmt_props(action)
+    if props.num_frames:            # set up by an LMT before: its own settings
+        self.source_fps = props.source_fps
+        self.loops = props.loop_frames >= 0
+        self.loop_start = max(props.loop_frames, 0)
+
+
+def _search_existing(self, context, edit_text):
+    lmt = get_active_lmt(context)
+    text = edit_text.lower()
+    return [n for n in compatible_actions(lmt) if text in n.lower()] if lmt else []
 
 
 def _action_length(action, context):
@@ -352,17 +419,121 @@ def _action_length(action, context):
     return int(round((scene.frame_end - scene.frame_start) * 60 / get_lmt_props(action).source_fps))
 
 
+def _slot_owner(lmt, slot):
+    return next((item.action.name for item in lmt.actions if item.action and get_lmt_props(item.action).lmt_id == slot), None)
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_LmtAddExistingAnim(bpy.types.Operator):
+    """Add an animation you already have (retargeted, baked, from another LMT) to this LMT, with its frame rate,
+    looping and slot. Only actions that animate this LMT's armature are offered"""
+    bl_idname = "albam.add_existing_anim"
+    bl_label = "Add Existing Animation"
+    bl_options = {"REGISTER", "UNDO"}
+
+    action: bpy.props.StringProperty(
+        name="Action", search=_search_existing, update=_on_existing_action,
+        description="The action to add: type to filter. Listed are the actions with curves on this LMT's armature's "
+                    "game joints that aren't in the LMT yet")
+    source_fps: bpy.props.FloatProperty(
+        name="Frame Rate", min=1.0, max=240.0, default=60.0,
+        description="Frame rate the action was made at. The game plays at 60 fps and export converts: a 30 fps action "
+                    "keeps its speed. Actions from an LMT bring their own")
+    loops: bpy.props.BoolProperty(
+        name="Loops", description="The animation loops (idles, runs); off: it plays once and holds its last frame")
+    loop_start: bpy.props.IntProperty(
+        name="Loop Start", min=0, description="Game frame (60 fps, from the first key) the loop goes back to")
+    slot: bpy.props.IntProperty(
+        name="Slot", min=0, description="The LMT slot it goes in: the index the game asks for. The first free one is "
+                                        "picked; a taken one is flagged")
+    root_motion: bpy.props.BoolProperty(
+        name="Root Motion from Hips",
+        description="Move the hips' travel across the floor to root motion (joint 255), which moves the character in "
+                    "the game; without it the body walks away from where the character stands. Edits the action; on "
+                    "by itself when the hips travel more than 10 cm")
+
+    @classmethod
+    def poll(cls, context):
+        lmt = get_active_lmt(context)
+        return lmt is not None and lmt.armature is not None
+
+    def invoke(self, context, event):
+        lmt = get_active_lmt(context)
+        self.slot = lmt.free_slot()
+        render = context.scene.render
+        self.source_fps = render.fps / render.fps_base
+        _COMPATIBLE["key"] = None
+        return context.window_manager.invoke_props_dialog(self, width=460)
+
+    def draw(self, context):
+        lmt = get_active_lmt(context)
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(self, "action", icon="ACTION")
+        action = bpy.data.actions.get(self.action)
+        if action is not None:
+            for line in action_summary(action, lmt.armature):
+                layout.label(text=line.lstrip("!"), icon="ERROR" if line.startswith("!") else "INFO")
+            old = self.source_fps
+            length = int(round((action.frame_range[1] - action.frame_range[0]) * 60 / old))
+            layout.label(text=f"About {length} game frames at 60 fps", icon="TIME")
+            travel = _animation().hips_travel(lmt.armature, action)
+            if travel > 0.01:
+                layout.label(text=f"The hips travel {travel:.2f} m across the floor", icon="CON_LOCLIKE")
+        layout.prop(self, "source_fps")
+        layout.prop(self, "root_motion")
+        row = layout.row()
+        row.prop(self, "loops")
+        sub = row.row()
+        sub.enabled = self.loops
+        sub.prop(self, "loop_start", text="From")
+        row = layout.row()
+        owner = _slot_owner(lmt, self.slot)
+        row.alert = owner is not None
+        row.prop(self, "slot")
+        if owner is not None:
+            layout.label(text=f"Slot {self.slot} is taken by {owner}", icon="ERROR")
+
+    def execute(self, context):
+        lmt = get_active_lmt(context)
+        action = bpy.data.actions.get(self.action)
+        if action is None:
+            self.report({"ERROR"}, "Pick an action")
+            return {"CANCELLED"}
+        if self.root_motion:
+            try:
+                _animation().extract_root_motion(context, lmt.armature, action)
+            except Exception:  # noqa: BLE001 - shown in the error popup
+                bpy.ops.albam.error_handler_popup("INVOKE_DEFAULT")
+                return {"CANCELLED"}
+        action.albam_asset.app_id = "dmc4"
+        action.use_fake_user = True
+        props = get_lmt_props(action)
+        props.source_fps = self.source_fps
+        props.num_frames = _action_length(action, context)
+        props.loop_frames = min(self.loop_start, max(props.num_frames - 1, 0)) if self.loops else -1
+        props.lmt_id = self.slot
+        lmt.num_slots = max(lmt.num_slots, self.slot + 1)
+        owner = _slot_owner(lmt, self.slot)
+        lmt.add(action)
+        lmt.active_id = len(lmt.actions) - 1
+        _COMPATIBLE["key"] = None
+        if owner is not None:
+            self.report({"WARNING"}, f"Slot {self.slot} is also {owner}'s: change one before exporting")
+        return {"FINISHED"}
+
+
 @blender_registry.register_blender_type
 class ALBAM_OT_LmtAddAnim(bpy.types.Operator):
-    """Add an animation to the LMT, in the first free slot"""
+    """Add a new, empty animation to the LMT, in the first free slot (Add Existing Animation, below, takes an action
+    you already have)"""
     bl_idname = "albam.add_anim"
     bl_label = "Add Animation"
     bl_options = {"REGISTER", "UNDO"}
 
-    use_existing: bpy.props.BoolProperty(name="Use Existing Action")
-    action_name: bpy.props.EnumProperty(items=_get_action_items, name="Action")
-    name: bpy.props.StringProperty(name="Name", default="Anim")
-    slot: bpy.props.IntProperty(name="Slot", min=0)
+    name: bpy.props.StringProperty(name="Name", default="Anim", description="Name of the new action")
+    slot: bpy.props.IntProperty(name="Slot", min=0, description="The LMT slot it goes in (the first free one is picked)")
 
     @classmethod
     def poll(cls, context):
@@ -376,22 +547,12 @@ class ALBAM_OT_LmtAddAnim(bpy.types.Operator):
         layout = self.layout
         layout.use_property_split = True
         layout.use_property_decorate = False
-        layout.prop(self, "use_existing")
-        if self.use_existing:
-            layout.prop(self, "action_name")
-        else:
-            layout.prop(self, "name")
+        layout.prop(self, "name")
         layout.prop(self, "slot")
 
     def execute(self, context):
         lmt = get_active_lmt(context)
-        if self.use_existing:
-            action = bpy.data.actions.get(self.action_name)
-            if action is None:
-                self.report({"ERROR"}, "Pick an action")
-                return {"CANCELLED"}
-        else:
-            action = bpy.data.actions.new(self.name)
+        action = bpy.data.actions.new(self.name)
         action.albam_asset.app_id = "dmc4"
         action.use_fake_user = True
 
@@ -425,6 +586,35 @@ class ALBAM_OT_LmtRemoveAnim(bpy.types.Operator):
         lmt = get_active_lmt(context)
         lmt.actions.remove(lmt.active_id)
         lmt.active_id = max(0, min(lmt.active_id, len(lmt.actions) - 1))
+        return {"FINISHED"}
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_LmtRootMotion(bpy.types.Operator):
+    """Move the hips' travel across the floor to root motion (joint 255), which moves the character in the game.
+    Without it the body walks away from where the character stands. The hips keep their height; the preview looks
+    the same"""
+    bl_idname = "albam.lmt_root_motion"
+    bl_label = "Root Motion from Hips"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        lmt = get_active_lmt(context)
+        return _active_action(context) is not None and lmt.armature is not None
+
+    def execute(self, context):
+        lmt = get_active_lmt(context)
+        action = _active_action(context)
+        try:
+            moved = _animation().extract_root_motion(context, lmt.armature, action)
+        except Exception:  # noqa: BLE001 - shown in the error popup
+            bpy.ops.albam.error_handler_popup("INVOKE_DEFAULT")
+            return {"CANCELLED"}
+        if moved is None:
+            self.report({"INFO"}, f"{action.name}: the hips have no location keys, nothing to move")
+        else:
+            self.report({"INFO"}, f"{action.name}: {moved:.2f} m of travel is root motion now")
         return {"FINISHED"}
 
 

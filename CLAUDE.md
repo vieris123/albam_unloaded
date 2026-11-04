@@ -213,7 +213,26 @@ LMT work happens outside the 3D View export flow. `albam.export_anim` writes an 
   - In the game, the two event tables are (value, duration) runs that always start at frame 0 and add up to `num_frames`. All 256 DX9 blocks on disk follow this.
   - Export fills a gap before the first event, or an empty table, with zero-value events.
 - **Slots:**
-  - Add Animation picks the first free slot.
+  - Add Animation makes a new action in the first free slot. **Add Existing Animation** (`albam.add_existing_anim`,
+    2026-11-03) takes an action you have: a search of the actions with curves on the LMT armature's game joints
+    (`compatible_actions`), a summary (`action_summary`: joints animated, bones the armature lacks, object motion,
+    which isn't exported), and the Frame Rate, looping and slot (a taken one is flagged, not refused). An action set up
+    by an LMT before brings its own frame rate and loop. Test: `tests/blender/test_lmt_add.py`.
+  - **Root Motion from Hips** (`albam.lmt_root_motion`, and a checkbox in Add Existing Animation, on past 10 cm of
+    travel; `animation.extract_root_motion`): joint 0's travel across the floor (armature X / Y) moves from its location
+    keys onto `root_motion` (joint 255, which moves the character in the game); the hips keep their height, turning
+    stays with them. Computed from the keys (the hips' position is linear in them), not by stepping frames. Retargeted
+    animations that carried travel on the hips (2B's) walked the body away from the character in the game without it.
+    The root's Copy Location from `root_motion` is in POSE space since 2026-11-03 (WORLD added the armature object's own
+    position again).
+  - **Root-motion end** (block header `end_pos` / `end_quat`, `root_motion_end`): `updateFrame` adds it when a motion
+    wraps. Dante's pl006_01: `end_quat` is 0 0 0 1 everywhere; `end_pos` = the joint 255 position on the last frame, or
+    for a loop from a later frame one loop's travel (the position one frame past the end minus the loop frame's).
+    Albam's default was 0 0 0 0 until 2026-11-03: every animation made in Blender exported a zero rotation, and 2B
+    zipped around the room. Export now fills both when `end_quat` was never set (import always sets it; values typed
+    in the panel are kept).
+  - **Frames** (`game_length`, Frames From Action) = the last key's game frame + 1, as the game counts (79 of Dante's 80
+    blocks; the other ends early). It was one short until 2026-11-03.
   - Selecting an animation in the list assigns it to the armature (the `active_id` update callback).
   - `_check_lmt_group` raises `AlbamCheckFailure` for slot clashes, slots ≥ `num_slots`, events with missing markers or outside the animation, and two events of one type on the same frame.
 
@@ -424,7 +443,10 @@ This reproduces the game's player foot planting (`cLegIkCtrl` + `cCnsIK`, see `V
       loop in the game. Every DX9 track follows the rule (6,187 rotation and 729 location / scale tracks hold their
       loop-frame value). Only rotation keys split gaps over 255 frames (8-bit duration); location / scale keys
       store 32-bit durations, as the game's files do.
-  - Import puts keys on their game frames; durations become `None` padding frames. The framerate is forced to 60.
+  - Import puts keys on their game frames; durations become `None` padding frames. The framerate is set to 60 and the
+    first animation plays, but only when the armature plays no action yet: since 2026-11-03 an armature already playing
+    one keeps it, with its pose, rotation modes and the scene's frame rate (it used to look like the import overwrote
+    the user's animations; test `tests/blender/test_lmt_import_keeps.py`).
   - **Events** are pose markers named `ev{1|2}_{frame}_{group_id}` on import (ev1 = Hitbox, ev2 = Sound). See [LMT section](#lmt-section-dope-sheet--action-editor-sidebar--albam-beta). In the first table, slot bit k turns on `.col` group `events_params_01[k]` (see "Groups follow the LMT events" under Model chains). The second table is sound effects with the same slot scheme (slot bit k plays `events_params_02[k]`, per the user); sound isn't scoped in Albam yet.
   - **Track export** (`_serialize_tracks`):
     - Tracks are built per (bone, property) straight from `action.fcurves` (`_get_export_tracks`), so F-Curve grouping doesn't matter: FBX and Bake Action output works as-is. Order matches the game's files: root motion first, then armature bone order, then rotation > location > scale.
