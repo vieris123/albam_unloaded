@@ -109,8 +109,23 @@ What it changes (Undo reverts all of it):
   like the game's afterwards: short, and not pointing along the limbs. That's expected.
 - **The pose and the mesh:** the mesh, with every shape key, is posed into the game model's stance (an A-pose goes to
   a T-pose, palms matched). Feet and toes keep their pitch, so heels stay heels.
-- **Size:** the model is scaled so its hips stand as high as the game model's. Turn off **Match Size** to keep its size,
-  but the animations still lift the hips to that height, so a smaller model's feet leave the floor.
+- **Size:** the model is scaled so its hips stand as high as the game model's. Turn off **Match Size** to keep its own
+  size. **Animations at Own Size**, on by default, then keeps its feet on the floor (it needs dmc4_hook):
+  - **The new root:** a root bone `game_size_root` above joint 0, at the game's model frame, with a number no animation
+    uses.
+  - **The list:** two Offsets in the model's list (a new `model_ext\<model>_size.xml` if no list has it yet): the root
+    scaled by the model's size against the game model's, joint 0 by the inverse. The game's hip motion shrinks to the
+    model's height, while its bones keep their own size, so chains and collision built at that size stay right.
+  - **The catch:** moves still carry it the game model's distances, so the feet slide a little, and jumps and dashes keep
+    the game's height and length.
+  - **Needs a recent dmc4_hook:** the new root moves joint 0 to the second slot of the joint table. The game only copes
+    with that while a model swaps its file (Dante's Devil Trigger) with dmc4_hook built after 2026-11-03; older builds
+    crash when Devil Trigger is toggled.
+  - **Undoing it:** running it again keeps one root and two Offsets; Match Size on removes them and scales the model
+    instead.
+  - **An existing game-size setup:** a model already set up at the game's size, with parts, chains and collision (Ellen),
+    has to be scaled down first: rigs, meshes, shapes and chain settings. That's a script for now (Ellen, 2026-11-03:
+    `Ellen true size.blend`, the "ellen (org size)" mod).
 - **Hips:** joint 13 goes to the bone the thighs hang from.
 - **Missing joints:** joints the game model has and the rig lacks are added as small bones that deform nothing
   (`game_shoulder_deform_r`...). Leave them: the game reads some without checking they exist, and a missing one
@@ -143,19 +158,82 @@ with the same numbers, and give its own bones numbers the body doesn't have: joi
 
 - **A file holds 32 slots** (bones plus one between tendrils): 3 tendrils of 5, or one side of a long ribbon.
 - **Don't copy a coat's gravity.** Nero's is a sideways vector tuned to trail behind him, and it blows a skirt to one side.
-- **Keep a flared skirt's shape with weak gravity and a low blend** (gravity 0.03, `mBlend` 0.4 on Ellen). Stronger gravity
-  collapses the flare onto the legs, and collision then shoves it back out into a shelf.
+- **Keep a flared skirt's shape with weak gravity and a low blend** (gravity 0.03, `mBlend` 0.4 on Ellen's sides and
+  back). Stronger gravity collapses the flare onto the legs, and collision then shoves it back out into a shelf. The
+  columns the legs push through are the exception: see the links below.
 - **Keep collision shapes inside the cloth at rest.** A capsule that pokes through makes the cloth drape over nothing.
   Start thigh capsules partway down the thigh, and remember the chain's `mCollisionSize` adds to their radius.
 - **For walking, use pairs of capsules in front of and behind the thigh** rather than one fat one, upper and lower pairs
   tapering toward the knee. They catch the stride without pushing the skirt's sides outward, which makes the shelf.
+- **A leg between two bone columns opens a seam, and the chain settings can't close it.** Each column is simulated on
+  its own, so collision shoves both sideways and the cloth between them stretches open (2B's left thigh, columns from
+  joints 225 and 220, 2026-11-04). Tried and reverted:
+  - **A third column in front of the leg, as a chain:** capsule collision has no friction, so the leg pushes it round
+    its side and it ends up behind the thigh.
+  - **The same column pinned to the thigh** (`<pin mode="rot">`): it looked better in the preview but not in the game.
+  - **Limits on the columns' roots** (with the roots' rest set to the clamp's own rebuild, so nothing twists): the
+    seam opened *wider* in the preview. The solver places every joint below a root from its own simulation, and a
+    limit only clamps a bone's rotation, keeping its position (`Vibed/RE/chain_cnschain.md` 3.2 h and j). So limits
+    only hold single-bone chains (Ellen's chest), not a column's lower joints.
+  - What holds two columns together is a **Link** between their joints in the model's list (see The list file).
+    Link only the seams the legs push through, the front: each linked seam makes the cloth less able to get out of the
+    leg's way. On 2B a ladder round the whole skirt made a stiff tube the legs went through (cloth behind a thigh while
+    running 282-394, against 10 with the front linked), and a single ring at the hem let the panels part above it
+    (159-184): link every row of a front seam, and leave the back free. Then **raise the linked chains' collision radius**: the column meets the leg while the
+    leg is still behind it, so the push is forward, and the links stop the columns spreading. 2B, 16 links across the
+    front-left (the seam at the thigh at its rest distance + 0.5 cm, the others + 2 cm), radius 1.5 -> 7.5 and Blend with
+    Animation 1.0 on those chains: in the preview, cloth inside the leg over a stride went from 7,156 / 9,520 (slow /
+    fast) to 0 / 0, and on a 100 deg leg raise the cloth stopped tucking in behind the thigh (41 / 52 joint-frames -> 3 /
+    8). A low blend pulls the cloth back toward its modelled place, which a raised thigh now occupies, so it folds in
+    behind the leg; a big radius with a 0.7 blend pushed the skirt out at rest (21 cm). Check a leg raise as well as a
+    stride.
+  - **Turn Carried by Parent on for clothing** (Follow Position + Follow Rotation, Parent 1, as the game's coats). Off,
+    the cloth stays in the world while she runs, so her legs come forward through it and it ends up behind them (2B:
+    front-left cloth behind a thigh 63 joint-frames striding in place, 146 running; with carry on, 63 at any speed).
+  - **At Blend 1.0, give the cloth real gravity.** Nothing else brings lifted cloth back down: real gravity is about
+    0.27 cm per frame² at 60 fps, and 2B's dress had 0.03, so after a leg raise it stayed bunched (20 cm off its shape
+    1.5 s later). 0.3 halved that, with the resting shape barely changed. The big radius and the links that stop the
+    tuck also keep some folds in place after the leg drops: smaller radius or no links bunch less but tuck more.
+  - **Only on the chains the legs push through.** The back of a skirt sits out over the butt because of its modelled
+    shape: at Blend 1.0 with real gravity 2B's back hung straight down and her butt clipped through (back panels 3.8 cm
+    in towards her body on average, 15 cm at worst). Keep the back at a low blend (0.4) with weak gravity, or give the
+    butt collision shapes. These settings are per chain file, so sort the columns into files by where they hang:
+    2B's back-left columns (135, 140) sat in the front-left file and clipped her hip until they moved to the back file
+    (worst 14 -> 8 cm), while the column right beside the thigh (193) has to stay with the front ones or the leg goes
+    through it again.
+  - **Side seams at idle.** Where the linked front meets the free back, the seam opens when she stands with her legs
+    apart, and the legs show through (2B: up to 5-6 cm with the thighs 15 deg out). Linking the bottom rows of a seam
+    that sits clear of a thigh closes it (2B's right side, 169|174, two rows at + 1 cm: 4.9 -> 1.6 cm) for little cost
+    to the legs. A seam right beside a thigh has to stay free: on 2B's left side (193|135) every link made the left leg
+    tuck 3-6 times as often. With the right side linked, 2B's idle looked right (2026-11-04).
+  - **Where a Blend 1.0 file meets a low-blend one, link that seam too.** The two settle differently and the seam
+    between them opens (Ellen: 6 cm between her front and side columns with the legs apart). Linking its bottom two
+    rows closed it and took the last tucks out: cloth behind / inside a thigh went from 78 / 53 striding and 70 / 80 on a
+    leg raise (as she was) to 0 everywhere; all four rows was worse on a leg raise (11-13 inside).
+  - **A flared skirt keeps its weak gravity.** Ellen's skirt stands out from her legs and doesn't bunch after a leg
+    raise (1.8 cm off its shape 1 s later at gravity 0.03), so 2B's 0.3 only made the front sag more (5.6 cm against
+    4.6). Blend 1.0 alone costs some of the flare's shape (4.6 cm against 1.4 at 0.4); Blend 0.7 let cloth into the
+    thighs again on a leg raise.
+- **Blend with Animation scales collision.** Collision pushes the simulation, and a low blend draws only that fraction
+  of the push.
 - **One chain can collide with another part.** Put its `.col` on that part's joints, with capsules along the moving bones,
-  and set `collision_model` to that part. A chain finds its collision model when it spawns and lists load in name order,
-  so attach that part first: keep both in one list, in that order, or the chain silently gets no collision.
+  and set `collision_model` to that part. A dmc4_hook built before 2026-11-03 looks the model up once, when the chain
+  spawns, so attach that part first (both in one list, in that order), or the chain silently gets no collision. Newer
+  builds retry until the model is out, so the order doesn't matter there.
 - **Gravity can have a direction.** With `mGravityLocal` on it's in the character's own frame, so `-Z` pulls backward
   whichever way she faces (game axes: Y up, +Z forward).
 - **`mBlend` compounds along a chain.** A 19-joint tail needs about 0.2 or it behaves like a rope.
 - **Judge it with textures on.** A grey render hides a panel sticking out.
+- **To stop a bone swinging one way, use Limits** (Bone Properties > Chain Bone, Z axis). Set the blocked side at the bone's
+  rest angle and leave the other side open. Three things decide whether a clamp works:
+  - **The bone's rest pose:** when a clamp engages, the game rebuilds the bone's rotation from the two measured angles and
+    drops any roll. A bone rolled against that rebuild flips half a turn on every clamp (Ellen's chest did). Give the bone
+    the rest the rebuild produces, with the chain along +Y, and copy that rest to every model sharing the joint.
+  - **Up Axis:** keep it positive (+X / +Y / +Z). The preview applies a negative one negated, which turns the bone half a
+    turn.
+  - **Pointing straight up or down:** the measured axis must not point that way, or swings past it read backward. With the
+    chain on +Y, the measured Z is near horizontal.
+  - Ellen's chest: `Ellen true size.blend`, 2026-11-03. Not checked in the game yet.
 
 ### The list file
 
@@ -169,8 +247,33 @@ The game finds extra parts through a list in `nativePC\model_ext`. Albam can wri
 To edit a list you already have, add its `nativePC` folder to Game Files and import the `.xml`. Anything you don't change,
 comments included, stays exactly as it was.
 
-**Preview Attachments** makes the list's attachments follow their owners in the viewport, as they do in the game. A chain's
-bones stay free, because the game gives them to the chain. The constraints are never exported.
+A **Model** entry can also hold joint constraints, added with the buttons on its row. The search button picks a joint by its
+bone's name:
+
+- **Pin:** a joint follows another joint, on any model. Blend mixes it with the joint's own animation.
+- **Aim:** an axis of a joint points at another joint, for example a head looking at a target.
+- **Offset:** a joint is moved, turned or scaled, on top of the animation or instead of it.
+
+A joint holds one entry, and the first in file order wins. A constraint beats a skin attachment's follow on that joint. Some
+joints refuse constraints, and the panel warns about them:
+
+- **A chain's joints.**
+- **The player body's joints 1 and 13**, which shake on hits.
+- **The ankles, 16 and 20**, which the foot planting holds. The thighs and shins (14, 15, 18, 19) take a constraint, but lose it
+  while the feet are planted.
+- **Face, hair and coat joints that are pinned to the body.** There is no fractional twist: a Pin with Blend 0.5 mixes in half the bend too.
+
+A **Link** on a Model entry keeps two of its chain joints within a distance (Max, in cm), so neighbouring tendrils can't
+part: the game simulates every tendril alone, so nothing else holds them together. It isn't a constraint: it holds no joint
+and runs after the chains have moved. Both joints must be held by chains listed on that model. A tendril's first joint keeps
+its place, so its partner takes the whole pull, and a link between two first joints is refused. Max at the rest distance,
+or a little more, holds the cloth without making it look stiff. A link can pull a joint into a collision shape for a frame.
+The chain preview runs the links, as the game does (needs a dmc4_hook with links).
+
+**Preview Attachments** shows the attachments and constraints in the viewport. A chain's bones stay free, because the game gives
+them to the chain. It uses `ALBAM_` constraints and `EXTP_` Empties, which are never exported. It's close, not exact: Blend is
+approximate, Aim's Up axis is approximate and its Limit isn't shown. On a coat model, set Of, because the preview can't tell
+whose coat it is.
 
 ## Limits and notes
 

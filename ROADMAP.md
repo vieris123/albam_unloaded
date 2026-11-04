@@ -100,7 +100,9 @@ The game behaviour is known; Blender only approximates it. The other preview gap
 
 - [ ] **Model chains: check per-bone limits in the game.** No shipped chain enables mBoneAdjust; Albam writes and
   previews it from the decompiled code (grid 2 clamps cleanly, grids 0 / 1 don't measure back inside their limits as
-  decoded). Patch a chain with a limited bone and compare.
+  decoded). First real use: Ellen's chest (`chains\boobs.clt` in both ellen mods, 2026-11-03: grid 2, X max at the
+  rest + 0.5 deg, the bones re-framed to the clamp's no-roll rebuild, mDir +Y). Compare in the game; a half-turn flip
+  on a clamp would mean the rebuild differs from the decode.
 - [ ] **Model chains: Dante's coat attachment.** The preview's Attach to Body uses body joint 2, which is what
   `uPlayerNero::initModel` does for Nero's coat; Dante's (pl006_03, `uPlayerDante::setupDanteModel`?) wasn't traced.
 - [ ] **Move definition files: Albam's share (phase C, started 2026-10-29).** One XML per player move, run by
@@ -118,7 +120,7 @@ The game behaviour is known; Blender only approximates it. The other preview gap
     fixed `bank=`; `block=` needs an `<lmt path>`, excludes `motion=`, 0-255; `motion=` in a runtime bank, 10-14 and Nero's
     4 / 6-9, is refused unless it's the file's own fixed bank (overlays exempt), a bank over 15 always, as the runner does).
     Grab overlays: `motion="15:N"`, Cancels from .ctn reads the chosen enemy's `.ctn` bank 10-29. Per-enemy grab
-    overlays would need a runner attribute (not asked for yet). Runner side written, not built yet.
+    overlays would need a runner attribute (not asked for yet). Runner side built 2026-11-04, not checked in the game yet.
   - [x] **Extract a vanilla motion's cancels** from `.ctn` (`movedef/extract.py`, Cancels from .ctn): all 941 scripts of
     pl000 / pl006 extract and check clean; the 12 looping ones are flagged (the runner can't override them).
   - [x] **`.atk` codec** upstream (`dmc4xml/atk.py`, `tests/test_atk.py`: 61 DX9 files byte-identical; the 6 SE ones,
@@ -138,9 +140,40 @@ The game behaviour is known; Blender only approximates it. The other preview gap
     the Export list, byte-for-byte text, Object Properties panel, checks (including a collision model that isn't out
     when its chain spawns), Fill from Scene, attachment preview (skin, rigid). Tests: `test_model_ext`,
     `corpus/ext_list_check`. On Ellen's file Fill gives all 14 installed entries; her 4 lists round-trip.
-  - [ ] **Check the rigid preview against the game.** The formula comes from the runner and the joint-frame rule; no
-    rigid attachment has been compared in-game.
-  - [ ] **Constraints (Cns):** new list elements and their preview, once the runner's spec lands (`Vibed\ModelExt\schema.md`).
+  - [x] **Constraints** (`<pin>`, `<aim>`, `<offset>`, spec `Vibed\ModelExt\schema.md`): panel entries, a joint picker,
+    checks, preview with named constraints and offset Empties, each matrix tested against the schema's table.
+  - [x] **Links** (`<link a b max stiffness>`, 2026-11-04, runner `sdk/ChainLink`, built 2026-11-04): panel entry, checks (a
+    joint no listed chain holds, two tendril roots, a == b), run by the chain preview after the chains
+    (`cns_chain_preview.apply_links`: 4 passes, root rule, turn about the tendril parent, re-aim, velocity drop).
+    Test: `test_chain_link`. First use: 2B's left-thigh seam (rows 224-219 ... 221-216). Not checked in the game yet.
+  - [x] **Link Ellen's dress the same way** (2026-11-04, both ellen mods and blends): the front columns (13, 14, 0, 1, 2)
+    moved into `dress_00` (Blend 1.0, radius 7.5, gravity kept at 0.03, Parent 1 on every dress chain), the four front
+    seams linked row by row (the seams over the thighs + 0.5 cm, the others + 2 cm) and the bottom two rows of the
+    seams where the front meets the sides (2|3, 12|13, + 1 cm); 20 links. In the preview, cloth behind / inside a thigh
+    went from 78 / 53 (stride) and 70 / 80 (leg raise) to 0 everywhere; the front of the flare sags 4.6 cm standing
+    (1.4 before). Not checked in the game.
+  - [ ] **Check the preview against the game.** The formulas come from the runner and the schema. dmc4_hook's constraints
+    and retrying lookups were written 2026-11-03 and built 2026-11-04; no rigid attachment or constraint has been compared in-game.
+  - [ ] **Fractional twist / the mean of two joints** (forearms, skirt roots): needs a new runner element. No game class
+    does it, and `wrist_deform` (202 / 206) has no roll to borrow, only up to 7 deg of the wrist's bend. Not needed for
+    Ellen (measured 2026-11-03): her wrist rolls up to 107 deg, but her cuffs hide it and only 4-5 of ~1,600 forearm
+    edges squash. Wait for a model with bare forearms.
+  - [x] **In-game test list** (big head, neck aim, sword pinned above the head): worked in the game, removed 2026-11-03.
+  - [ ] **True size in the game** ("ellen (org size)" mod, `Ellen true size.blend`, 2026-11-03): a new root joint 73
+    scaled 0.72 by `<offset>` and joint 0 by 1 / 0.72, with the rig, meshes, shapes and chain settings scaled 0.72. The
+    preview keeps her feet on the floor and the chain metrics identical; not tried in the game. Root motion stays
+    Nero's, so expect foot sliding. Automated 2026-11-03: Match Game Skeleton > Match Size off > Animations at Own Size
+    (`skeleton_match.keep_own_size`, test in `test_match_skeleton`). Shrinking an existing game-size setup is still a
+    script.
+  - [ ] **2B on Dante** ("2B (Albam)" mod, `2B_DMC4.blend`, 2026-11-03): own size 0.831; hair, whole dress and tattered
+    dress as their own models with chains and collision on their own copies of the body's joints. The tattered dress is
+    on the Devil Trigger body, `model\game\pl006\pl009` = a copy of her body .mod, with the size offsets too.
+    Preview-checked on Dante's walk / run; nothing tried in the game. The DT toggle crash was the game's setModel race
+    with joint 0 at index 1 (fixed in dmc4_hook, built 2026-11-04; the toggle not retried yet).
+    Her 928 NieR motions are retargeted onto the matched rig as `2B_<motion>` actions (muted NLA tracks): per-bone constant
+    corrections from Match's plan, the rip's object root motion baked into the hips, keys only on the original key
+    frames; checked against the original deformation (median under 0.4 mm). The original rig is kept as
+    `2BRip_Original` (not exported). Not made into LMTs yet (frame rate and root motion split still to decide).
 
 - [ ] **Hitboxes (saved for later, 2026-10-10).** Four file types keyed to a model's joints, already mined in IDA
   (per the user) and described by 010 templates in `E:\DMC mod stuffs\DMC4 templates`:
@@ -191,10 +224,10 @@ The game behaviour is known; Blender only approximates it. The other preview gap
   Open:
   - [ ] **Check in the game:** a static prop and a small skinned model (bones from scratch, an LMT on them) load
     and draw; the generated part record keeps meshes drawn at every distance.
-  - [ ] **Images to DDS.** Export needs DDS images; Albam has no converter (PNG / TGA must be converted outside).
-    An uncompressed A8R8G8B8 writer from Blender pixels (with mips) would remove that step.
-  - [ ] **Normal maps.** DMC4 reads DXT5nm (X in alpha, Y in green); New DMC4 Model leaves a regular normal map
-    unconnected and says so. A swizzle on export (with the DDS writer) would let ordinary normal maps work.
+  - [x] **Images to DDS.** Done 2026-11-01 (`texture_convert.py`, `lib/dxt.py`, see Convert existing models): any
+    Blender image in a shader slot is encoded as DXT1 / DXT5 with full mips, and re-encoded when its pixels change.
+  - [x] **Normal maps.** Done 2026-11-01: a regular normal map is swizzled to DXT5nm (X in alpha, Y in green) and
+    connected. The green direction isn't checked in the game yet.
   - [ ] **Modifiers.** Export reads the mesh data and ignores every modifier but the vertex groups (a Mirror or
     Subdivision has to be applied first). Evaluating the mesh without its Armature modifier in `mesh_prep` would fix
     it.
