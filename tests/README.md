@@ -62,7 +62,8 @@ The tests only read game files, never write them.
 | `test_ribbon_nodes` | line ribbons built by the Ribbons node group match the points' camera-facing strips, UVs, colours and material |
 | `test_missing` | missing textures |
 | `test_new_bones`, `test_new_model` | (not effects) `.mod` export: bones added in Blender; New DMC4 Model (a static cube and a rig made from scratch, mesh preparation, part records; imported models pass through unchanged) |
-| `test_model_ext` | (not effects) ModelExtension lists: import / export byte for byte, Save to Game Folder, Fill from Scene, the panel, skin and rigid attachment preview |
+| `test_chain_link` | (not effects) ModelExtension `<link>` in the chain preview: two splayed tendrils pulled to `max`, joints keep their distance to their tendril parents and are re-aimed, a tendril root keeps its place, refused links reported and not run |
+| `test_model_ext` | (not effects) ModelExtension lists: import / export byte for byte, Save to Game Folder, Fill from Scene, the panel, the attachment and `<pin>` / `<aim>` / `<offset>` previews against the schema's matrices, who wins a joint |
 | `test_movedef` | (not effects) MoveDef move files: a new move / an overlay from LMT animations, frames as pose markers, the checks, Import / Write XML byte for byte apart from the edit, cancels from Nero's `.ctn`, `.atk` entries |
 | `test_material_display` | (not effects) DMC4 material display from the shader functions |
 | `test_culling`, `test_orient`, `test_billboard_face`, `test_billboard_modes`, `test_polygon_align`, `test_light`, `test_light_group` | preview rules: culling fade, particle orientation, camera facing, lights, light groups |

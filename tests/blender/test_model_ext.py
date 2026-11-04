@@ -121,6 +121,92 @@ root.albam_ext.preview = False
 check(not any(b.constraints for b in dress.pose.bones) and not prop.constraints, "turning it off removes the constraints")
 
 
+def near(a, b, tol=1e-4):
+    return all(abs(x - y) < tol for r, s in zip(a, b) for x, y in zip(r, s))
+
+
+# constraints: `joint` numbers on rigs posed so each formula of schema.md differs from a plain copy
+source = armature("source", "model\\game\\x\\source.mod", {"s0": (0, None, (0, 0, 1)), "s1": (1, "s0", (0.3, 0, 1.2)),
+                                                          "s2": (2, "s0", (-0.3, 0.2, 1.5))})
+rig = armature("rig", "model\\game\\x\\rig.mod", {"r0": (0, None, (0, 0, 1)), "r1": (1, "r0", (0, 0, 1.3)), "r2": (2, "r1", (0, 0, 1.5)),
+                                                 "r3": (3, "r1", (0.2, 0, 1.5)), "r4": (4, "r1", (-0.2, 0, 1.5)),
+                                                 "r5": (5, "r1", (0, 0.2, 1.5)), "r6": (6, "r1", (0, -0.2, 1.5)),
+                                                 "r7": (7, "r1", (0, 0.3, 1.6))})
+source.pose.bones["s1"].rotation_mode = "XYZ"
+source.pose.bones["s1"].rotation_euler = (0.3, 0.5, 0.2)
+source.pose.bones["s1"].location = (0.05, 0, 0.1)
+rig.pose.bones["r1"].rotation_mode = "XYZ"
+rig.pose.bones["r1"].rotation_euler = (0.2, 0, 0.1)
+rig.pose.bones["r3"].rotation_mode = "XYZ"
+rig.pose.bones["r3"].rotation_euler = (0, 0.4, 0)
+context.view_layer.update()
+fk = {n: rig.matrix_world @ rig.pose.bones[n].matrix.copy() for n in ("r2", "r3", "r4", "r5", "r6", "r7")}
+parent_fk = rig.matrix_world @ rig.pose.bones["r1"].matrix.copy()
+src1 = source.matrix_world @ source.pose.bones["s1"].matrix.copy()
+src2 = source.matrix_world @ source.pose.bones["s2"].matrix.copy()
+
+third = model_ext.new_root(context, "model_ext\\cns.xml", """<extensions>
+  <model path="model\\game\\x\\rig">
+    <pin joint="2" to="1" of="model\\game\\x\\source" pos="10 20 30" rot="0 90 0" scale="1"/>
+    <pin joint="3" to="1" of="model\\game\\x\\source" mode="rot" pos="10 0 0" rot="30 0 0"/>
+    <pin joint="4" to="1" of="model\\game\\x\\source" blend="0.5"/>
+    <offset joint="5" pos="10 0 0" rot="0 0 90" scale="2"/>
+    <offset joint="6" pos="10 0 0" add="false"/>
+    <aim joint="7" to="2" of="model\\game\\x\\source" axis="-x"/>
+    <offset joint="7" pos="1 0 0"/>
+  </model>
+</extensions>
+""", b"")
+third.albam_ext.preview = True
+context.view_layer.update()
+got = {n: rig.matrix_world @ rig.pose.bones[n].matrix.copy() for n in fk}
+trs = model_ext.offset_matrix
+d3 = model_ext.list_doc(third)
+entries = [e for e, _ in ext_list.constraints(d3)]
+check(near(got["r2"], src1 @ trs(entries[0])), "pin all: Src . T . R . S")
+want = src1.to_3x3() @ trs(entries[1]).to_3x3()
+check(near(got["r3"].to_3x3(), want), "pin rot: the rotation of Src . R")
+check((got["r3"].translation - (fk["r3"].translation + src1.to_3x3() @ Vector((0.1, 0, 0)))).length < 1e-4,
+      "pin rot: FK position + Src's rotation applied to pos")
+check((got["r4"].translation - fk["r4"].translation.lerp(src1.translation, 0.5)).length < 1e-4, "pin blend: halfway")
+check(near(got["r5"], fk["r5"] @ trs(entries[3])), "offset add: W . T . R . S")
+check(near(got["r6"], parent_fk @ trs(entries[4])), "offset add=false: P . T . R . S")
+aim = (src2.translation - got["r7"].translation).normalized()
+check((got["r7"].to_3x3() @ Vector((-1, 0, 0))).normalized().dot(aim) > 0.9999, "aim: the axis points at the target")
+names = [c.name for c in rig.pose.bones["r7"].constraints]
+check(len(names) == 1, "the second entry on a joint loses")
+check(any("first in file order" in i[2] for i in ext_list.issues([("cns.xml", d3)])), "and the check says so")
+
+item = next(e for e in third.albam_ext.elems if e.tag == "pin")
+next(a for a in item.attrs if a.name == "pos").value = "0 0 0"
+context.view_layer.update()
+want = (source.matrix_world @ source.pose.bones["s1"].matrix) @ trs(model_ext.list_doc(third).elems[2])
+check(near(rig.matrix_world @ rig.pose.bones["r2"].matrix, want), "an edit updates the preview")
+third.albam_ext.preview = False
+check(not any(b.constraints for b in rig.pose.bones), "turning it off removes the constraints")
+check(not any(o.get(model_ext.HELPER_PROP) == third for o in bpy.data.objects), "and the offset Empties")
+
+dressed = model_ext.new_root(context, "model_ext\\claim.xml", """<extensions>
+  <attach path="model\\game\\x\\dress" to="model\\game\\x\\body"/>
+  <model path="model\\game\\x\\dress"><offset joint="0" pos="1 0 0"/></model>
+</extensions>
+""", b"")
+dressed.albam_ext.preview = True
+check(not any(c.name == model_ext.FOLLOW for c in dress.pose.bones["hips2"].constraints), "an entry beats the skin follow")
+check(any(c.name.startswith(model_ext.CNS) for c in dress.pose.bones["hips2"].constraints), "and holds the joint")
+dressed.albam_ext.preview = False
+chained = model_ext.new_root(context, "model_ext\\refused.xml", """<extensions>
+  <model path="model\\game\\x\\dress"><pin joint="1" to="1"/><offset joint="99"/></model>
+</extensions>
+""", b"")
+found = [i[2] for i in model_ext.all_issues(context, chained)]
+check(any("a chain holds joint 1" in m for m in found), "a chain's joint is reported")
+check(any("no joint 99" in m for m in found), "a missing joint is reported")
+chained.albam_ext.preview = True
+check(not dress.pose.bones["spine2"].constraints, "and a chain keeps its joint in the preview")
+chained.albam_ext.preview = False
+
+
 class Stub:
     def __getattr__(self, name):
         return lambda *args, **kwargs: Stub()
@@ -163,7 +249,6 @@ model_ext.fill_from_scene(context, second)
 d2 = model_ext.list_doc(second)
 order = [ext_list.normalize(a.get("path")) for a in d2.children(d2.root, "attach")]
 check(order.index("model\\game\\x\\z_skirt") < order.index("model\\game\\x\\a_part"), "the collision model attaches first")
-check(not [i for i in ext_list.issues([("second.xml", d2)]) if "attached after" in i[2]], "and the check agrees")
 
 for bad in ("<move/>", "not xml"):
     try:

@@ -460,6 +460,103 @@ def default_col_path(ob):
 
 # ---- runners: the enabled chains of one armature ----------------------------------------------------------------
 
+LINK_PASSES = 4
+
+
+def _links(arm):
+    from albam.engines.mtfw.model_ext import preview_links      # model_ext's lists name the links
+    try:
+        return preview_links(arm)
+    except Exception as err:            # noqa: BLE001 - a broken list mustn't stop the chains
+        print(f"PHS preview ({arm.name}): links skipped: {err}")
+        return []
+
+
+def _tendril(chain, slot):
+    """(root slot, tip slot) of the tendril holding `slot`; the tip's tail point is mats[tip + 1]"""
+    root, tip = slot, slot
+    while root > 0 and chain.joints[root - 1] is not None:
+        root -= 1
+    while tip + 1 < len(chain.joints) and chain.joints[tip + 1] is not None:
+        tip += 1
+    return root, tip
+
+
+def apply_links(links, owners, final):
+    """ModelExtension <link> (dmc4_hook sdk/ChainLink.cpp, schema.md "<link>"), after the chains have solved:
+    LINK_PASSES passes over every link; a stretched one moves each joint half the excess x stiffness toward the other
+    (a tendril root keeps its place, its partner takes it all); a moved joint turns about its tendril parent, keeping
+    that distance, and the rest of its tendril (tail included) moves with it. Then every joint of a touched tendril
+    turns by the smallest rotation that re-aims it at its next point, the chains' stored points take the new places
+    and the velocity away from the partner is dropped. `owners` = {bone: (_Chain, slot)}, `final` = {bone: world}."""
+    if not links:
+        return
+    points = {}
+
+    def pos(chain, i):
+        key = (id(chain), i)
+        if key not in points:
+            points[key] = chain.mats[i].translation.copy()
+        return points[key]
+
+    def move(chain, slot, target):
+        root, tip = _tendril(chain, slot)
+        parent = pos(chain, slot - 1)
+        current = pos(chain, slot)
+        to = target - parent
+        if to.length < EPS:
+            return
+        delta = parent + to.normalized() * (current - parent).length - current
+        for i in range(slot, tip + 2):
+            points[(id(chain), i)] = pos(chain, i) + delta
+
+    touched = {}
+    for _ in range(LINK_PASSES):
+        for name_a, name_b, max_len, stiffness in links:
+            (ca, sa), (cb, sb) = owners[name_a], owners[name_b]
+            pa, pb = pos(ca, sa), pos(cb, sb)
+            d = pb - pa
+            dist = d.length
+            if dist <= max_len or dist < EPS:
+                continue
+            excess = (dist - max_len) * stiffness
+            root_a, root_b = _tendril(ca, sa)[0] == sa, _tendril(cb, sb)[0] == sb
+            wa, wb = (0.0, 1.0) if root_a else (1.0, 0.0) if root_b else (0.5, 0.5)
+            u = d / dist
+            if wa:
+                move(ca, sa, pa + u * (excess * wa))
+            if wb:
+                move(cb, sb, pb - u * (excess * wb))
+            for chain, slot in ((ca, sa), (cb, sb)):
+                touched[(id(chain), _tendril(chain, slot))] = (chain, _tendril(chain, slot))
+    new = []
+    for chain, (root, tip) in touched.values():
+        for i in range(root, tip + 1):
+            old = chain.mats[i]
+            old_aim = chain.mats[i + 1].translation - old.translation
+            new_aim = pos(chain, i + 1) - pos(chain, i)
+            turn = old_aim.rotation_difference(new_aim).to_matrix() if old_aim.length > EPS and new_aim.length > EPS \
+                else Matrix.Identity(3)
+            m = (turn @ old.to_3x3()).to_4x4()
+            m.translation = pos(chain, i)
+            new.append((chain, i, m))
+        new.append((chain, tip + 1, None))
+    for chain, i, m in new:
+        if m is None:
+            chain.mats[i].translation = pos(chain, i)
+            continue
+        chain.mats[i] = m
+        final[chain.joints[i]] = m.copy()
+    for name_a, name_b, _, _ in links:
+        for (chain, slot), other in ((owners[name_a], name_b), (owners[name_b], name_a)):
+            u = final[other].translation - final[chain.joints[slot]].translation
+            if u.length > EPS:
+                u.normalize()
+                along = chain.vel[slot].dot(u)
+                if along < 0.0:
+                    chain.vel[slot] = chain.vel[slot] - u * along
+
+
 class _Runner:
     def __init__(self, arm, chain_obs):
         self.arm_name = arm.name
@@ -500,6 +597,7 @@ class _Runner:
             return evaluated[name]
 
         order = [b.name for b in arm.data.bones if b.name in owners]
+        links = [link for link in _links(arm) if link[0] in owners and link[1] in owners]
         for _ in range(steps):
             final.clear()
             for ob_name, chain in self.chains:
@@ -515,6 +613,7 @@ class _Runner:
                     ob = bpy.data.objects.get(chain.name)
                     shapes_by_chain[chain.name] = _shapes(ob, arm, world_of) if ob is not None else []
                 final[name] = chain.solve(slot, anim, parent_final, arm, 1.0, shapes_by_chain[chain.name])
+            apply_links(links, owners, final)
         out = {}
         inv = arm.matrix_world.inverted_safe()
         for name in order:
@@ -554,7 +653,7 @@ def _limits_key(ob):
 
 
 def _key(arm, chain_obs):
-    parts = [arm.name]
+    parts = [arm.name, repr(_links(arm))]
     for ob in chain_obs:
         s = ob.albam_phs
         parts.append((ob.name, repr(sorted((k, repr(_settings(ob)[k])) for k in _settings(ob))),

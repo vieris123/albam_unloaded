@@ -1,10 +1,8 @@
-"""ModelExtension lists: `nativePC\\model_ext\\*.xml`, read by dmc4_hook's ModelExtension (src/dev/model_ext/ModelExtension.cpp,
-`reload` / `parse_attach`), which owns the format: every element and attribute here is one it reads. Pure Python.
+"""ModelExtension lists: `nativePC\\model_ext\\*.xml`, read by dmc4_hook's ModelExtension (src/dev/model_ext/ModelExtension.cpp),
+which owns the format (`Vibed\\ModelExt\\schema.md`): every element and attribute here is one it reads. Pure Python.
 
 The text handling is MoveDef's (`doc.py`: a file comes back byte for byte apart from what was edited, elements the
-runner doesn't read are kept). `issues` reports what the runner would warn about, plus what it can't: lists load in
-sorted name order and a chain looks up its collision model when it spawns, so a collision model that isn't out yet
-leaves the chain silently without collision.
+runner doesn't read are kept). `issues` reports what the runner would warn about or refuse.
 """
 from collections import namedtuple
 
@@ -45,10 +43,54 @@ ELEMENTS = {
         Attr("path", "model", "", "A model not to draw. It stays loaded and animated, so a chain or a collision shape "
                                   "can still use it"),
     ),
+    "pin": (
+        Attr("joint", "joint", "", "The joint of this model that follows"),
+        Attr("to", "source", "", "The joint it follows, on the source model"),
+        Attr("of", "of", "", "The source model. Absent: the model this one is attached to (itself if none). self: this "
+                             "model"),
+        Attr("mode", "pin", "all", "all: the whole matrix. rot: only the rotation, the joint keeps its animated position"),
+        Attr("blend", "blend", "1", "0-1: how far from the joint's own animation to the result"),
+        Attr("pos", "vec3", "0 0 0", "Offset in the source joint's frame, in cm (x y z)"),
+        Attr("rot", "vec3", "0 0 0", "Offset rotation, degrees about x, then y, then z"),
+        Attr("scale", "scale", "1", "Offset scale, one number or x y z"),
+    ),
+    "aim": (
+        Attr("joint", "joint", "", "The joint of this model that turns"),
+        Attr("to", "source", "", "The joint it points at, on the source model: only that joint's position counts"),
+        Attr("of", "of", "", "The source model. Absent: the model this one is attached to (itself if none). self: this "
+                             "model"),
+        Attr("axis", "axis", "+z", "The joint's axis that points at the target: x, +x, -x, y, ..."),
+        Attr("up", "axis", "+y", "The joint's axis kept closest to where the animation left it. It needs a different "
+                                 "letter from Axis, or the game refuses the entry"),
+        Attr("blend", "blend", "1", "0-1: how far from the joint's own animation to the aim"),
+        Attr("limit", "scale", "", "The most it may turn from the animation, in degrees either way: one number, or x y z "
+                                   "for the joint's axes. The preview doesn't apply this limit"),
+    ),
+    "offset": (
+        Attr("joint", "joint", "", "The joint of this model to move, turn or scale"),
+        Attr("pos", "vec3", "0 0 0", "Position in the joint's frame, in cm (x y z)"),
+        Attr("rot", "vec3", "0 0 0", "Rotation, degrees about x, then y, then z"),
+        Attr("scale", "scale", "1", "Scale, one number or x y z"),
+        Attr("add", "bool", "true", "true: on top of the animation. false: replaces the joint's animated place relative "
+                                    "to its parent"),
+    ),
+    "link": (
+        Attr("a", "joint", "", "A joint of this model held by one of its chains"),
+        Attr("b", "joint", "", "The other joint, held by the same chain or another one of this model's chains. Not two "
+                               "tendril roots: a root keeps its animated place, so its partner takes the whole pull"),
+        Attr("max", "length", "", "The farthest apart they may be, in cm. Nothing happens while they're closer; the rest "
+                                  "distance or a little more keeps neighbouring tendrils from parting"),
+        Attr("stiffness", "unit", "1", "0-1: how much of the excess distance is taken out on each of the runner's 4 "
+                                       "passes"),
+    ),
 }
-PARENTS = {"attach": ROOT, "model": ROOT, "hide": ROOT, "chain": "model"}
-REQUIRED = {"attach": ("path", "to"), "model": ("path",), "chain": ("clt",), "hide": ("path",)}
+CONSTRAINTS = ("pin", "aim", "offset")
+PARENTS = {"attach": ROOT, "model": ROOT, "hide": ROOT, "chain": "model", "pin": "model", "aim": "model", "offset": "model",
+           "link": "model"}
+REQUIRED = {"attach": ("path", "to"), "model": ("path",), "chain": ("clt",), "hide": ("path",),
+            "pin": ("joint", "to"), "aim": ("joint", "to"), "offset": ("joint",), "link": ("a", "b", "max")}
 EXTENSIONS = (".mod", ".phs", ".clt", ".col")
+AXES = ("x", "+x", "-x", "y", "+y", "-y", "z", "+z", "-z")
 
 
 def parse(text):
@@ -93,16 +135,34 @@ def _floats(value):
     return out
 
 
-def rigid_offset(attach):
-    """(pos, rot, scale) of a rigid <attach>, as the runner reads them: what's missing stays at its default"""
+def offset_values(elem):
+    """(pos, rot, scale) of an entry, as the runner reads them: what's missing stays at its default"""
     pos, rot, scale = [0.0] * 3, [0.0] * 3, [1.0] * 3
     for target, name in ((pos, "pos"), (rot, "rot"), (scale, "scale")):
-        values = _floats(attach.get(name, "")) or []
+        values = _floats(elem.get(name, "")) or []
         target[:len(values[:3])] = values[:3]
-    values = _floats(attach.get("scale", "")) or []
+    values = _floats(elem.get("scale", "")) or []
     if len(values) == 1:
         scale = values * 3
     return pos, rot, scale
+
+
+def joint_number(elem, name="joint"):
+    """An entry's joint number, or None while it's empty or not a number"""
+    try:
+        return int(elem.get(name, ""))
+    except ValueError:
+        return None
+
+
+def blend_of(elem):
+    values = _floats(elem.get("blend", "1")) or [1.0]
+    return min(max(values[0], 0.0), 1.0)
+
+
+def is_true(value):
+    """pugixml's as_bool"""
+    return value[:1] in ("1", "t", "T", "y", "Y")
 
 
 def _check_elem(d, e, say):
@@ -131,6 +191,22 @@ def _check_elem(d, e, say):
                 say("error", f"<{e.tag}> {a.name}=\"{value}\" isn't a whole number")
         elif a.kind == "mode" and value.lower() not in ("skin", "rigid"):
             say("error", f"<{e.tag}> mode=\"{value}\": skin or rigid")
+        elif a.kind == "pin" and value not in ("all", "rot"):
+            say("error", f"<{e.tag}> mode=\"{value}\": all or rot")
+        elif a.kind in ("joint", "source") and value.strip():
+            number = joint_number(e, a.name)
+            if number is None or not 0 <= number <= 255:
+                say("error", f"<{e.tag}> {a.name}=\"{value}\": a joint number, 0-255")
+        elif a.kind == "axis" and value.lower() not in AXES:
+            say("error", f"<{e.tag}> {a.name}=\"{value}\": x, +x, -x, y, ... ")
+        elif a.kind in ("blend", "unit"):
+            values = _floats(value)
+            if not values or not 0.0 <= values[0] <= 1.0:
+                say("warning", f"<{e.tag}> {a.name}=\"{value}\": 0-1, the game clamps it")
+        elif a.kind == "length" and value.strip():
+            values = _floats(value)
+            if not values or len(values) != 1 or values[0] <= 0.0:
+                say("error", f"<{e.tag}> {a.name}=\"{value}\": a distance in cm, above 0")
         elif a.kind in ("vec3", "scale"):
             values = _floats(value)
             if values is None or (len(values) != 3 and not (a.kind == "scale" and len(values) == 1)):
@@ -148,30 +224,84 @@ def _check_elem(d, e, say):
             say("warning", f"<attach> of {e.get('path')}: skin mode ignores joint, pos, rot and scale")
     if e.tag == "chain" and e.get("col", "").strip() and not collision_model(d, e).strip():
         say("warning", f"chain {e.get('clt')}: a col with no collision model is ignored")
+    if e.tag == "aim":
+        axis, up = e.get("axis", "+z").lower(), e.get("up", "+y").lower()
+        if axis in AXES and up in AXES and axis[-1] == up[-1]:
+            say("error", f"<aim> joint {e.get('joint')}: axis and up on the same letter, the game refuses it")
+    if e.tag == "link" and joint_number(e, "a") is not None and joint_number(e, "a") == joint_number(e, "b"):
+        say("error", f"<link> joint {e.get('a')} to itself: the game refuses it")
+
+
+# Joints the game's own constraints hold, by model file name: a list entry on them is refused (schema.md "Who wins").
+# Player bodies (pl009 = Dante's DT body): the hit shake (uPlayer::setVibJointCnst 0x7AF480, cCnsRandom on 1 and 13) and
+# the leg IK on the ankles (cLegIkCtrl::init 0x7B0AD0: legs 14 / 15 / 16 and 18 / 19 / 20, the cCnsIK on the ankle).
+# Sub-models: their own joints that cCnsMatrix pins to the body (face 0-4, hair 0-1, coats; setupDanteModel 0x7B54D0,
+# setupMajinModel 0x7B61C0).
+_BODY = {1: "the hit shake", 13: "the hit shake", 16: "the leg IK", 20: "the leg IK"}
+_FACE = {n: "the face's pin to the body" for n in range(5)}
+_HAIR = {n: "the hair's pin to the body" for n in range(2)}
+_DANTE_COAT = {n: "the coat's pin to the body" for n in range(8)}
+GAME_HELD = {"pl000": _BODY, "pl006": _BODY, "pl009": _BODY, "pl000_01": _FACE, "pl006_01": _FACE,
+             "pl000_02": _HAIR, "pl006_02": _HAIR, "pl000_03": {0: "the coat's pin to the body"},
+             "pl006_03": _DANTE_COAT, "pl009_01": _DANTE_COAT}
+# thigh and shin: an entry installs, but the leg IK rewrites them while foot planting is on
+LEG_IK_SOLVED = {14, 15, 18, 19}
+PLAYER_BODIES = ("pl000", "pl006", "pl009")
+
+
+def _file(model_path):
+    return normalize(model_path).rsplit("\\", 1)[-1]
+
+
+def game_held(model_path, number):
+    """What of the game's holds this joint of the model, or None"""
+    return GAME_HELD.get(_file(model_path), {}).get(number)
+
+
+def constraints(d):
+    """The <pin> / <aim> / <offset> entries of a list, with their <model>"""
+    return [(e, d.parent_of(e)) for e in d.elems if e.tag in CONSTRAINTS and d.parent_of(e).tag == "model"]
+
+
+def links(d):
+    """The <link> entries of a list, with their <model> (not constraints: they hold no joint, schema.md "<link>")"""
+    return [(e, d.parent_of(e)) for e in d.elems if e.tag == "link" and d.parent_of(e).tag == "model"]
+
+
+def link_values(e):
+    """(a, b, max cm, stiffness) as the runner reads them; None while a joint or max isn't usable"""
+    a, b = joint_number(e, "a"), joint_number(e, "b")
+    length = _floats(e.get("max", ""))
+    stiffness = _floats(e.get("stiffness", "1")) or [1.0]
+    if a is None or b is None or a == b or not length or length[0] <= 0.0:
+        return None
+    return a, b, length[0], min(max(stiffness[0], 0.0), 1.0)
 
 
 def issues(lists):
     """[(level "error" / "warning", file name, message)] for `lists` = [(file name, Doc)]: all the lists the game reads
-    together, since a collision model's order runs across files"""
+    together, in the game's order, since a joint's first entry wins across files"""
     out = []
-    order = {}
-    ordered = sorted(lists, key=lambda item: item[0])
-    for name, d in ordered:
+    attached, taken = set(), set()
+    for name, d in sorted(lists, key=lambda item: item[0]):
         for e in d.elems:
             _check_elem(d, e, lambda level, message, name=name: out.append((level, name, message)))
         for attach in d.children(d.root, "attach"):
             path = normalize(attach.get("path", ""))
-            if path and path in order:
+            if path and path in attached:
                 out.append(("warning", name, f"{attach.get('path')} is attached twice: check it goes on different models"))
-            order.setdefault(path, len(order))
-    for name, d in ordered:
-        for chain in (e for e in d.elems if e.tag == "chain"):
-            model = normalize(d.parent_of(chain).get("path", ""))
-            other = normalize(collision_model(d, chain))
-            if not chain.get("col", "").strip() or other == model or other not in order:
-                continue
-            if order[other] > order.get(model, -1):
-                out.append(("warning", name, f"chain {chain.get('clt')}: its collision model {other} is attached after "
-                                             f"{model}, so the chain would spawn without collision. Attach it first: "
-                                             "same list, earlier in the file, or a list earlier by name"))
+            attached.add(path)
+        for e, model in constraints(d):
+            held = game_held(model.get("path", ""), joint_number(e))
+            if held is not None:
+                out.append(("warning", name, f"<{e.tag}> joint {joint_number(e)} of {model.get('path')}: the game holds it "
+                                             f"({held}), so it refuses this entry"))
+            elif _file(model.get("path", "")) in PLAYER_BODIES and joint_number(e) in LEG_IK_SOLVED:
+                out.append(("warning", name, f"<{e.tag}> joint {joint_number(e)} of {model.get('path')}: the leg IK "
+                                             "overrides it while the feet are planted"))
+            key = (normalize(model.get("path", "")), joint_number(e))
+            if key[1] is not None and key in taken:
+                out.append(("warning", name, f"<{e.tag}> joint {key[1]} of {model.get('path')}: the joint already has an "
+                                             "entry, the first in file order wins"))
+            taken.add(key)
     return out

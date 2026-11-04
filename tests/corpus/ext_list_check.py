@@ -56,21 +56,65 @@ d = ext_list.new_list()
 d.add("attach", d.root, [("path", "a"), ("to", "b")])
 check(ext_list.parse(d.text()).child(ext_list.parse(d.text()).root, "attach").get("to") == "b", "a new list reads back")
 
-# the same order mistake the Ellen lists had: danglies.xml sorts before dress.xml
-DANGLIES = """<extensions>
-  <attach path="part" to="body"/>
-  <model path="part" collision_model="skirt"><chain clt="c" col="k"/></model>
-</extensions>"""
-SKIRT = '<extensions><attach path="skirt" to="body"/></extensions>'
-found = ext_list.issues([("danglies.xml", ext_list.parse(DANGLIES)), ("dress.xml", ext_list.parse(SKIRT))])
-check(len(found) == 1 and "attached after" in found[0][2], "a collision model attached later is reported")
-check(ext_list.issues([("a.xml", ext_list.parse(SKIRT)), ("b.xml", ext_list.parse(DANGLIES))]) == [],
-      "attached first, no issue")
+CNS = """<extensions>
+  <model path="a">
+    <pin joint="1" to="2" of="self" mode="rot" blend="0.5" pos="1 2 3"/>
+    <aim joint="2" to="3" axis="-x" up="+y" limit="30"/>
+    <offset joint="3" rot="0 0 90" add="false"/>
+  </model>
+</extensions>
+"""
+check(ext_list.parse(CNS).text() == CNS and ext_list.issues([("x.xml", ext_list.parse(CNS))]) == [],
+      "the schema's constraints round-trip with no issues")
 
 
 def problems(text):
     return [m for _, _, m in ext_list.issues([("x.xml", ext_list.parse(text))])]
 
+
+check(any("first in file order" in m for m in problems(
+    '<extensions><model path="a"><pin joint="1" to="2"/><offset joint="1"/></model></extensions>')), "two entries on a joint")
+check(any("same letter" in m for m in problems(
+    '<extensions><model path="a"><aim joint="1" to="2" axis="y" up="-y"/></model></extensions>')), "aim axes on one letter")
+check(any("0-255" in m for m in problems('<extensions><model path="a"><offset joint="300"/></model></extensions>')),
+      "joint range")
+check(any("all or rot" in m for m in problems(
+    '<extensions><model path="a"><pin joint="1" to="2" mode="x"/></model></extensions>')), "pin mode")
+check(any("needs to=" in m for m in problems('<extensions><model path="a"><pin joint="1"/></model></extensions>')),
+      "pin needs to=")
+check(any("hit shake" in m for m in problems(
+    '<extensions><model path="model\\game\\pl006\\pl006"><offset joint="13"/></model></extensions>')),
+      "a player body's joint 13 is the game's")
+check(any("coat" in m for m in problems(
+    '<extensions><model path="Model/Game/pl000/PL000_03"><offset joint="0"/></model></extensions>')), "the coat's joint 0")
+check(not problems('<extensions><model path="model\\game\\pl000\\ellen_dress"><offset joint="13"/></model></extensions>'),
+      "another model's joint 13 is free")
+check(any("refuses" in m and "leg IK" in m for m in problems(
+    '<extensions><model path="model\\game\\pl009\\pl009"><offset joint="20"/></model></extensions>')), "an ankle is refused")
+found = problems('<extensions><model path="model\\game\\pl000\\pl000"><offset joint="15"/></model></extensions>')
+check(len(found) == 1 and "overrides it while" in found[0], "a shin is only warned about")
+check(any("coat" in m for m in problems(
+    '<extensions><model path="model\\game\\pl006\\pl006_03"><offset joint="7"/></model></extensions>')), "Dante's coat 0-7")
+check(any("face" in m for m in problems(
+    '<extensions><model path="model\\game\\pl000\\pl000_01"><offset joint="4"/></model></extensions>')), "the face 0-4")
+check(not problems('<extensions><model path="model\\game\\pl000\\pl000_02"><offset joint="2"/></model></extensions>'),
+      "hair joint 2 is free")
+
+LINK = '<extensions><model path="a"><chain clt="c"/><link a="221" b="216" max="12" stiffness="0.5"/></model></extensions>'
+check(ext_list.parse(LINK).text() == LINK and not problems(LINK), "<link> round-trips with no issues")
+d = ext_list.parse(LINK)
+check(ext_list.link_values(d.child(d.child(d.root, "model"), "link")) == (221, 216, 12.0, 0.5), "link values")
+check(not ext_list.constraints(d) and len(ext_list.links(d)) == 1, "a link isn't a constraint (it holds no joint)")
+check(any("needs max=" in m for m in problems('<extensions><model path="a"><link a="1" b="2"/></model></extensions>')),
+      "a link needs max=")
+check(any("to itself" in m for m in problems('<extensions><model path="a"><link a="3" b="3" max="5"/></model></extensions>')),
+      "a link to itself")
+check(any("above 0" in m for m in problems('<extensions><model path="a"><link a="1" b="2" max="-1"/></model></extensions>')),
+      "max above 0")
+check(any("0-1" in m for m in problems(
+    '<extensions><model path="a"><link a="1" b="2" max="5" stiffness="2"/></model></extensions>')), "stiffness 0-1")
+check(any("doesn't look for it there" in m for m in problems('<extensions><link a="1" b="2" max="5"/></extensions>')),
+      "a link belongs in a <model>")
 
 check(any("needs to=" in m for m in problems('<extensions><attach path="a"/></extensions>')), "attach needs to=")
 check(any("skin or rigid" in m for m in problems('<extensions><attach path="a" to="b" mode="x"/></extensions>')), "mode")
@@ -83,7 +127,7 @@ check(any("no extension" in m for m in problems('<extensions><hide path="a.mod"/
 a = ext_list.parse('<extensions><attach path="a" to="b" joint="3" pos="1,2 3" scale="2"/></extensions>')
 e = a.child(a.root, "attach")
 check(ext_list.effective_mode(e) == "rigid", "a joint means rigid")
-check(ext_list.rigid_offset(e) == ([1.0, 2.0, 3.0], [0.0] * 3, [2.0] * 3), "offsets read as the runner reads them")
+check(ext_list.offset_values(e) == ([1.0, 2.0, 3.0], [0.0] * 3, [2.0] * 3), "offsets read as the runner reads them")
 check(ext_list.stem("model\\game\\pl000\\pl000.mod") == "model\\game\\pl000\\pl000", "stem")
 check(ext_list.stem("a.b\\c") == "a.b\\c", "stem keeps a dotted folder")
 
