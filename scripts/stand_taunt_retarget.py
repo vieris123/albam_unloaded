@@ -10,9 +10,10 @@ panel and export.
 or open it in Blender's Text Editor and Run Script (the add-on enabled or not). Use a new, empty file: the
 script imports the models into the current scene.
 
-Reads the extracted uPlayerNero arc through tests/common.py (ALBAM_DMC4_DATA) and writes motion\\pl020\\pl020_taunt.lmt,
-motion\\wp024\\wp024_taunt.lmt and stand_taunt_retarget.blend under ALBAM_STAND_TAUNT_OUT (default
-E:\\DMC mod stuffs\\guardian_taunt); copy the two LMTs under the game's nativePC.
+Reads the extracted uPlayerNero arc through tests/common.py (ALBAM_DMC4_DATA) and writes motion\\pl020\\pl020_guardian_ex.lmt,
+motion\\wp024\\wp024_guardian_ex.lmt and stand_taunt_retarget.blend under ALBAM_STAND_TAUNT_OUT (default
+E:\\DMC mod stuffs\\guardian_taunt); copy the two LMTs under the game's nativePC (the guardian_ex package). The pair is the
+stand's one LMT: the taunts at Nero's block numbers, custom stand moves in the free blocks.
 
 The rig: every mapped stand bone has a Copy Rotation from its Nero counterpart in Local space (the rest-relative delta,
 what the game's tracks mean on a differently built rig), the root and hips a Transformation constraint that also copies
@@ -264,8 +265,8 @@ try:
                 if getattr(con, "subtarget", "") == animation.ROOT_MOTION_BONE_NAME:
                     con.mute = True
     groups = scene.albam.lmt_groups
-    stand_group = groups.add("pl020_taunt.lmt"); stand_group.armature = stand; stand_group.num_slots = nero_lmt.num_slots
-    arm_group = groups.add("wp024_taunt.lmt"); arm_group.armature = arm; arm_group.num_slots = nero_lmt.num_slots
+    stand_group = groups.add("pl020_guardian_ex.lmt"); stand_group.armature = stand; stand_group.num_slots = nero_lmt.num_slots
+    arm_group = groups.add("wp024_guardian_ex.lmt"); arm_group.armature = arm; arm_group.num_slots = nero_lmt.num_slots
     for slot in TAUNTS:
         src = nero_actions.get(slot)
         if src is None:
@@ -283,7 +284,7 @@ try:
         stand_group.add(s_act); arm_group.add(a_act)
         print(f"slot {slot:#x}: {frames} frames baked")
 
-    for group, rel in ((stand_group, r"motion\pl020\pl020_taunt.lmt"), (arm_group, r"motion\wp024\wp024_taunt.lmt")):
+    for group, rel in ((stand_group, r"motion\pl020\pl020_guardian_ex.lmt"), (arm_group, r"motion\wp024\wp024_guardian_ex.lmt")):
         notes = []
         data = animation.export_lmt(group, notes)
         path = os.path.join(OUT, rel)
