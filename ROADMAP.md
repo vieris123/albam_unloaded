@@ -73,6 +73,11 @@ in the DX9 code before trusting one.
   (a note says so). Converting the durations of type 6 / 9 data would fix it.
 - [ ] **Scene frame rate:** import forces the scene to 60 fps, so other animations in the scene play at the wrong
   speed. Proposed: leave it alone when the scene already has other animation, and say so in a note.
+- [x] **LMT animations in NLA strips reach the previews.** Done 2026-11-04 (`lib/nla.py`): `.col` groups and the
+  foot IK fade read the LMT animation on top at the strip's own time, the foot IK ghost mirrors the NLA, the chain
+  preview's cache follows it. Test: `test_nla`.
+- [ ] **Picking an LMT row while a strip is tweaked** fails (Blender locks the active action in tweak mode; the
+  update callback prints a traceback and has already reset the pose). Exit tweak mode first, or say so in the panel.
 
 ## Preview gaps
 
@@ -98,6 +103,24 @@ The game behaviour is known; Blender only approximates it. The other preview gap
 
 ## Larger features
 
+- [ ] **Shape keys as the engine's morph targets (rShape `.shp` / rShapeWeight `.shw`, found 2026-11-08).** DX9 has a
+  complete GPU morph pipeline that no shipped file uses. Proven in the game on Nero with hand-made files (test kit
+  `E:\DMC mod stuffs\Vibed\ShapeTest`). Format and evidence: `E:\DMC mod stuffs\Vibed\RE\shape_morph.md`.
+  - **Albam export done 2026-11-08** (`shape_keys.py`, `shape_format.py`, guide `docs/shape_keys.md`, test
+    `test_shape_keys`): the .mod export writes the flag / skin 5 / texel layout, `<model>.shp`, `<model>.shw` (rest
+    values) and `<model>_<clip>.shw` per shape-key action; ModelExtension `<shape>` / `<weights>`; MoveDef `<shape>` /
+    `<shape_stop>` (runner session's schema entries). **Not tried in the game; the runner's `<shape>` isn't built.**
+  - Open: the sampler's address mode for the map's last column / row (Albam leaves them unused, so it doesn't matter
+    for its files); Bezier / Hermite `.shw` keys (Albam bakes linear keys); morphing normals (the game doesn't);
+    a preview of the game's averaging of lists by rate (Blender sums keys).
+
+- [ ] **In-game stage editor (dmc4_hook, scoped 2026-11-06, no code).** Live `.sdl` editing happens in the game
+  (ImGui, PhotoMode's gizmos); its Save writes a normal `.sdl` outside nativePC, which Albam's SDL import reads.
+  Albam's part: nothing new unless the saved files show a gap. Plan: `E:\DMC mod stuffs\Vibed\StageEditor\README.md`.
+- [ ] **Game link (parked 2026-11-06).** A live TCP link (127.0.0.1, JSON lines) between Albam and dmc4_hook, kept
+  for what needs Blender: Graph Editor curves synced to the game's clock, camera / poses / chain tuning back into
+  Blender. No file watcher (files go through the mod manager). Plan and protocol draft:
+  `E:\DMC mod stuffs\Vibed\GameLink\README.md`.
 - [ ] **Model chains: check per-bone limits in the game.** No shipped chain enables mBoneAdjust; Albam writes and
   previews it from the decompiled code (grid 2 clamps cleanly, grids 0 / 1 don't measure back inside their limits as
   decoded). First real use: Ellen's chest (`chains\boobs.clt` in both ellen mods, 2026-11-03: grid 2, X max at the
@@ -151,7 +174,12 @@ The game behaviour is known; Blender only approximates it. The other preview gap
     seams linked row by row (the seams over the thighs + 0.5 cm, the others + 2 cm) and the bottom two rows of the
     seams where the front meets the sides (2|3, 12|13, + 1 cm); 20 links. In the preview, cloth behind / inside a thigh
     went from 78 / 53 (stride) and 70 / 80 (leg raise) to 0 everywhere; the front of the flare sags 4.6 cm standing
-    (1.4 before). Not checked in the game.
+    (1.4 before). **In the game the front folded up at her hips** (2026-11-04): at Blend 1.0 it never recovers after a
+    run or a spawn. `dress_00` is now Blend 0.4, gravity 0.1, radius and links kept (both mods and blends; docs/new_model.md
+    has the numbers). Not checked in the game yet.
+  - [ ] **2B's front-left file is at Blend 1.0 too**: likely the same in the game; check her after a run.
+  - [ ] **`<link min=>`** (would need the runner): a minimum distance held Ellen's front columns apart in a preview
+    experiment (gaps 0.9 of rest instead of 0.65); ask the dmc4_hook session if Blend 0.4 isn't enough.
   - [ ] **Check the preview against the game.** The formulas come from the runner and the schema. dmc4_hook's constraints
     and retrying lookups were written 2026-11-03 and built 2026-11-04; no rigid attachment or constraint has been compared in-game.
   - [ ] **Fractional twist / the mean of two joints** (forearms, skirt roots): needs a new runner element. No game class

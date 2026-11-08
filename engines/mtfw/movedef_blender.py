@@ -521,6 +521,7 @@ def free_id(context, move, character):
     for o in other_moves(context, move):
         if o.character == character:
             used.update(o.ids)
+    used.update(mschema.HOOK_IDS.get(character, {}))
     first = mschema.MIN_ID.get(character, 0x34)
     return next(i for i in range(first, first + 512) if i not in used)
 

@@ -43,6 +43,7 @@ from bpy.app.handlers import persistent
 from mathutils import Matrix, Vector
 
 from albam.lib import blender_compat as compat
+from albam.lib import nla
 from albam.registry import blender_registry
 from albam.engines.mtfw import col_shapes
 from albam.engines.mtfw import cns_chain
@@ -652,8 +653,18 @@ def _limits_key(ob):
     return repr([cns_chain.bone_limits(arm.pose.bones[n]) for n in names]) if arm is not None else ""
 
 
+def _animation_key(arm):
+    """what animates the armature and the objects it hangs from (a coat follows the body): a cached frame of
+    another animation or NLA layout is stale"""
+    parts, ob = [], arm
+    while ob is not None:
+        parts.append(nla.state(ob))
+        ob = ob.parent
+    return parts
+
+
 def _key(arm, chain_obs):
-    parts = [arm.name, repr(_links(arm))]
+    parts = [arm.name, repr(_links(arm)), _animation_key(arm)]
     for ob in chain_obs:
         s = ob.albam_phs
         parts.append((ob.name, repr(sorted((k, repr(_settings(ob)[k])) for k in _settings(ob))),

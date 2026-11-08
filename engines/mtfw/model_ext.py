@@ -19,7 +19,7 @@ from mathutils import Euler, Matrix, Vector
 from albam.exceptions import AlbamCheckFailure
 from albam.registry import blender_registry
 from albam.vfs import VirtualFileData
-from albam.engines.mtfw import cns_chain, joints
+from albam.engines.mtfw import cns_chain, joints, shape_keys
 from albam.engines.mtfw.cns_chain import ARMATURE_PROP
 from albam.engines.mtfw.movedef import doc as doc_module, ext_list
 
@@ -254,6 +254,16 @@ def scene_issues(context, lists):
                         break
         out += _cns_issues(context, d, name, found)
         out += _link_issues(context, d, name, found)
+        for e, _ in ext_list.shapes(d):
+            ob = found.get(_stem(e.get("shp", "")))
+            if ob is not None and not shape_keys.model_has_keys(ob):
+                out.append(("warning", name, f"<shape> {e.get('shp')}: {ob.name} has no shape keys, so its export "
+                                             "writes no .shp"))
+    shaped = {_stem(m.get("path", "")) for root in scene_lists(context) for _, m in ext_list.shapes(list_doc(root))}
+    for path, ob in found.items():
+        if path not in shaped and shape_keys.model_has_keys(ob):
+            out.append(("warning", ob.name, "has shape keys, but no list has a <shape> for it: they won't move in the "
+                                            "game (Fill from Scene adds one)"))
     return out
 
 
@@ -382,9 +392,9 @@ def _collision_root(chain):
 
 
 def fill_from_scene(context, root):
-    """Lists every chain of the scene and every model following another (ALBAM_FollowBody), skipping what the list
-    has, models that carry another's collision shapes first (runners before 2026-11-03 need that order). Returns how
-    many entries were added."""
+    """Lists every chain of the scene, every model following another (ALBAM_FollowBody) and a <shape> for every model
+    with shape keys no list has one for, skipping what the list has, models that carry another's collision shapes
+    first (runners before 2026-11-03 need that order). Returns how many entries were added."""
     d = list_doc(root)
     known = {_stem(ob.albam_asset.relative_path): ob for ob in models(context).values()}
     carriers = set()
@@ -425,6 +435,21 @@ def fill_from_scene(context, root):
                 elif _stem(parent.get("collision_model")) != _stem(collision):
                     attrs.append(("collision_model", collision))
         add_element(d, "chain", parent, attrs)
+        added += 1
+    shaped = {_stem(m.get("path", "")) for root_ in scene_lists(context) for _, m in ext_list.shapes(list_doc(root_))}
+    shaped |= {_stem(m.get("path", "")) for _, m in ext_list.shapes(d)}
+    for path, ob in sorted(known.items()):
+        if path in shaped or not shape_keys.model_has_keys(ob):
+            continue
+        stem = ext_list.stem(ob.albam_asset.relative_path)     # the .mod export writes <model>.shp / .shw
+        parent = next((m for m in d.children(d.root, "model") if _stem(m.get("path", "")) == path), None)
+        if parent is None:
+            parent = add_element(d, "model", d.root, [("path", stem)])
+        rest, _, active = shape_keys.model_weight_lists(ob)
+        # list 0 plays from the start: the clip on the Keys now (an idle), else the set values; clips for moves only
+        # take no list here (MoveDef <shape> starts them)
+        attrs = [("shp", stem)] + ([("shw", active or rest)] if active or rest else [])
+        add_element(d, "shape", parent, attrs)
         added += 1
     store(root, d)
     return added
@@ -677,8 +702,8 @@ class ALBAM_OT_ExtNew(bpy.types.Operator):
 
 @blender_registry.register_blender_type
 class ALBAM_OT_ExtFill(bpy.types.Operator):
-    """List the scene's chains, and the models following another, that this list doesn't have yet. Models are found
-    from their chains' parents and collision shapes"""
+    """List the scene's chains, the models following another and the models with shape keys (a <shape> entry), that
+    this list doesn't have yet. Models are found from their chains' parents and collision shapes"""
     bl_idname = "albam.ext_fill"
     bl_label = "Fill from Scene"
     bl_options = {"REGISTER", "UNDO"}
@@ -713,6 +738,8 @@ class ALBAM_OT_ExtAdd(bpy.types.Operator):
                 "offset": "Move, turn or scale a joint of this model",
                 "link": "Keep two chain joints of this model within a distance, so neighbouring tendrils can't part. "
                         "The chain preview runs it",
+                "shape": "Make this model's shape keys move in the game: the .shp and .shw its .mod export writes",
+                "weights": "Play another weight list (.shw) with this shape's, 4 lists in all",
                 "hide": "Add a model not to draw"}.get(properties.tag, "Add an entry")
 
     @classmethod
@@ -815,9 +842,17 @@ def _path_items(self, context):
     if kind in ("joint", "source"):
         _pick_items[:] = _joint_items(context, kind, self.uid) or [("", "(no armature found)", "")]
         return _pick_items
-    wanted = {"model": ("mod",), "of": ("mod",), "chain": ("phs", "clt"), "col": ("col",)}.get(kind, ())
+    wanted = {"model": ("mod",), "of": ("mod",), "chain": ("phs", "clt"), "col": ("col",), "shape": ("shp",),
+              "weights": ("shw",)}.get(kind, ())
     paths = {ext_list.stem(o.albam_asset.relative_path) for o in context.scene.objects
              if o.albam_asset.extension in wanted and o.albam_asset.relative_path}
+    for o in models(context).values():      # what the .mod exports of models with shape keys will write
+        if kind in ("shape", "weights") and shape_keys.model_has_keys(o):
+            if kind == "shape":
+                paths.add(ext_list.stem(o.albam_asset.relative_path))
+            else:
+                _, clips, _ = shape_keys.model_weight_lists(o)
+                paths |= set(clips) | {ext_list.stem(o.albam_asset.relative_path)}
     for item in context.scene.albam.rfs.file_list:
         if item.name.lower().endswith(tuple(f".{w}" for w in wanted)) and not item.is_expandable:
             paths.add(ext_list.stem(item.relative_path))
@@ -851,14 +886,20 @@ class ALBAM_OT_ExtPickPath(bpy.types.Operator):
         return {"FINISHED"}
 
 
-def _draw_elem(layout, ext, item, level_tag=None):
+CHILD_BUTTONS = {
+    "model": (("chain", "Chain"), ("pin", "Pin"), ("aim", "Aim"), ("offset", "Offset"), ("link", "Link"),
+              ("shape", "Shape")),
+    "shape": (("weights", "Weights"),),
+}
+
+
+def _draw_elem(layout, ext, item, by_parent):
     box = layout.box()
     head = box.row(align=True)
     head.label(text=f"<{item.tag}>")
-    if item.tag == "model":
-        for tag, label in (("chain", "Chain"), ("pin", "Pin"), ("aim", "Aim"), ("offset", "Offset"), ("link", "Link")):
-            op = head.operator("albam.ext_add", text=label, icon="ADD")
-            op.tag, op.parent = tag, item.uid
+    for tag, label in CHILD_BUTTONS.get(item.tag, ()):
+        op = head.operator("albam.ext_add", text=label, icon="ADD")
+        op.tag, op.parent = tag, item.uid
     head.operator("albam.ext_remove", text="", icon="X").uid = item.uid
     specs = ext_list.ELEMENTS.get(item.tag, ())
     present = {a.name for a in item.attrs}
@@ -868,7 +909,7 @@ def _draw_elem(layout, ext, item, level_tag=None):
         info = row.operator("albam.ext_attr_info", text=a.name, emboss=False)
         info.tag, info.attr = item.tag, a.name
         row.prop(a, "value", text="")
-        if s is not None and s.kind in ("model", "of", "chain", "col", "joint", "source"):
+        if s is not None and s.kind in ("model", "of", "chain", "col", "joint", "source", "shape", "weights"):
             pick = row.operator("albam.ext_pick_path", text="", icon="VIEWZOOM")
             pick.uid, pick.attr, pick.kind = item.uid, a.name, s.kind
         if a.name not in ext_list.REQUIRED.get(item.tag, ()):
@@ -880,6 +921,8 @@ def _draw_elem(layout, ext, item, level_tag=None):
         for s in missing:
             op = row.operator("albam.ext_set_attr", text=s.name, icon="ADD")
             op.uid, op.attr = item.uid, s.name
+    for child in by_parent.get(item.uid, ()):
+        _draw_elem(box, ext, child, by_parent)
     return box
 
 
@@ -918,6 +961,4 @@ class ALBAM_PT_ModelExtList(bpy.types.Panel):
         for item in ext.elems:
             by_parent.setdefault(item.parent, []).append(item)
         for item in by_parent.get(top, ()):
-            box = _draw_elem(layout, ext, item)
-            for child in by_parent.get(item.uid, ()):
-                _draw_elem(box, ext, child)
+            _draw_elem(layout, ext, item, by_parent)

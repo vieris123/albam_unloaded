@@ -14,6 +14,7 @@ from albam.vfs import VirtualFileData, VirtualFile
 from albam.rfs import RealFile
 from .defines import get_shader_objects
 from .joints import model_meshes
+from .shape_keys import SHAPE_COPY, SHAPE_SKIN
 from .structs.mrl import Mrl
 from .texture import (
     assign_textures,
@@ -337,11 +338,16 @@ def _serialize_materials_data_156(model_asset, bl_materials, exported_textures, 
     dst_mod.materials_data.textures = []
     dst_mod.materials_data.materials = []
     exported_materials_map = {}  # <bl_mat.name> : material_id
+    # materials of meshes with shape keys (shape_keys.py): name -> also drawn by a mesh that doesn't morph
+    shapes = getattr(dst_mod, "_albam_shapes", None)
+    shape_materials = shapes.materials if shapes else {}
 
-    for mat_idx, bl_mat in enumerate(sorted(bl_materials, key=lambda x: x.name)):
+    def record(bl_mat, skin=None):
         mat = dst_mod.Material(_parent=dst_mod.materials_data, _root=dst_mod.materials_data._root)
         custom_properties = bl_mat.albam_custom_properties.get_custom_properties_for_appid(app_id)
         custom_properties.copy_custom_properties_to(mat)
+        if skin is not None:
+            mat.func_skin = skin
 
         tex_types = _gather_tex_types(bl_mat, exported_textures, dst_mod.materials_data.textures)
         mat.basemap = tex_types.get(TextureType.DIFFUSE, -1) + 1
@@ -372,7 +378,17 @@ def _serialize_materials_data_156(model_asset, bl_materials, exported_textures, 
         mat.reserved1 = 0
         mat.reserved2 = [0, 0] # NOTE: STUPID
         dst_mod.materials_data.materials.append(mat)
-        exported_materials_map[bl_mat.name] = mat_idx
+        return len(dst_mod.materials_data.materials) - 1
+
+    by_name = {m.name: m for m in bl_materials}
+    for bl_mat in sorted(bl_materials, key=lambda x: x.name):
+        shared = shape_materials.get(bl_mat.name)
+        # SKIN_4WT_SHAPE reads the UV from TEXCOORD1, which meshes that don't morph fill with filler
+        exported_materials_map[bl_mat.name] = record(bl_mat, SHAPE_SKIN if shared is False else None)
+    for name, shared in sorted(shape_materials.items()):
+        if shared:
+            exported_materials_map[(name, SHAPE_COPY)] = record(by_name[name], SHAPE_SKIN)
+    dst_mod.header.num_materials = len(dst_mod.materials_data.materials)
 
     dst_mod.materials_data._check()
     return exported_materials_map, None
@@ -1353,7 +1369,7 @@ def check_material_153(name, record):
         elif value in NO_DX9_SHADER_153.get(field, ()):
             problems.append(f"{field} = {value} has no DX9 shader")
     skin, lightmap, vtype = record.func_skin, record.func_lightmap, record.vtype
-    layouts = {0: (2, 3), 1: (0, 5), 2: (0, 5), 3: (0, 5), 4: (1,)}
+    layouts = {0: (2, 3), 1: (0, 5), 2: (0, 5), 3: (0, 5), 4: (1,), 5: (0,)}
     if skin in layouts and vtype not in layouts[skin]:
         problems.append(f"func_skin {skin} needs vtype {' or '.join(map(str, layouts[skin]))} (has {vtype})")
     if lightmap in (1, 2) and vtype != 2:

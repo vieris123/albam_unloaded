@@ -58,11 +58,13 @@ The tests only read game files, never write them.
 | `test_ean_uv`, `test_ean_mesh`, `test_ean_hidden` | flipbooks: UV editing, joining meshes / frames from a mesh, hidden state over rebuilds |
 | `test_game_folder` | Save to Game Folder |
 | `test_actions` | (not effects) actions on this Blender's API, 4.2 or 5: LMT import plays and re-exports, the foot IK ghost plays the same action, an SDL round-trips and follows a key edit |
+| `test_nla` | (not effects) LMT animations in NLA strips: scene -> action frame as Blender evaluates it, what plays on top (mute, solo, tweak mode), `.col` groups and the foot IK fade from a strip, the ghost mirroring the NLA (and a build in tweak mode), the chain cache key |
 | `test_frame_cache` | the per-frame playback cache: replays, scrubbing and fresh computation draw the same; camera moves redraw |
 | `test_ribbon_nodes` | line ribbons built by the Ribbons node group match the points' camera-facing strips, UVs, colours and material |
 | `test_missing` | missing textures |
 | `test_new_bones`, `test_new_model` | (not effects) `.mod` export: bones added in Blender; New DMC4 Model (a static cube and a rig made from scratch, mesh preparation, part records; imported models pass through unchanged) |
 | `test_chain_link` | (not effects) ModelExtension `<link>` in the chain preview: two splayed tendrils pulled to `max`, joints keep their distance to their tendril parents and are re-aimed, a tendril root keeps its place, refused links reported and not run |
+| `test_shape_keys` | (not effects) shape keys as morph targets: the mesh flag, skin-5 material records (a copy for a shared material), texels in TEXCOORD0 and the UV in TEXCOORD1, `.shp` deltas (vertex groups, a moved mesh), the rest and per-clip `.shw` lists, refused materials, `<shape>` / `<weights>` entries; the in-game test kit's files rebuild byte for byte |
 | `test_model_ext` | (not effects) ModelExtension lists: import / export byte for byte, Save to Game Folder, Fill from Scene, the panel, the attachment and `<pin>` / `<aim>` / `<offset>` previews against the schema's matrices, who wins a joint |
 | `test_movedef` | (not effects) MoveDef move files: a new move / an overlay from LMT animations, frames as pose markers, the checks, Import / Write XML byte for byte apart from the edit, cancels from Nero's `.ctn`, `.atk` entries |
 | `test_material_display` | (not effects) DMC4 material display from the shader functions |

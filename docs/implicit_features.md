@@ -42,6 +42,10 @@ Panels mentioned here are in the Properties editor (Object / Bone tabs) unless a
 - **Materials show what the game does** with their DMC4 functions: unlit (LIGHTING_NONE) draws its base colour
   flat, THIN gets a translucent layer, LIGHTMAP_SHADOW masks the specular, POWMAP drops the environment reflection.
   A texture can feed other nodes as well as the shader group; export still finds it.
+- **Shape keys export as the game's morph targets.** A key set above 0 or animated (the Key's action, or one stashed
+  in its NLA) makes its mesh morph. The .mod export then also writes `<model>.shp`, `<model>.shw` and one
+  `<model>_<clip>.shw` per action, and switches the mesh's material to the shape shader. Keys left at 0 and muted keys
+  change nothing. Guide: [shape_keys.md](shape_keys.md).
 - **New DMC4 Model** has its own guide: [new_model.md](new_model.md).
 
 ## Model chains (`.phs`)
@@ -92,7 +96,7 @@ Panels mentioned here are in the Properties editor (Object / Bone tabs) unless a
 - **Groups follow the animation.** With **Follow Animation Events** on (Collision Shapes panel), only the groups
   the playing LMT animation switches on are shown, frame by frame. Bit k of the first event table turns on group
   `Hitbox Slot Values[k]` of that animation. It's on by default for hitbox files and off for a chain model's body
-  shapes. Without events, every group shows.
+  shapes. Without events, every group shows. An LMT animation playing from an NLA strip counts too (see Animations).
 - **Delete the `COL_` Empty** and its shapes go with it.
 
 ## Animations (`.lmt`, Dope Sheet > Action Editor > Albam)
@@ -112,12 +116,26 @@ Panels mentioned here are in the Properties editor (Object / Bone tabs) unless a
   - Curves on helper bones (Not a Game Joint, `IKP_…`, constraint targets a visual bake keyed along) are left out
     with a note; only game joints get tracks.
   - What it adjusted is reported.
+  - On the Nero rig (`scripts/nero_rig.py`) and the stand rig (`scripts/stand_rig.py`), actions marked **Bake on
+    Export** (by default the ones that key the IK controls or switches; an arm action follows its stand half) are
+    baked on a temporary copy: what the constraints make reaches the file, the action keeps only your keys. A
+    stand action is baked with the arm action in the same slot of the paired LMT playing, and the other way round.
+    A switch the action doesn't key is baked as it is now, with a note.
+  - Keys of helper bones (IK controls, poles, Not a Game Joint) don't count for where the clip starts.
+- **Rig switches stay with their animation** (Nero and stand rigs): changing an IK switch (or Follow Nero) while an
+  action that doesn't key it plays keys it, constant, on the action's first frame; putting another action on keys the
+  switches of the one before as they were, when it bakes on export. A switch keyed that way follows later changes.
 - **Tracks the armature can't show are kept.** Joints the rig doesn't have (an LMT shared with the character's
   other models) and track kinds the game ignores are stored on the action and exported back as they were, unless
   you animate that joint.
 - **A `root_motion` bone** is created for joint 255 (the character's movement). The hips follow it.
 - **Foot IK Preview** (LMT panel) plants the feet the way the game does wherever the animation's foot IK event
   flags are on. Preview only: export is unaffected.
+- **LMT animations in NLA strips count.** The hitbox groups and the foot IK fade read the events of the LMT
+  animation playing on top: the active action, else the strip of the highest track that plays at that frame, at
+  the strip's own time (moved, scaled, repeated, reversed or held). Muted tracks are skipped and a solo track plays
+  alone. While you tweak a strip (Tab), its action is the one on top. The foot IK ghost copies the armature's NLA
+  tracks whenever they change, and the chain preview recomputes after an NLA change.
 
 ## Moves (MoveDef files, Dope Sheet > Action Editor > Albam > Moves)
 

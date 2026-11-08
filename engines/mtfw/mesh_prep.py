@@ -113,7 +113,7 @@ def prepared_mesh(root, ob):
     me = ob.data.copy()
     matrix = relative_matrix(root, ob)
     if not _is_identity(matrix):
-        me.transform(matrix)
+        me.transform(matrix, shape_keys=True)    # shape keys morph in the game (shape_keys.py): same frame
         if matrix.determinant() < 0:   # a mirroring transform turns the faces inside out
             me.flip_normals()
     bm = bmesh.new()

@@ -179,5 +179,48 @@ parsed = animation.Lmt(animation.KaitaiStream(io.BytesIO(data)))
 parsed._read()
 b = parsed.block_offsets[6].block_header
 check((b.end_pos.x, b.end_pos.y, b.end_pos.z) == (1.0, 2.0, 3.0), "values set by hand are kept")
+# a set End Rotation with a zero End Position (an action copied from an imported one): a motion that doesn't loop gets
+# its travel (the game snaps the character back otherwise), a looping one keeps the zero (39 DX9 loops have it)
+tprops.end_pos = (0.0, 0.0, 0.0)
+data = animation.export_lmt(lmt)
+parsed = animation.Lmt(animation.KaitaiStream(io.BytesIO(data)))
+parsed._read()
+b = parsed.block_offsets[6].block_header
+check((b.end_pos.x, b.end_pos.y, b.end_pos.z) == (0.0, 0.0, 0.0), "a looping motion keeps a zero end position")
+tprops.loop_frames = -1
+data = animation.export_lmt(lmt)
+parsed = animation.Lmt(animation.KaitaiStream(io.BytesIO(data)))
+parsed._read()
+b = parsed.block_offsets[6].block_header
+zero_p = Vector((b.end_pos.x, b.end_pos.y, b.end_pos.z))
+check((zero_p - want).length < 0.5, f"a zero end position on a motion that doesn't loop gets its travel ({tuple(zero_p)})")
+
+# the game interpolates keys linearly: an eased curve (Bezier, Blender's default for keys set by hand) gets a key on
+# every game frame between its keys, a straight one keeps its two (a hand-keyed root motion ran at full speed and
+# stopped dead in the game)
+shapes = bpy.data.actions.new("shapes")
+animation.get_lmt_props(shapes).source_fps = 60.0
+curves = {}
+for name, interpolation in (("eased", "BEZIER"), ("straight", "LINEAR")):
+    fc = compat.fcurve_new(shapes, f'pose.bones["{name}"].location', 0, name, owner=arm)
+    for f, v in ((0, 0.0), (30, 1.0)):
+        fc.keyframe_points.insert(f, v).interpolation = interpolation
+    curves[name] = fc
+timing = animation.ExportTiming(shapes)
+eased_keys = animation._track_keys({0: curves["eased"]}, (0.0,), timing)
+check([f for f, _ in eased_keys] == [float(f) for f in range(31)], f"an eased curve gets every frame ({len(eased_keys)} keys)")
+check(max(abs(v[0] - curves["eased"].evaluate(f)) for f, v in eased_keys) < 1e-6, "on the curve")
+straight_keys = animation._track_keys({0: curves["straight"]}, (0.0,), timing)
+check([f for f, _ in straight_keys] == [0.0, 30.0], f"a straight one keeps its keys ({[f for f, _ in straight_keys]})")
+quats = {}
+for i, (a, b) in enumerate(zip((1.0, 0.0, 0.0, 0.0), (0.7071, 0.7071, 0.0, 0.0))):
+    fc = compat.fcurve_new(shapes, 'pose.bones["eased"].rotation_quaternion', i, "eased", owner=arm)
+    fc.keyframe_points.insert(0, a)
+    fc.keyframe_points.insert(30, b)
+    quats[i] = fc
+rot = dict(animation._quaternion_keys(quats, timing))
+shown = Vector([quats[i].evaluate(5) for i in range(4)]).normalized()
+check(len(rot) == 31 and (Vector(rot[5.0]) - shown).length < 1e-5,
+      "an eased rotation follows Blender's curve between its keys (not a linear slerp)")
 print("FAILURES:", failures)
 sys.exit(1 if failures else 0)

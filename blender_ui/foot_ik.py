@@ -9,7 +9,8 @@ ankle to 14 below it. On a hit the ankle target becomes hit + 12 and a 2-bone IK
 the animated ankle. The IK fades in and out by a fixed amount per frame.
 
 The rig:
-- a hidden "FK ghost" object sharing the armature data plays the same action without IK,
+- a hidden "FK ghost" object sharing the armature data plays the same animation (the action and the NLA
+  strips, copied by lib/nla.mirror) without IK,
   providing the animated ankle, knee and foot rotation without dependency cycles
 - per leg: anchor (ankle of the ghost) > probe (12 below, snapped to the ground by two
   Shrinkwrap constraints covering the game's ray window) > target (12 above the probe),
@@ -17,7 +18,8 @@ The rig:
 - per leg, a hip > knee > ankle helper chain solved by Blender's IK (the game's leg bones are
   short and unconnected, which Blender's solver can't handle), with follow bones carrying the
   result to the real thigh and shin through Copy Transforms, plus Copy Rotation keeping the
-  animated foot rotation. A frame change handler fades these from the action's events
+  animated foot rotation. A frame change handler fades these from the events of the LMT animation
+  playing on top (the active action or an NLA strip's, in the strip's time)
 
 Nothing here is exported: constraints and helper bones aren't keyed, and LMT export only reads
 F-Curves. Distances are in Blender units, game units (cm) * 0.01.
@@ -28,7 +30,7 @@ import bpy
 from bpy.app.handlers import persistent
 from mathutils import Matrix, Vector
 
-from albam.lib import blender_compat
+from albam.lib import nla
 
 from albam.registry import blender_registry
 
@@ -118,6 +120,7 @@ def remove_rig(armature):
             for name in helper_bones:
                 armature.data.edit_bones.remove(armature.data.edit_bones[name])
     if ghost is not None:
+        _ghost_states.pop(ghost.name, None)
         bpy.data.objects.remove(ghost)
     if GHOST_PROP in armature:
         del armature[GHOST_PROP]
@@ -255,7 +258,7 @@ def build_rig(armature, ground):
         keep.subtarget = foot
 
     errors = _calibrate_poles(armature, ghost, legs)
-    blender_compat.assign_action(ghost, armature.animation_data.action if armature.animation_data else None)
+    sync_ghost(armature, force=True)
     ghost.hide_set(True)
     update_rig(bpy.context.scene, armature)
     return errors
@@ -290,10 +293,13 @@ def _calibrate_poles(armature, ghost, legs):
     The rest pose has straight legs, so bend the ghost's knees and pick the angle where the IK
     knee lands on the ghost's knee
     """
-    main_action = armature.animation_data.action if armature.animation_data else None
-    if armature.animation_data:
-        armature.animation_data.action = None
-    # clearing the action leaves the last evaluated pose, start both from the rest pose
+    # without the action and the NLA (a strip under the hips would move the armature but not the ghost)
+    with nla.paused(armature):
+        return _calibrate_paused(armature, ghost, legs)
+
+
+def _calibrate_paused(armature, ghost, legs):
+    # pausing the animation leaves the last evaluated pose, start both from the rest pose
     main_pose = {pb.name: pb.matrix_basis.copy() for pb in armature.pose.bones}
     for pb in list(armature.pose.bones) + list(ghost.pose.bones):
         pb.matrix_basis = Matrix.Identity(4)
@@ -336,8 +342,6 @@ def _calibrate_poles(armature, ghost, legs):
         constraint.mute = False
     for pb in armature.pose.bones:
         pb.matrix_basis = main_pose[pb.name]
-    if armature.animation_data:
-        blender_compat.assign_action(armature, main_action)
     view_layer.update()
     return errors
 
@@ -386,18 +390,57 @@ def foot_ik_weights(action, frame, blend_speed):
     return weights
 
 
+def current_weights(scene, armature):
+    """foot_ik_weights of the LMT animation playing on the armature now (the active action or an NLA strip's, in
+    the strip's own time)"""
+    action, frame = _animation().playing_lmt(armature, scene.frame_current)
+    return foot_ik_weights(action, frame, scene.albam.foot_ik_preview.blend_speed)
+
+
+_ghost_states = {}          # ghost name -> nla.state of its armature when it was last mirrored
+_mirror_pending = [False]
+
+
+def sync_ghost(armature, force=False):
+    """Give the ghost what the armature plays (active action, NLA tracks, tweak mode) if that changed since the
+    last time, or with `force`; True when it did"""
+    ghost = get_ghost(armature)
+    if ghost is None:
+        return False
+    key = nla.state(armature)
+    if not force and _ghost_states.get(ghost.name) == key:
+        return False
+    nla.mirror(armature, ghost)
+    _ghost_states[ghost.name] = key
+    return True
+
+
+def _mirror_timer():
+    _mirror_pending[0] = False
+    try:
+        scene = bpy.context.scene
+        changed = [sync_ghost(ob) for ob in scene.objects if ob.type == "ARMATURE" and GHOST_PROP in ob]
+        screen = bpy.context.screen
+        if any(changed) and (screen is None or not screen.is_animation_playing):
+            scene.frame_set(scene.frame_current)
+    except Exception as err:                # noqa: BLE001 - never break playback
+        print(f"Foot IK ghost: {err}")
+    return None
+
+
 def update_rig(scene, armature):
-    """Sync the ghost's action and set the IK influences for the current frame"""
+    """Set the IK influences for the current frame, and have the ghost re-mirror the armature's animation when it
+    changed (from a timer: NLA tracks aren't made inside the frame update)"""
     ghost = get_ghost(armature)
     if ghost is None:
         return
-    action = armature.animation_data.action if armature.animation_data else None
-    if ghost.animation_data and ghost.animation_data.action != action:
-        blender_compat.assign_action(ghost, action)
+    if _ghost_states.get(ghost.name) != nla.state(armature) and not _mirror_pending[0]:
+        _mirror_pending[0] = True
+        bpy.app.timers.register(_mirror_timer, first_interval=0.0)
     legs = _leg_bones(armature)
     if legs is None:
         return
-    weights = foot_ik_weights(action, scene.frame_current, scene.albam.foot_ik_preview.blend_speed)
+    weights = current_weights(scene, armature)
     for side, (thigh, shin, foot, toe) in legs.items():
         _set_weight(armature, (thigh, shin, foot), weights[side])
 
@@ -505,8 +548,7 @@ class ALBAM_PT_FootIkPreview(bpy.types.Panel):
         row.operator("albam.foot_ik_preview_build", text="Rebuild" if built else "Build", icon="CON_KINEMATIC")
         row.operator("albam.foot_ik_preview_remove", text="", icon="X")
         if built:
-            action = armature.animation_data.action if armature.animation_data else None
-            weights = foot_ik_weights(action, context.scene.frame_current, settings.blend_speed)
+            weights = current_weights(context.scene, armature)
             layout.label(text=f"IK this frame: right {weights['R']:.0%}, left {weights['L']:.0%}")
         else:
             layout.label(text="Preview only, never exported", icon="INFO")

@@ -32,7 +32,7 @@ from albam.lib.blender import (
 from albam.exceptions import AlbamCheckFailure
 from albam.lib.misc import chunks
 from albam.registry import blender_registry
-from albam.engines.mtfw import joints, mesh_prep
+from albam.engines.mtfw import joints, mesh_prep, shape_keys
 from albam.vfs import VirtualFileData
 from .material import (
     build_blender_materials,
@@ -961,6 +961,10 @@ def _export_mod(bl_obj, src_mod, bl_meshes, vfiles):
                                  if dst_mod._albam_joint_layout else None)
     bone_palettes = _create_bone_palettes(src_mod, bl_obj, bl_meshes, dst_mod._albam_bone_index)
     dst_mod.bones_data = _serialize_bones_data(bl_obj, bl_meshes, src_mod, dst_mod, bone_palettes)
+    # meshes with shape keys morph in the game (shape_keys.py): read by the material, mesh and vertex writers
+    dst_mod._albam_shapes = None
+    if app_id == "dmc4" and src_mod.header.version == 153:
+        dst_mod._albam_shapes = shape_keys.ShapePlan(app_id, bl_meshes, bool(dst_mod.header.num_bones)) or None
     dst_mod.groups = _serialize_groups(src_mod, dst_mod, bl_meshes)
     materials_map, mrl, vtextures = serialize_materials_data(asset, bl_meshes, src_mod, dst_mod)
 
@@ -1011,6 +1015,10 @@ def _export_mod(bl_obj, src_mod, bl_meshes, vfiles):
     vfiles.extend(vtextures)
     if mrl:
         vfiles.append(mrl)
+    if dst_mod._albam_shapes:
+        vfiles.extend(dst_mod._albam_shapes.files(app_id, asset.relative_path, bpy.context.scene))
+        for note in dst_mod._albam_shapes.notes:
+            print(f"[Albam] {bl_obj.name}: WARNING {note}")
     return vfiles
 
 
@@ -1603,9 +1611,11 @@ def _serialize_meshes_data(bl_obj, bl_meshes, src_mod, dst_mod, materials_map, b
                 raise ValueError(
                     f"Mesh {mesh_index} doesn't have a bone_palette")
 
+        shapes = getattr(dst_mod, "_albam_shapes", None)
+        shape_texels = shapes.texels(mesh_index, len(bl_mesh.data.vertices)) if shapes else None
         vertices, vertices2, vertex_format, vertex_stride, vertex_stride_2, max_bones_per_vertex = (
             _export_vertices(app_id, bl_mesh, mesh,
-                             mesh_bone_palette, dst_mod, bbox_data)
+                             mesh_bone_palette, dst_mod, bbox_data, shape_texels)
         )
         vertex_buffer.extend(vertices.to_byte_array())
         if vertices2:
@@ -1654,6 +1664,10 @@ def _serialize_meshes_data(bl_obj, bl_meshes, src_mod, dst_mod, materials_map, b
 
         # TODO: pre-check for no materials
         mesh.idx_material = materials_map[bl_mesh.data.materials[0].name]
+        if shapes:  # the draw binds the part's shape map only for flagged meshes (shape_keys.py)
+            mesh.shape = shape_texels is not None
+            if mesh.shape and shapes.materials.get(bl_mesh.data.materials[0].name):
+                mesh.idx_material = materials_map[(bl_mesh.data.materials[0].name, shape_keys.SHAPE_COPY)]
         # mod 153: the mesh's "vertex_format" is the number of weights per vertex (0 = rigid); the layout
         # comes from the material vtype (corpus: live weights never exceed it in 12,588 meshes)
         if dst_mod.header.version == 153:
@@ -1712,7 +1726,9 @@ def _serialize_meshes_data(bl_obj, bl_meshes, src_mod, dst_mod, materials_map, b
     return meshes_data, vertex_buffer, vertex_buffer_2, index_buffer
 
 
-def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_data):
+def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_data, shape_texels=None):
+    """shape_texels: [(column, row)] per vertex of a morphing mesh (shape_keys.py): they go in TEXCOORD0, the UV in
+    TEXCOORD1"""
     SCALE = 100
     uvs_per_vertex = _uvs_for_slot(bl_mesh, 0)
     uvs_per_vertex_2 = _uvs_for_slot(bl_mesh, 1)
@@ -1906,8 +1922,11 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
                 _parent=vertex_struct, _root=vertex_struct._root)
             uv_x, uv_y = uvs_per_vertex.get(vertex_index, (0, 0))
             uv_x, uv_y = _normalize_uv(uv_x, uv_y)
-            vertex_struct.uv.u = pack('e', uv_x)
-            vertex_struct.uv.v = pack('e', uv_y)
+            if shape_texels is not None:   # the texel in the part's shape map; the UV moves to TEXCOORD1 below
+                vertex_struct.uv.u, vertex_struct.uv.v = (pack('e', c) for c in shape_texels[vertex_index])
+            else:
+                vertex_struct.uv.u = pack('e', uv_x)
+                vertex_struct.uv.v = pack('e', uv_y)
         # UV2
         if vertex_format in VERTEX_FORMATS_UV2:
             vertex_struct.uv2 = dst_mod.Vec2HalfFloat(
@@ -1924,6 +1943,10 @@ def _export_vertices(app_id, bl_mesh, mesh, mesh_bone_palette, dst_mod, bbox_dat
                 c = color_per_vertex.get(vertex_index, (255, 255, 255, 255)) if color_per_vertex else (255, 255, 255, 255)
                 vertex_struct.uv2.u = bytes((c[0], c[1]))
                 vertex_struct.uv2.v = bytes((c[2], c[3]))
+            if shape_texels is not None:   # every SKIN_4WT_SHAPE vertex shader takes its UVs from TEXCOORD1
+                uv_x, uv_y = _normalize_uv(*uvs_per_vertex.get(vertex_index, (0, 0)))
+                vertex_struct.uv2.u = pack('e', uv_x)
+                vertex_struct.uv2.v = pack('e', uv_y)
         # UV3
         if vertex_format in VERTEX_FORMATS_UV3:
             vertex_struct.uv3 = dst_mod.Vec2HalfFloat(

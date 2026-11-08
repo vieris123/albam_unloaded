@@ -8,6 +8,11 @@ Kinds: int, hex (an int written as 0x..), float, bool, enum (one of `items`; oth
 """
 
 MIN_ID = {"pl000": 0x34, "pl006": 0x6C}      # first free atckId per character (MoveDef.cpp MIN_ID: Nero, Dante)
+# atckIds dmc4_hook's own C++ moves register (Gerb 0x40 / 0x41, FreeRide 0x42 / 0x70, Gunslinger 0x43 / 0x46 / 0x47, the air throw
+# 0x6D, Dante's air dodge 0x6E): a MoveDef move on one of them would fight that move for the row and the dispatch
+HOOK_IDS = {"pl000": {0x40: "Gerb", 0x41: "Gerb", 0x42: "FreeRide", 0x43: "Gunslinger", 0x46: "the Gunslinger air shot",
+                      0x47: "the Gunslinger neutral shot"},
+            "pl006": {0x6D: "the air throw", 0x6E: "Dante's air dodge", 0x70: "FreeRide"}}
 FREE_BANKS = range(10, 15)                    # fixed banks an <lmt bank=> may name (10-14)
 OWN = "lmt"                                   # bank key of the move's own <lmt> blocks (block=, <slot>s)
 # banks the motion registry fills per character (schema.md: 10-14, Nero's 4 / 6-9 too); motion= may not name them
@@ -230,8 +235,8 @@ _LIST = (
         Attr("enemy_step", "bool", "true", "The enemy step may interrupt from frame 0"),
         Attr("eat_press", "enum", "", "Ignore this button until it's released once after entry", _BTN),
         Attr("watchdog", "int", "60", "Ticks without motion progress before the move bails out"),
-    ), children=("slot", "cancel", "trigger", "next", "effect", "se", "kill_effect", "finish_effect", "shell",
-                 "launch", "air_jump"), multiple=True, frame="cancel_frame", starter=("name",)),
+    ), children=("slot", "cancel", "trigger", "next", "effect", "se", "kill_effect", "finish_effect", "shape",
+                 "shape_stop", "shell", "launch", "air_jump"), multiple=True, frame="cancel_frame", starter=("name",)),
     Element("slot", "The LMT block played for a stick direction", (
         Attr("dir", "enum", "forward", "Stick direction", _items(*DIRECTIONS), required=True),
         Attr("block", "int", "0", "Block (slot) of the <lmt> file", required=True),
@@ -289,6 +294,25 @@ _LIST = (
     ), multiple=True, frame="frame"),
     Element("finish_effect", "Lets the effect registered with id finish at a frame", (
         _FRAME, Attr("id", "int", "-1", "The <effect id=>", required=True),
+    ), multiple=True, frame="frame"),
+    Element("shape", "Starts a shape-key animation (.shw) at a frame (2026-11-08, not built)", (
+        _FRAME,
+        Attr("shw", "str", "", "Game path of the .shw (weight curves), no extension", required=True),
+        Attr("list", "int", "1", "Weight list 0-3 it plays on (0 = the ModelExtension <shape>'s own)"),
+        Attr("speed", "float", "1", "Curve frames per game frame (negative plays backwards)"),
+        Attr("loop", "bool", "false", "Keep looping after it ends (else it's a one-shot, stopped at its end)"),
+        Attr("hold", "bool", "false", "A one-shot keeps its last frame's weights instead of stopping (until a "
+             "<shape_stop>)"),
+        Attr("rate", "float", "1", "Its share when other lists play too"),
+        Attr("start", "float", "0", "The curve frame it starts on"),
+        Attr("on", "enum", "body", "Which model", _items("body", "face", "coat", helps={
+            "body": "the player", "face": "the face model", "coat": "the coat model"})),
+    ), multiple=True, frame="frame", starter=("frame", "shw")),
+    Element("shape_stop", "Stops a weight list's shape-key animation at a frame (its weights drop out)", (
+        _FRAME,
+        Attr("list", "int", "1", "Weight list 0-3"),
+        Attr("on", "enum", "body", "Which model", _items("body", "face", "coat", helps={
+            "body": "the player", "face": "the face model", "coat": "the coat model"})),
     ), multiple=True, frame="frame"),
     Element("shell", "A hitbox capsule riding the player from a frame", (_FRAME,) + _SHELL,
             multiple=True, frame="frame"),

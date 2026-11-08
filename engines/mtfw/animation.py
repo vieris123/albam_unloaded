@@ -2,6 +2,7 @@ from ctypes import Structure, Union, c_ulonglong, c_double, c_uint64, c_uint8
 from enum import Enum
 
 import base64
+import contextlib
 import ctypes
 import json
 import math
@@ -18,6 +19,7 @@ import numpy as np
 
 from albam.exceptions import AlbamCheckFailure
 from albam.lib import blender_compat as compat
+from albam.lib import nla
 from albam.registry import blender_registry
 from .structs.lmt import Lmt
 
@@ -662,6 +664,13 @@ def world_pos_fix(decoded_frames):
             frame = ([frame[2], frame[1], frame[0]])
 
 
+# Callables (lmt_group, notes) -> context manager, entered around every LMT export. A rig whose constraints make the
+# pose (scripts/nero_rig.py, stand_rig.py: IK, finger grips) registers one that bakes them into temporary copies of
+# the LMT's actions, puts the copies in its rows and puts the originals back on exit: the game reads only keys, and
+# the actions being edited keep only the animator's
+LMT_EXPORT_HOOKS = []
+
+
 @blender_registry.register_export_function(app_id="dmc4", extension="lmt")
 def export_lmt(lmt_group, notes=None):
     """
@@ -669,7 +678,14 @@ def export_lmt(lmt_group, notes=None):
     are appended to notes, if given
     """
     notes = notes if notes is not None else []
-    timings = {item.action.name: ExportTiming(item.action) for item in lmt_group.actions if item.action}
+    with contextlib.ExitStack() as stack:
+        for hook in list(LMT_EXPORT_HOOKS):
+            stack.enter_context(hook(lmt_group, notes))
+        return _export_lmt(lmt_group, notes)
+
+
+def _export_lmt(lmt_group, notes):
+    timings = {item.action.name: ExportTiming(item.action, lmt_group.armature) for item in lmt_group.actions if item.action}
     _check_lmt_group(lmt_group, timings)
     from albam.engines.mtfw.joints import ensure_joint_numbers
     ensure_joint_numbers(lmt_group.armature)   # bones added in Blender get their joint numbers now
@@ -690,11 +706,14 @@ class ExportTiming:
     action is never changed
     """
 
-    def __init__(self, action):
+    def __init__(self, action, armature=None):
         self.fps = get_lmt_props(action).source_fps
         self.scale = FRAMERATE / self.fps
+        # keys of helper bones don't count: they aren't exported (a rig's IK control keyed on the frame before a pose
+        # moved every track a frame late)
+        helpers = _helper_bone_names(armature or _lmt_armature(action))
         key_frames = [kp.co[0] for fc in compat.action_fcurves(action) if fc.data_path.startswith('pose.bones["')
-                      for kp in fc.keyframe_points]
+                      and _curve_bone(fc.data_path) not in helpers for kp in fc.keyframe_points]
         # events count too: an LMT block with only constant tracks has its keys on frame 1
         # but its first events on frame 0
         props = get_lmt_props(action)
@@ -723,6 +742,27 @@ class ExportTiming:
         if self.fractional:
             changes.append("keys between whole frames resampled")
         return ", ".join(changes)
+
+
+def _curve_bone(data_path):
+    return data_path[len('pose.bones["'):data_path.find('"]', len('pose.bones["'))]
+
+
+def _lmt_armature(action):
+    """the armature of the LMT holding the action, or None"""
+    try:
+        groups = bpy.context.scene.albam.lmt_groups.anim_group
+    except AttributeError:
+        return None
+    return next((g.armature for g in groups if any(r.action == action for r in g.actions)), None)
+
+
+def _helper_bone_names(armature):
+    """the armature's bones that get no track (root_motion does: it's joint 255)"""
+    if armature is None or armature.type != 'ARMATURE':
+        return set()
+    from albam.engines.mtfw.joints import is_helper
+    return {b.name for b in armature.data.bones if b.name != ROOT_MOTION_BONE_NAME and is_helper(b)}
 
 
 def game_length(action):
@@ -850,6 +890,15 @@ def _serialize_block(dst_lmt, lmt_group, header_size, timings, notes):
             end_pos, end_quat = root_motion_end(lmt_group.armature, action, custom_property, timing), (0.0, 0.0, 0.0, 1.0)
             if any(abs(v) > 1e-3 for v in end_pos):
                 notes.append(f"{action.name}: root motion end {tuple(round(v, 1) for v in end_pos)} cm")
+        elif custom_property.loop_frames < 0 and not any(end_pos):
+            # a set End Rotation with a zero End Position (an action copied from an imported one keeps the source's):
+            # on a motion that doesn't loop the game takes the travel back at the end and the character snaps back.
+            # Every DX9 block that doesn't loop and travels stores its end
+            travel = root_motion_end(lmt_group.armature, action, custom_property, timing)
+            if any(abs(v) > 1.0 for v in travel):
+                end_pos = travel
+                notes.append(f"{action.name}: End Position was 0 while root_motion travels: wrote "
+                             f"{tuple(round(v, 1) for v in end_pos)} cm (the character would snap back at the end)")
         block.end_pos = dst_lmt.Vec4(_parent=block, _root=dst_lmt._root)
         block.end_pos.x, block.end_pos.y, block.end_pos.z = end_pos
         block.end_pos.w = 0
@@ -1088,19 +1137,26 @@ def _serialize_events(dst_lmt, dst_action, action, timing):
     return serialized[0], serialized[1]
 
 
+CURVE_TOLERANCE = 1e-4   # how far a value may stray from its curve between two written keys (m, radians, scale)
+
+
 def _track_keys(channels, defaults, timing, max_gap=None):
     """
     (game frame, [values]) for every game frame where any channel of the track has a keyframe,
     with every channel evaluated there. The file stores all components of a track per key, so
     channels keyed on different frames are filled in from their curves. Keyframes are mapped to
     whole game frames (see ExportTiming). Animated tracks always get a key on frame 0, where the
-    game starts reading them. With max_gap, longer gaps are split: rotation keys (MAX_KEY_GAP, the
-    most their 8-bit duration holds); location and scale keys store 32-bit durations and aren't.
-    Channels missing from the track take their value from defaults
+    game starts reading them. The game interpolates linearly between keys, so between two keys
+    where a curve isn't a straight line (Bezier easing, Blender's default for keys set by hand;
+    constant holds; modifiers) every game frame gets a key (_curved_frames). With max_gap, longer
+    gaps are split: rotation keys (MAX_KEY_GAP, the most their 8-bit duration holds); location and
+    scale keys store 32-bit durations and aren't. Channels missing from the track take their value
+    from defaults
     """
     frames = {round(timing.to_game(kp.co[0])) for c in channels.values() for kp in c.keyframe_points}
     if len(frames) > 1:
         frames.add(0)
+        frames |= _curved_frames(list(channels.values()), timing, sorted(frames))
         ordered = sorted(frames)
         if max_gap:
             for before, after in zip(ordered, ordered[1:]):
@@ -1110,6 +1166,28 @@ def _track_keys(channels, defaults, timing, max_gap=None):
                         for i, default in enumerate(defaults)])
         for frame in sorted(frames)
     ]
+
+
+def _curved_frames(curves, timing, ordered):
+    """
+    The game frames strictly between consecutive frames of `ordered` where some curve leaves the
+    straight line between its values at the two ends by more than CURVE_TOLERANCE: every frame of
+    such a gap, so the game's linear interpolation follows the curve frame by frame
+    """
+    def values(frame):
+        return [c.evaluate(timing.to_action(frame)) for c in curves]
+
+    added = set()
+    for before, after in zip(ordered, ordered[1:]):
+        if after - before < 2:
+            continue
+        start, end = values(before), values(after)
+        for frame in range(before + 1, after):
+            u = (frame - before) / (after - before)
+            if any(abs(v - (a + (b - a) * u)) > CURVE_TOLERANCE for v, a, b in zip(values(frame), start, end)):
+                added.update(range(before + 1, after))
+                break
+    return added
 
 
 def _rotation_keys(channels, prop, euler_order, timing):
@@ -1131,7 +1209,8 @@ def _quaternion_keys(channels, timing):
     (game frame, Quaternion) for a rotation_quaternion track. Between keyframes, Blender
     interpolates each component on its own, which goes wrong when neighbouring keys are in
     opposite hemispheres (q and -q, same rotation; imported animations have these). So keys
-    are evaluated where they are and slerped in between
+    are evaluated where they are; between keyframes the curves are taken as Blender shows them
+    (normalized), and slerped only across a hemisphere change
     """
     defaults = (1.0, 0.0, 0.0, 0.0)
 
@@ -1148,8 +1227,10 @@ def _quaternion_keys(channels, timing):
             continue
         before_time, after_time = key_times[after - 1], key_times[after]
         q0, q1 = at(before_time).normalized(), at(after_time).normalized()
-        if q0.dot(q1) < 0.0:
-            q1.negate()
+        if q0.dot(q1) >= 0.0:
+            keys.append((game_frame, at(t).normalized()))
+            continue
+        q1.negate()
         keys.append((game_frame, q0.slerp(q1, (t - before_time) / (after_time - before_time))))
     return keys
 
@@ -1325,10 +1406,38 @@ EVENT_TYPES = [
 ]
 
 
+# Labels and descriptions where the key alone misleads. The keys stay (events store their flags under them). The stand's
+# two sword bits were named the wrong way round: uPlNeroDevil::updatePosition 0x8292E0 reads bit 31 (kMotSeqParam
+# 0xC3D6C8) for the sword's place and bit 30 (0xC3D6BC) only for a flag on the stand (DX9 IDA, checked in the game).
+FLAG_INFO = {
+    'stand_sword_disp': ("Stand Sword Flag (bit 30)",
+                         "Bit 30, read on the stand's own motion: sets flag 0x2 at stand +0x14CC (uPlNeroDevil::updatePosition); "
+                         "what reads that flag isn't traced. It doesn't move the sword: that's Stand Sword in Hand (bit 31)"),
+    'sword_trail': ("Stand Sword in Hand",
+                    "Bit 31, read on the stand's own motion (pl020): on = the stand's Yamato (wp040) is drawn in the arm's hand "
+                    "(wp024 joint 150), off = in its sheath (stand joint 151), every frame (uPlNeroDevil::updatePosition). "
+                    "The arm's (wp024) events aren't read for it"),
+    'right_foot_ik': ("Right Foot IK",
+                      "Bit 24 of the first table: plants the right foot on the ground (the IK on joints 14-16, thigh_r / shin_r / "
+                      "foot_r) while on (uPlayer::updateLegIk)"),
+    'left_foot_ik': ("Left Foot IK",
+                     "Bit 25 of the first table: plants the left foot on the ground (the IK on joints 18-20, thigh_l / shin_l / "
+                     "foot_l) while on (uPlayer::updateLegIk)"),
+    'gun_display': ("Blue Rose Shown",
+                    "Bit 26 of the first table, on Nero: Blue Rose is drawn in his left hand (joint 151) while on, hidden while "
+                    "off (uPlWpBlueRose::update). Key it on for any move that shoots"),
+    'main_sword_display': ("Red Queen Place",
+                           "Bits 27-28 of the first table, on Nero: where Red Queen is drawn. 0 on his back (joint 152), "
+                           "1 in the right hand (150), 2 in the left hand (151) (uPlWpRedQueen::update)"),
+}
+
+
 def _flag_property(name):
     bit, count = GroupHash[name], GroupBitNum[name]
     bits = f"bit {bit}" if count == 1 else f"bits {bit}-{bit + count - 1}"
-    return bpy.props.IntProperty(description=f"Event flag, {bits} of the event value", min=0, max=(1 << count) - 1)
+    label, description = FLAG_INFO.get(name, (None, f"Event flag, {bits} of the event value"))
+    kwargs = {"name": label} if label else {}
+    return bpy.props.IntProperty(description=description, min=0, max=(1 << count) - 1, **kwargs)
 
 
 def _get_event_type(self):
@@ -1424,8 +1533,9 @@ class Lmt49ActionCustomProperties(bpy.types.PropertyGroup):
     end_pos: bpy.props.FloatVectorProperty(
         name='End Position', size=3,
         description="Root motion at the end (game cm): the joint 255 position on the last frame, or for a loop from a "
-                    "later frame the travel of one loop. The game adds it when the motion wraps. Left at zero with "
-                    "End Rotation, export works it out from the root_motion curves")
+                    "later frame the travel of one loop. The game adds it when the motion wraps or ends: at zero on a "
+                    "travelling motion the character snaps back to where it started. Left at zero, export works it out "
+                    "from the root_motion curves when the motion doesn't loop, or when End Rotation is all zero")
     end_quat: bpy.props.FloatVectorProperty(
         name='End Rotation', size=4, default=(0.0, 0.0, 0.0, 1.0),
         description="Root rotation at the end (x y z w; the game's files all have 0 0 0 1). All zero: export writes "
@@ -1475,6 +1585,15 @@ def _on_active_anim_changed(self, context):
 
 def is_lmt_action(action):
     return action is not None and action.albam_asset.app_id == "dmc4"
+
+
+def playing_lmt(ob, frame):
+    """(action, action frame) of the LMT animation on top of what plays on `ob` at scene frame `frame`: the active
+    action or an NLA strip's (in the strip's time), or (None, frame). For previews that read the events."""
+    for action, at in nla.playing(ob, frame):
+        if is_lmt_action(action):
+            return action, at
+    return None, frame
 
 
 def follow_action(armature, action):

@@ -5,7 +5,7 @@ are reported.
     errors, warnings = check(doc, Env(block_length=..., others=[...]))
 """
 from .schema import (
-    ELEMENTS, MIN_ID, FREE_BANKS, OWN, RUNTIME_BANKS, MAX_MOTION_BANK, GRAB_BANK, MAX_SHELLS, MAX_CANCEL_WORDS,
+    ELEMENTS, MIN_ID, HOOK_IDS, FREE_BANKS, OWN, RUNTIME_BANKS, MAX_MOTION_BANK, GRAB_BANK, MAX_SHELLS, MAX_CANCEL_WORDS,
     CATEGORIES, CONTACT_BYTES, BUTTONS, DIRECTIONS, spec_for)
 
 
@@ -137,6 +137,8 @@ def check(doc, env=None):
                 errors.append(f"an overlay names a vanilla id: {value:#x} is not below {first:#x}")
             elif not overlay and value < first:
                 errors.append(f"id {value:#x} is below the first free id {first:#x} of {character}")
+            elif not overlay and value in HOOK_IDS.get(character, {}):
+                errors.append(f"id {value:#x} is dmc4_hook's {HOOK_IDS[character][value]} move")
     for other in env.others:
         if other.name and other.name == name:
             errors.append(f"another move is named '{name}' ({other.where})")

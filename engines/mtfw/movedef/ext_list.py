@@ -84,12 +84,31 @@ ELEMENTS = {
                                        "passes"),
     ),
 }
+_WEIGHT_LIST = (
+    Attr("speed", "number", "1", "Curve frames per game frame. Negative plays backwards, 0 holds Frame"),
+    Attr("rate", "number", "1", "This list's share when several play: a key's weight is the sum of each list's curve "
+                                "x rate, divided by the sum of the rates"),
+    Attr("frame", "number", "0", "The curve frame the list starts on"),
+    Attr("loop", "bool", "true", "true: starts over after its last frame. false: stops on its last frame"),
+)
+ELEMENTS["shape"] = (
+    Attr("shp", "shape", "", "The morph targets (.shp, without extension). Albam writes it beside the .mod, at the "
+                             "model's path, from the meshes' shape keys"),
+    Attr("shw", "weights", "", "The weight list (.shw, without extension) played from the start, list 0. Albam writes "
+                               "<model>.shw (the keys' set values) and <model>_<clip>.shw per shape-key action beside "
+                               "the .mod. The same as a first <weights>"),
+) + _WEIGHT_LIST
+ELEMENTS["weights"] = (
+    Attr("shw", "weights", "", "Another weight list (.shw, without extension), playing with the others"),
+) + _WEIGHT_LIST
+MAX_WEIGHT_LISTS = 4    # cShape::WeightNode[4]
 CONSTRAINTS = ("pin", "aim", "offset")
 PARENTS = {"attach": ROOT, "model": ROOT, "hide": ROOT, "chain": "model", "pin": "model", "aim": "model", "offset": "model",
-           "link": "model"}
+           "link": "model", "shape": "model", "weights": "shape"}
 REQUIRED = {"attach": ("path", "to"), "model": ("path",), "chain": ("clt",), "hide": ("path",),
-            "pin": ("joint", "to"), "aim": ("joint", "to"), "offset": ("joint",), "link": ("a", "b", "max")}
-EXTENSIONS = (".mod", ".phs", ".clt", ".col")
+            "pin": ("joint", "to"), "aim": ("joint", "to"), "offset": ("joint",), "link": ("a", "b", "max"),
+            "shape": ("shp",), "weights": ("shw",)}
+EXTENSIONS = (".mod", ".phs", ".clt", ".col", ".shp", ".shw")
 AXES = ("x", "+x", "-x", "y", "+y", "-y", "z", "+z", "-z")
 
 
@@ -182,7 +201,7 @@ def _check_elem(d, e, say):
         value = e.get(a.name)
         if value is None:
             continue
-        if a.kind in ("model", "chain", "col") and value.lower().endswith(EXTENSIONS):
+        if a.kind in ("model", "chain", "col", "shape", "weights") and value.lower().endswith(EXTENSIONS):
             say("warning", f"<{e.tag}> {a.name}=\"{value}\": game paths have no extension")
         elif a.kind == "int":
             try:
@@ -203,6 +222,10 @@ def _check_elem(d, e, say):
             values = _floats(value)
             if not values or not 0.0 <= values[0] <= 1.0:
                 say("warning", f"<{e.tag}> {a.name}=\"{value}\": 0-1, the game clamps it")
+        elif a.kind == "number":
+            values = _floats(value)
+            if not values or len(values) != 1:
+                say("error", f"<{e.tag}> {a.name}=\"{value}\": a number")
         elif a.kind == "length" and value.strip():
             values = _floats(value)
             if not values or len(values) != 1 or values[0] <= 0.0:
@@ -230,6 +253,9 @@ def _check_elem(d, e, say):
             say("error", f"<aim> joint {e.get('joint')}: axis and up on the same letter, the game refuses it")
     if e.tag == "link" and joint_number(e, "a") is not None and joint_number(e, "a") == joint_number(e, "b"):
         say("error", f"<link> joint {e.get('a')} to itself: the game refuses it")
+    if e.tag == "shape" and len(weight_lists(d, e)) > MAX_WEIGHT_LISTS:
+        say("warning", f"<shape> {e.get('shp')}: {len(weight_lists(d, e))} weight lists, the game plays the first "
+                       f"{MAX_WEIGHT_LISTS}")
 
 
 # Joints the game's own constraints hold, by model file name: a list entry on them is refused (schema.md "Who wins").
@@ -268,6 +294,16 @@ def links(d):
     return [(e, d.parent_of(e)) for e in d.elems if e.tag == "link" and d.parent_of(e).tag == "model"]
 
 
+def shapes(d):
+    """The <shape> entries of a list, with their <model>"""
+    return [(e, d.parent_of(e)) for e in d.elems if e.tag == "shape" and d.parent_of(e).tag == "model"]
+
+
+def weight_lists(d, shape):
+    """The elements of a <shape> naming a weight list: itself when it has shw=, then its <weights>"""
+    return ([shape] if shape.get("shw", "").strip() else []) + d.children(shape, "weights")
+
+
 def link_values(e):
     """(a, b, max cm, stiffness) as the runner reads them; None while a joint or max isn't usable"""
     a, b = joint_number(e, "a"), joint_number(e, "b")
@@ -282,8 +318,13 @@ def issues(lists):
     """[(level "error" / "warning", file name, message)] for `lists` = [(file name, Doc)]: all the lists the game reads
     together, in the game's order, since a joint's first entry wins across files"""
     out = []
-    attached, taken = set(), set()
+    attached, taken, shaped = set(), set(), set()
     for name, d in sorted(lists, key=lambda item: item[0]):
+        for e, model in shapes(d):
+            path = normalize(model.get("path", ""))
+            if path and path in shaped:
+                out.append(("warning", name, f"{model.get('path')} has a <shape> already: the first listed wins"))
+            shaped.add(path)
         for e in d.elems:
             _check_elem(d, e, lambda level, message, name=name: out.append((level, name, message)))
         for attach in d.children(d.root, "attach"):

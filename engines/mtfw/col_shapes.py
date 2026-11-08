@@ -746,8 +746,9 @@ def active_groups(root, frame):
     arm = shapes_armature(root)
     if not root.albam_col.follow_events or arm is None:
         return None
-    action = arm.animation_data.action if arm.animation_data else None
-    found = _event_value(action, frame) if action is not None else None
+    from albam.engines.mtfw.animation import playing_lmt
+    action, at = playing_lmt(arm, frame)        # the active action or an NLA strip's, in its own time
+    found = _event_value(action, at) if action is not None else None
     if found is None:
         return None
     params, value = found

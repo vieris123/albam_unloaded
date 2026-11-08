@@ -190,7 +190,8 @@ with the same numbers, and give its own bones numbers the body doesn't have: joi
   - **Turn Carried by Parent on for clothing** (Follow Position + Follow Rotation, Parent 1, as the game's coats). Off,
     the cloth stays in the world while she runs, so her legs come forward through it and it ends up behind them (2B:
     front-left cloth behind a thigh 63 joint-frames striding in place, 146 running; with carry on, 63 at any speed).
-  - **At Blend 1.0, give the cloth real gravity.** Nothing else brings lifted cloth back down: real gravity is about
+  - **At Blend 1.0, give the cloth real gravity** (and see the flared-skirt note below: on Ellen, Blend 1.0 failed in the
+    game; 2B's front is untested there). Nothing else brings lifted cloth back down: real gravity is about
     0.27 cm per frame² at 60 fps, and 2B's dress had 0.03, so after a leg raise it stayed bunched (20 cm off its shape
     1.5 s later). 0.3 halved that, with the resting shape barely changed. The big radius and the links that stop the
     tuck also keep some folds in place after the leg drops: smaller radius or no links bunch less but tuck more.
@@ -210,10 +211,15 @@ with the same numbers, and give its own bones numbers the body doesn't have: joi
     between them opens (Ellen: 6 cm between her front and side columns with the legs apart). Linking its bottom two
     rows closed it and took the last tucks out: cloth behind / inside a thigh went from 78 / 53 striding and 70 / 80 on a
     leg raise (as she was) to 0 everywhere; all four rows was worse on a leg raise (11-13 inside).
-  - **A flared skirt keeps its weak gravity.** Ellen's skirt stands out from her legs and doesn't bunch after a leg
-    raise (1.8 cm off its shape 1 s later at gravity 0.03), so 2B's 0.3 only made the front sag more (5.6 cm against
-    4.6). Blend 1.0 alone costs some of the flare's shape (4.6 cm against 1.4 at 0.4); Blend 0.7 let cloth into the
-    thighs again on a leg raise.
+  - **A flared skirt needs a low blend, even on its front.** Ellen's front at Blend 1.0 (radius 7.5, gravity 0.03)
+    passed a leg raise in the preview but folded up at her hips in the game (2026-11-04). On Nero's own motions in the
+    preview, after a run or a sudden 3 m move (a spawn, a landing) it stayed 8-9 cm off its shape at idle with its
+    columns crossed: crossed linked columns stay crossed, and nothing pulls them back, even at gravity 0.3. Blend 0.4
+    with the same radius and links and gravity 0.1 comes back fully (2.3 cm off at idle, no crossings), keeps the
+    thighs out while running and lets some cloth in while walking (316 joint-frames inside a thigh over 270 frames,
+    against 179 at Blend 1.0 and 1,096 with the old radius 1.5); 0.55 and 0.7 stay out of shape after a run. **Test
+    cloth on the game's own motions** (pl000_01 blocks 0 idle, 1 walk, 3 run), including a run into idle: swinging a
+    thigh from a clean start hid this.
 - **Blend with Animation scales collision.** Collision pushes the simulation, and a low blend draws only that fraction
   of the push.
 - **One chain can collide with another part.** Put its `.col` on that part's joints, with capsules along the moving bones,
