@@ -7,7 +7,12 @@ animation playing on Nero (event bits 27-28 and 26, as uPlWpRedQueen / uPlWpBlue
 The game only reads keys, so what the constraints make (IK, the finger grips) is baked when Albam exports the LMT
 (`animation.LMT_EXPORT_HOOKS`): each action marked Bake on Export (by default the ones that key the IK controls or
 switches) is copied, the copy is baked and exported, and the copy is deleted, so the actions being edited keep only
-their own keys. Only bones a constraint drives are baked. Albam's preview of root motion (the root following the
+their own keys. Only bones a constraint drives are baked, and every game joint the action doesn't key gets one
+constant key at the pose Blender shows: the game holds a joint without a track as the motion before left it
+(uModel::moveMotion), so unkeyed deform bones jerked when the next motion blended in. Joint 0 (root) is baked
+without its turn, which goes into its children (spine_lower, hips; the pose is the same): Nero's vanilla LMTs turn
+it in 3 blocks of 231, and turned it blends joint by joint against its counter-turning children into the next
+motion, so the body wobbled as a dodge ended. Albam's preview of root motion (the root following the
 root_motion bone) is left out, as the game adds that itself: the bake holds root_motion at rest, so the feet controls
 under it (and the IK legs) stay with the body.
 
@@ -23,17 +28,24 @@ IK On Here (the button after it) turns it back on: the IK control and the pole m
 keyed there, and the switch is keyed to 1, so the limb carries on from that pose under the IK. Neither keys anything
 before the action's first frame.
 
+The grip switches (Left / Right Hand Grip) say how much a hand's fingers close on the weapon it holds; at 0 the fingers
+play their own keys (a gun spin). Fingers from Grip (the key button next to each) keys that hand's fingers on the
+current frame to the pose on screen and keys the grip off from that frame, so the fingers start from the grip.
+
 A switch changed by hand while an action that doesn't key it plays is keyed (constant) on the action's first frame, and
 so are the unkeyed switches of an action that bakes on export when another action is put on, as they were while it
 played: each animation keeps its own value when another one is played in between.
 """
 import contextlib
 import bpy
-from mathutils import Matrix
+from mathutils import Matrix, Quaternion
 
 MARK = "albam_nero_rig"
 IK_PROPS = (("ik_arm_l", "Left Arm IK"), ("ik_arm_r", "Right Arm IK"), ("ik_leg_l", "Left Leg IK"),
             ("ik_leg_r", "Right Leg IK"))
+GRIP_PROPS = (("grip_l", "Left Hand Grip"), ("grip_r", "Right Hand Grip"))
+SWITCHES = IK_PROPS + GRIP_PROPS
+GRIP_FINGERS = {"grip_l": range(116, 132), "grip_r": range(100, 116)}
 PLACE, GUN, FOLLOW_EVENTS = "red_queen_place", "show_blue_rose", "weapons_follow_events"
 PLACE_NAMES = ("back", "right hand", "left hand")
 ROOT_MOTION = "root_motion"
@@ -204,20 +216,20 @@ _DEPSGRAPH = "nero_rig_ui_depsgraph"   # the depsgraph handler registered last t
 
 def _switch_timer():
     try:
-        _key_switches(nero(), [p for p, _ in IK_PROPS], _SEEN, "Nero Rig")
+        _key_switches(nero(), [p for p, _ in SWITCHES], _SEEN, "Nero Rig")
     except Exception as err:   # a timer must not raise
-        print("nero rig: couldn't key the IK switch:", err)
+        print("nero rig: couldn't key the switch:", err)
     return None
 
 
 def _on_depsgraph(scene, depsgraph):
-    """an IK switch changed: key it on a timer (no data changes in the handler)"""
+    """an IK or grip switch changed: key it on a timer (no data changes in the handler)"""
     ob = nero()
     if ob is None or bpy.app.driver_namespace.get(_EXPORTING):
         return
     if not any(isinstance(u.id, bpy.types.Object) and u.id.original == ob for u in depsgraph.updates):
         return
-    if bpy.app.driver_namespace.get(_SEEN) != _seen_values(ob, [p for p, _ in IK_PROPS]):
+    if bpy.app.driver_namespace.get(_SEEN) != _seen_values(ob, [p for p, _ in SWITCHES]):
         if not bpy.app.timers.is_registered(_switch_timer):
             bpy.app.timers.register(_switch_timer, first_interval=0.0)
 
@@ -247,6 +259,38 @@ def _write(action, owner, bone, channel, size, frames, values):
         fc.update()
 
 
+LOCATION_JOINTS = (0, 150, 151, 152, 153)   # the joints Nero's vanilla LMTs give location tracks
+
+
+def hold_unkeyed(context, action, frame):
+    """a constant key, the pose Blender shows on frame, for every game joint the action doesn't rotate (and doesn't
+    move, for the joints the game's LMTs move): the game keeps a joint without a track at the pose the motion before
+    left it in (uModel::moveMotion copies the joints' current pose under the new motion's tracks), where Blender shows
+    the rest pose. The number of joints"""
+    ob = nero()
+    compat = _compat()
+    paths = {fc.data_path for fc in compat.fcurves_of(action, ob) if len(fc.keyframe_points)}
+    context.scene.frame_set(frame)
+    context.view_layer.update()
+    count = 0
+    for b in ob.data.bones:
+        if not _game(b):
+            continue
+        pose = _visual_basis(ob, b.name)
+        base = f'pose.bones["{b.name}"].'
+        keyed = False
+        if not any(base + channel in paths for channel in ROTATIONS):
+            ob.pose.bones[b.name].rotation_mode = "QUATERNION"
+            q = pose.to_quaternion()
+            _write(action, ob, b.name, "rotation_quaternion", 4, [frame], [q])
+            keyed = True
+        if int(b["mtfw.anim_retarget"]) in LOCATION_JOINTS and base + "location" not in paths:
+            _write(action, ob, b.name, "location", 3, [frame], [pose.to_translation()])
+            keyed = True
+        count += keyed
+    return count
+
+
 def bake(context, action):
     """keys what the constraints make into `action`, which Nero plays; a line for the console"""
     ob = nero()
@@ -270,21 +314,43 @@ def bake(context, action):
         bones = ob.data.bones
         candidates = [pb.name for pb in ob.pose.bones if _game(bones[pb.name]) and
                       any(not _root_motion_follow(ob, c) for c in pb.constraints)]
+        # joint 0 only moves, as in the game's LMTs: its turn goes into its children (the pose stays the same).
+        # Turned, it and the children counter-turning under it blend joint by joint into the next motion, and the
+        # body wobbles for the length of the blend
+        root = next((b.name for b in bones if _game(b) and int(b["mtfw.anim_retarget"]) == 0), None)
+        root_family = [root] + [c.name for c in bones[root].children if _game(c)] if root else []
+        candidates += [n for n in root_family if n not in candidates]
         samples = {name: [] for name in candidates}
         driven = set()
+        turned = False
         for f in frames:
             scene.frame_set(f)
             context.view_layer.update()
             driven.update(driven_bones(ob))   # the grips switch with the weapons, so any frame counts
             final = {pb.name: pb.matrix.copy() for pb in ob.pose.bones}
+            if root:
+                rest_turn = bones[root].matrix_local.to_3x3()
+                turned |= final[root].to_quaternion().rotation_difference(rest_turn.to_quaternion()).angle > 1e-4
+                final[root] = Matrix.Translation(final[root].to_translation()) @ rest_turn.to_4x4()
             for name in candidates:
                 pb = ob.pose.bones[name]
                 rest = bones[name].matrix_local
                 base = final[pb.parent.name] @ bones[pb.parent.name].matrix_local.inverted() @ rest \
                     if pb.parent else rest
                 samples[name].append(base.inverted() @ final[name])
-        samples = {name: mats for name, mats in samples.items() if name in driven}
+        samples = {name: mats for name, mats in samples.items()
+                   if name in driven or (turned and name in root_family)}
         for name, mats in samples.items():
+            if name == root:   # no turn: one key at rest, the location on every frame
+                for channel in ("rotation_euler", "rotation_axis_angle"):
+                    for i in range(4):
+                        old = compat.fcurve_find(action, f'pose.bones["{name}"].{channel}', i, ob)
+                        if old is not None:
+                            compat.fcurve_remove(action, old, ob)
+                ob.pose.bones[name].rotation_mode = "QUATERNION"
+                _write(action, ob, name, "rotation_quaternion", 4, frames[:1], [Quaternion()])
+                _write(action, ob, name, "location", 3, frames, [m.to_translation() for m in mats])
+                continue
             quats, prev = [], None
             for m in mats:
                 q = m.to_quaternion()
@@ -302,6 +368,7 @@ def bake(context, action):
             locations = [m.to_translation() for m in mats]
             if any(v.length > 1e-4 for v in locations):
                 _write(action, ob, name, "location", 3, frames, locations)
+        holds = hold_unkeyed(context, action, frames[0])
     finally:
         for c in follows:
             c.mute = False
@@ -310,12 +377,12 @@ def bake(context, action):
         if root_motion:
             root_motion.matrix_basis = basis
         scene.frame_set(keep)
-    return f"{len(samples)} bones baked"
+    return f"{len(samples)} bones baked, {holds} unkeyed joints held at their pose"
 
 
 def uses_rig(action):
     """the action keys the IK controls or switches"""
-    switches = {f'["{prop}"]' for prop, _ in IK_PROPS}
+    switches = {f'["{prop}"]' for prop, _ in SWITCHES}
     for fc in _compat().action_fcurves(action):
         path = fc.data_path
         if path in switches or (path.startswith('pose.bones["') and
@@ -331,7 +398,7 @@ def bakes_on_export(action):
 
 def _snapshot(ob):
     ad = ob.animation_data
-    props = [prop for prop, _ in IK_PROPS] + [PLACE, GUN]
+    props = [prop for prop, _ in SWITCHES] + [PLACE, GUN]
     return {"action": ad.action if ad else None, "slot": getattr(ad, "action_slot", None) if ad else None,
             "pose": {pb.name: (pb.rotation_mode, pb.matrix_basis.copy()) for pb in ob.pose.bones},
             "props": {k: ob[k] for k in props if k in ob.keys()}}
@@ -380,10 +447,10 @@ def export_hook(lmt_group, notes):
             swapped.append((row, original, copy))
             _reset_props(ob, state)
             keyed = {fc.data_path for fc in _compat().action_fcurves(original)}
-            unkeyed = [f"{label} {state['props'][prop]:g}" for prop, label in IK_PROPS
+            unkeyed = [f"{label} {state['props'][prop]:g}" for prop, label in SWITCHES
                        if prop in state["props"] and f'["{prop}"]' not in keyed]
             if unkeyed:
-                notes.append(f"{original.name}: baked with the IK switches it doesn't key as they are now "
+                notes.append(f"{original.name}: baked with the switches it doesn't key as they are now "
                              f"({', '.join(unkeyed)}): key them in the action to fix them")
             _compat().assign_action(ob, copy)
             animation.follow_action(ob, copy)   # the rest pose under it, as the game has for joints without tracks
@@ -398,7 +465,7 @@ def export_hook(lmt_group, notes):
         for _, _, copy in swapped:
             bpy.data.actions.remove(copy)
         context.scene.frame_set(context.scene.frame_current)
-        bpy.app.driver_namespace[_SEEN] = _seen_values(ob, [p for p, _ in IK_PROPS])
+        bpy.app.driver_namespace[_SEEN] = _seen_values(ob, [p for p, _ in SWITCHES])
         bpy.app.driver_namespace.pop(_EXPORTING, None)
 
 
@@ -522,15 +589,8 @@ def _visual_basis(ob, name):
     return base.inverted() @ pb.matrix
 
 
-def bake_ik_frame(context, limb, switch_off):
-    ob = nero()
-    action = ob.animation_data.action if ob is not None and ob.animation_data else None
-    if action is None:
-        raise RuntimeError("Nero plays no action: give him one first (LMT panel > Add Animation)")
-    frame = context.scene.frame_current
-    by_joint = {int(b["mtfw.anim_retarget"]): b.name for b in ob.data.bones
-                if b.get("mtfw.anim_retarget") is not None and _game(b)}
-    names = [by_joint[j] for j in LIMB_JOINTS[limb]]
+def _key_visual_rotations(context, ob, action, names, frame):
+    """keys the bones' rotations on frame to the pose on screen (constraints included)"""
     context.view_layer.update()
     poses = {n: _visual_basis(ob, n).to_quaternion() for n in names}   # all read before any key changes them
     for n in names:
@@ -547,20 +607,57 @@ def bake_ik_frame(context, limb, switch_off):
             channel, values = "rotation_euler", q.to_euler(pb.rotation_mode, pb.rotation_euler)
         for i, v in enumerate(values):
             _set_key(action, ob, f'pose.bones["{n}"].{channel}', i, n, frame, v)
-    prop = f"ik_{limb}"
+
+
+def _switch_off_from(ob, action, prop, frame):
+    """keys the switch to 0 on frame, and to its value now on the frame before when that frame has no key"""
+    path = f'["{prop}"]'
+    before = ob.get(prop, 0.0)
+    fc = _compat().fcurve_find(action, path, 0, ob)
+    if frame > start_frame(action, ob) and (fc is None or
+                                            not any(abs(k.co[0] - (frame - 1)) < 0.5 for k in fc.keyframe_points)):
+        _set_key(action, ob, path, 0, "Nero Rig", frame - 1, before, "CONSTANT")
+    _set_key(action, ob, path, 0, "Nero Rig", frame, 0.0, "CONSTANT")
+    ob[prop] = 0.0
+
+
+def _playing_action(ob):
+    action = ob.animation_data.action if ob is not None and ob.animation_data else None
+    if action is None:
+        raise RuntimeError("Nero plays no action: give him one first (LMT panel > Add Animation)")
+    return action
+
+
+def _game_bones_by_joint(ob):
+    return {int(b["mtfw.anim_retarget"]): b.name for b in ob.data.bones
+            if b.get("mtfw.anim_retarget") is not None and _game(b)}
+
+
+def bake_ik_frame(context, limb, switch_off):
+    ob = nero()
+    action = _playing_action(ob)
+    frame = context.scene.frame_current
+    by_joint = _game_bones_by_joint(ob)
+    names = [by_joint[j] for j in LIMB_JOINTS[limb]]
+    _key_visual_rotations(context, ob, action, names, frame)
     if switch_off:
-        path = f'["{prop}"]'
-        before = ob.get(prop, 0.0)
-        compat = _compat()
-        fc = compat.fcurve_find(action, path, 0, ob)
-        if frame > start_frame(action, ob) and (fc is None or
-                                                not any(abs(k.co[0] - (frame - 1)) < 0.5 for k in fc.keyframe_points)):
-            _set_key(action, ob, path, 0, "Nero Rig", frame - 1, before, "CONSTANT")
-        _set_key(action, ob, path, 0, "Nero Rig", frame, 0.0, "CONSTANT")
-        ob[prop] = 0.0
+        _switch_off_from(ob, action, f"ik_{limb}", frame)
     ob.update_tag()
     context.scene.frame_set(frame)
     return f"{limb}: {len(names)} bones keyed on frame {frame}" + (", IK off from here" if switch_off else "")
+
+
+def fingers_from_grip(context, prop):
+    ob = nero()
+    action = _playing_action(ob)
+    frame = context.scene.frame_current
+    by_joint = _game_bones_by_joint(ob)
+    names = [by_joint[j] for j in GRIP_FINGERS[prop] if j in by_joint]
+    _key_visual_rotations(context, ob, action, names, frame)
+    _switch_off_from(ob, action, prop, frame)
+    ob.update_tag()
+    context.scene.frame_set(frame)
+    return f"{prop}: {len(names)} fingers keyed on frame {frame}, grip off from here"
 
 
 # -- IK back on ----------------------------------------------------------------------------------------------------
@@ -711,6 +808,33 @@ class NERORIG_OT_bake_ik_frame(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class NERORIG_OT_fingers_from_grip(bpy.types.Operator):
+    """Key this hand's fingers on the current frame to the pose on screen (the grip on the weapon, or the blend the
+    grip switch gives) and key the grip off from this frame (the frame before keeps its value), so the fingers start
+    from the grip and can be posed by hand, as for a gun spin. Key the grip switch back to 1 to close the hand on the
+    weapon again"""
+    bl_idname = "nero_rig.fingers_from_grip"
+    bl_label = "Fingers from Grip"
+    bl_options = {"REGISTER", "UNDO"}
+
+    grip: bpy.props.EnumProperty(
+        name="Hand", items=[(k, label, f"The {label.lower()}'s fingers") for k, label in GRIP_PROPS],
+        description="The hand whose fingers are keyed")
+
+    @classmethod
+    def poll(cls, context):
+        return nero() is not None
+
+    def execute(self, context):
+        try:
+            line = fingers_from_grip(context, self.grip)
+        except RuntimeError as err:
+            self.report({"ERROR"}, str(err))
+            return {"CANCELLED"}
+        self.report({"INFO"}, line)
+        return {"FINISHED"}
+
+
 class NERORIG_OT_remove_baked_keys(bpy.types.Operator):
     """Thin the action Nero plays after an old Bake for Export (a key on every frame): delete the keys a constraint
     hides completely (IK on, a grip closed) and the keys in one-per-frame runs that lie on the line between their
@@ -767,6 +891,12 @@ class NERORIG_PT_panel(bpy.types.Panel):
             sub.prop(ob, f'["{PLACE}"]', text=f"Red Queen: {PLACE_NAMES[place] if 0 <= place < 3 else '?'}")
         if GUN in ob.keys():
             sub.prop(ob, f'["{GUN}"]', text="Blue Rose")
+        grips = box.column(align=True)
+        for prop, label in GRIP_PROPS:
+            if prop in ob.keys():
+                row = grips.row(align=True)
+                row.prop(ob, f'["{prop}"]', text=label, slider=True)
+                row.operator(NERORIG_OT_fingers_from_grip.bl_idname, text="", icon="KEYFRAME_HLT").grip = prop
         if len(ob.data.collections):
             box = layout.box()
             box.label(text="Bones")
@@ -786,7 +916,8 @@ class NERORIG_PT_panel(bpy.types.Panel):
             help_box.label(text=line)
 
 
-CLASSES = (NERORIG_OT_bake_ik_frame, NERORIG_OT_ik_on_here, NERORIG_OT_remove_baked_keys, NERORIG_PT_panel)
+CLASSES = (NERORIG_OT_bake_ik_frame, NERORIG_OT_ik_on_here, NERORIG_OT_fingers_from_grip, NERORIG_OT_remove_baked_keys,
+           NERORIG_PT_panel)
 _STASH = "nero_rig_ui_classes"     # the classes registered last time (running the text again replaces them)
 _HANDLER = "nero_rig_ui_handler"   # the frame handler registered last time
 _HOOK = "nero_rig_ui_export_hook"  # the LMT export hook registered last time

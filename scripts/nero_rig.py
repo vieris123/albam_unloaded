@@ -17,7 +17,8 @@ What the file holds:
   {152 weapon_back, 150 prop_r, 151 prop_l}[event bits 27-28] (`red_queen_place` 0 / 1 / 2), and Blue Rose (wp000) on
   151 while event bit 26 is on (uPlWpBlueRose::update 0x831F50; `show_blue_rose`; hidden otherwise). With
   `weapons_follow_events` the two follow the events of the LMT animation playing, else they're set by hand. The hand
-  holding a weapon closes on it (the finger pose of a vanilla frame with it in that hand, `GRIP-` bones);
+  holding a weapon closes on it (the finger pose of a vanilla frame with it in that hand, `GRIP-` bones), as much as
+  that hand's grip switch says (`grip_l` / `grip_r`, keyable: 0 leaves the fingers to their own keys, for a gun spin);
 - Nero's four body LMTs (pl000_01, 02, 04, 06) as reference animations and a place for new ones;
 - control shapes, colours (left blue, right red, middle yellow), bone collections, location / scale locks;
 - IK for the arms and the legs (`ik_arm_l/r`, `ik_leg_l/r`: 0 = FK, 1 = IK) through a helper chain (`MCH-*`, the
@@ -64,6 +65,7 @@ LMTS = [f"motion::pl000::pl000_0{k}.lmt" for k in (1, 2, 4, 6)]
 MARK = "albam_nero_rig"          # object property: "nero" / "red_queen" / "blue_rose"
 RIG = "RIG_"                     # this rig's constraints
 IK_PROPS = ("ik_arm_l", "ik_arm_r", "ik_leg_l", "ik_leg_r")
+GRIP_PROPS = ("grip_l", "grip_r")
 PLACE, GUN, FOLLOW_EVENTS = "red_queen_place", "show_blue_rose", "weapons_follow_events"
 PLACE_JOINTS = (152, 150, 151)   # uPlWpRedQueen::update: the joint by event bits 27-28 (table 0xC3BB18)
 GUN_JOINT = 151                  # uPlWpBlueRose::update
@@ -79,10 +81,10 @@ UI_TEXT = "nero_rig_ui.py"
 LIMBS = {"arm_r": (5, 6, 7, 8, BACK, "root"), "arm_l": (9, 10, 11, 12, BACK, "root"),
          "leg_r": (13, 14, 15, 16, FRONT, "root_motion"), "leg_l": (13, 18, 19, 20, FRONT, "root_motion")}
 # grips: (set name, hand joint, finger joints, the event test for a frame with the weapon in that hand, driver)
-GRIPS = (("red_queen_r", 8, range(100, 116), lambda v: (v >> 27) & 3 == 1, "place == 1"),
+GRIPS = (("red_queen_r", 8, range(100, 116), lambda v: (v >> 27) & 3 == 1, "grip_r if place == 1 else 0"),
          ("red_queen_l", 12, range(116, 132), lambda v: (v >> 27) & 3 == 2 and not (v >> 26) & 1,
-          "place == 2 and not gun"),
-         ("blue_rose_l", 12, range(116, 132), lambda v: (v >> 26) & 1, "gun"))
+          "grip_l if place == 2 and not gun else 0"),
+         ("blue_rose_l", 12, range(116, 132), lambda v: (v >> 26) & 1, "grip_l if gun else 0"))
 
 COLLECTIONS = ("Torso", "Head", "Arm.L", "Fingers.L", "Leg.L", "Arm.R", "Fingers.R", "Leg.R", "IK", "Root", "Props",
                "Extras", "Twist", "Mechanism")
@@ -110,6 +112,10 @@ TIPS = {"ik_arm_l": "Left arm: 0 = FK (rotate the arm bones), 1 = IK (move the I
         "ik_leg_r": "Right leg: 0 = FK, 1 = IK (the IK-foot_r cube, the POLE-leg_r diamond turns the knee)",
         PLACE: "Where Red Queen is drawn: 0 = on the back (joint 152), 1 = the right hand (150), 2 = the left hand "
                "(151), as event bits 27-28 (Main Sword Display) put it in the game",
+        "grip_l": "Left hand's grip: 1 = the fingers close on the weapon in that hand (Blue Rose, or Red Queen "
+                  "held there), 0 = the fingers play their own keys (a gun spin), between = a blend. Keyable",
+        "grip_r": "Right hand's grip: 1 = the fingers close on Red Queen when it's in that hand, 0 = the fingers play "
+                  "their own keys, between = a blend. Keyable",
         GUN: "Blue Rose in the left hand (joint 151), as event bit 26 (Gun Display) shows it in the game; hidden "
              "otherwise",
         FOLLOW_EVENTS: "Red Queen and Blue Rose follow the events of the LMT animation playing, as in the game (an "
@@ -307,7 +313,10 @@ def find_grip_frame(test, actions):
 def build_grips(nero, compat, notes):
     """GRIP- bones holding each grip's finger pose relative to the hand; the fingers copy them while the weapon is
     in that hand"""
-    lmt_actions = [a for a in bpy.data.actions if event_runs(a)]
+    # only the vanilla animations the rig imported (named <armature>.<file>.<block>): an animation made here may pose
+    # the fingers otherwise (a gun spin), and a rebuild would take that as the grip
+    vanilla = tuple(f".{path.rsplit('::', 1)[1]}." for path in LMTS)
+    lmt_actions = [a for a in bpy.data.actions if any(v in a.name for v in vanilla) and event_runs(a)]
     body = _joints_of(nero)
     found = {}
     for name, hand, fingers, test, _ in GRIPS:
@@ -349,7 +358,8 @@ def build_grips(nero, compat, notes):
             con = nero.pose.bones[n].constraints.new("COPY_TRANSFORMS")
             con.name = f"{RIG}grip_{name}"
             con.target, con.subtarget = nero, f"{GRIP}{name}-{n}"
-            sr._drive(con, drivers[name], [("place", nero, f'["{PLACE}"]'), ("gun", nero, f'["{GUN}"]')])
+            sr._drive(con, drivers[name], [("place", nero, f'["{PLACE}"]'), ("gun", nero, f'["{GUN}"]')] +
+                      [(g, nero, f'["{g}"]') for g in GRIP_PROPS])
 
 
 # -- IK ------------------------------------------------------------------------------------------------------------
@@ -461,6 +471,8 @@ def build():
         _prop(nero, name, 0.0, TIPS[name], min=0.0, max=1.0, soft_min=0.0, soft_max=1.0)
     _prop(nero, PLACE, 0, TIPS[PLACE], min=0, max=2)
     _prop(nero, GUN, False, TIPS[GUN])
+    for name in GRIP_PROPS:
+        _prop(nero, name, 1.0, TIPS[name], min=0.0, max=1.0, soft_min=0.0, soft_max=1.0)
     _prop(nero, FOLLOW_EVENTS, True, TIPS[FOLLOW_EVENTS])
     attach_weapons(nero, joints)
     build_grips(nero, compat, notes)
