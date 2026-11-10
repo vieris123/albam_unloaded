@@ -104,27 +104,44 @@ ELEMENTS["weights"] = (
 ) + _WEIGHT_LIST
 MAX_WEIGHT_LISTS = 4    # cShape::WeightNode[4]
 # dmc4_hook's chain solver (sdk/ChainSolver.cpp; the algorithm is Vibed/ModelExt/chain_solver.md)
+_ALONG = (" One value, or 2-8 separated by spaces or commas, spread evenly from the root to the tail and read "
+          "linearly")
 ELEMENTS["physics"] = (
     Attr("clt", "chain", "", "The chain file this model's chains with it are solved for: its game path, without "
                              "extension. The game's own chains count (Nero's coat: pl000_03_00 .. _05 on pl000_03)"),
-    Attr("substeps", "count", "4", "Steps per 60 fps frame, 1-16. More keeps fast moves from carrying a segment "
+    Attr("substeps", "count", "8", "Steps per 60 fps frame, 1-16. More keeps fast moves from carrying a segment "
                                    "through a collision shape"),
-    Attr("iterations", "count", "2", "Constraint passes per step, 1-8"),
-    Attr("stiffness", "unit", "0", "0-1 per frame: each segment turns toward its animated direction (keeps a skirt's "
-                                   "shape)"),
-    Attr("pin", "unit", "0", "0-1 per frame: each point moves toward its animated place"),
+    Attr("iterations", "count", "1", "Constraint passes per step, 1-8. More substeps beat more passes at the same "
+                                     "cost"),
+    Attr("stiffness", "curve", "0", "0-1 per frame: each segment turns toward its animated direction (keeps a skirt's "
+                                    "shape)." + _ALONG + ' ("0.15 0.02": a firm waist, a loose hem)'),
+    Attr("pin", "curve", "0", "0-1 per frame: each point moves toward its animated place." + _ALONG),
     Attr("inertia", "unit", "", "0-1: how much of the model's motion the chain lags behind. Absent: 0 if the chain "
                                 "file has Follow Position, Follow Height Only or Follow Rotation on, else 1"),
-    Attr("limit", "degrees", "0", "Degrees a segment may leave its animated direction, 0-180. 0 = no limit"),
+    Attr("inertia_move", "unit", "", "0-1: how much of the model's travel the chain lags behind. Absent: Inertia. 0 "
+                                     "with Inertia Turn 1: a long coat rides along when the character runs or is "
+                                     "launched, and still swings out when it spins"),
+    Attr("inertia_turn", "unit", "", "0-1: how much of the model's turning the chain lags behind. Absent: Inertia"),
+    Attr("limit", "curve", "0", "Degrees a segment may leave its animated direction, 0-180. 0 = no limit." + _ALONG),
     Attr("friction", "unit", "0.2", "0-1 per frame: sliding speed lost while a point touches a shape or the floor"),
-    Attr("radius", "cm", "", "The segments' radius against the collision shapes, in cm. Absent: the chain file's "
-                             "collision radius (mCollisionSize)"),
+    Attr("damping", "curve", "", "0-1 per frame: the speed lost that the animation didn't make, so the chain keeps up "
+                                 "with the animation and a free swing dies down. Lower = livelier, higher = calmer. "
+                                 "Absent: 1 - the chain file's Damping, at least 0.1 (its 1.0 would never lose speed "
+                                 "on this solver)." + _ALONG),
+    Attr("gravity", "curve", "1", "Times the chain file's gravity, -100 to 100 (1 = as it is)." + _ALONG),
+    Attr("radius", "curve", "", "The segments' radius against the collision shapes, in cm, up to 1000. Absent: the "
+                                "chain file's collision radius (mCollisionSize)." + _ALONG + ' ("6 2": 6 cm at '
+                                "the root, 2 at the tail; a segment tapers between its ends)"),
     Attr("ground", "bool", "false", "true: every point stays above the stage floor (a line cast per point per frame)"),
     Attr("self", "bool", "false", "true: the chain's tendrils push each other apart"),
     Attr("axis", "axis", "", "The joint axis aimed down the chain: x, +x, -x, ... (+z works here, the game's solver "
                              "can't). Absent: the chain file's mDir"),
 )
-RANGES = {("physics", "substeps"): (1, 16), ("physics", "iterations"): (1, 8), ("physics", "limit"): (0.0, 180.0)}
+RANGES = {("physics", "substeps"): (1, 16), ("physics", "iterations"): (1, 8)}
+# the <physics> settings along the tendril (chain_solver.md V2.2) and the runner's clamps (parse_curve)
+CURVE_RANGES = {"stiffness": (0.0, 1.0), "pin": (0.0, 1.0), "limit": (0.0, 180.0), "damping": (0.0, 1.0),
+                "radius": (0.0, 1000.0), "gravity": (-100.0, 100.0)}
+MAX_ALONG = 8
 # tendrils on that solver joined into one sheet (chain_solver.md "Sheets")
 ELEMENTS["cloth"] = (
     Attr("roots", "roots", "", "The first joint of each tendril, in order across the sheet, two or more (Nero's coat: "
@@ -272,6 +289,14 @@ def _check_elem(d, e, say):
                 say("warning", f"<cloth> roots=\"{value}\": the game reads only the first {len(numbers)} numbers")
             elif any(v != int(v) for v in numbers):
                 say("warning", f"<cloth> roots=\"{value}\": joint numbers are whole numbers")
+        elif a.kind == "curve":
+            numbers, problem = parse_curve(value)
+            if problem is not None:
+                say("error", f"<{e.tag}> {a.name}=\"{value}\": {problem}, the game drops the entry")
+                continue
+            low, high = CURVE_RANGES[a.name]
+            if numbers and any(not low <= v <= high for v in numbers):
+                say("warning", f"<{e.tag}> {a.name}=\"{value}\": {low:g} to {high:g}, the game clamps it")
         elif a.kind in ("count", "degrees", "cm"):
             try:
                 number = int(value) if a.kind == "count" else float(value)
@@ -398,6 +423,24 @@ def _number_list(value, limit):
     return out, bool(rest.strip())
 
 
+def parse_curve(value):
+    """the runner's parse_curve: 1-8 numbers separated by spaces / commas / tabs. (numbers, None), ([], None) for no
+    numbers (the default stays), or (None, why) when the runner drops the whole entry (something that isn't a number,
+    a 9th value)"""
+    out, rest = [], value
+    while True:
+        rest = rest.lstrip(" ,\t")
+        if not rest:
+            return out, None
+        match = re.match(r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?", rest)
+        if not match:
+            return None, "1 to 8 numbers, root to tail"
+        if len(out) == MAX_ALONG:
+            return None, f"at most {MAX_ALONG} numbers"
+        out.append(float(match.group(0)))
+        rest = rest[match.end():]
+
+
 def cloth_problem(e):
     """why the runner drops a <cloth> on its own (parse_cloth), or None"""
     numbers, _ = _number_list(e.get("roots", ""), MAX_CLOTH_ROOTS)
@@ -426,8 +469,10 @@ def cloth_values(e):
 
 
 def physics_values(e):
-    """A <physics> entry's settings as the runner reads them (ModelExtension.cpp parse_physics): clamped, inertia /
-    radius / axis None when absent (from the chain file). None when the runner drops the entry (no clt, bad axis)."""
+    """A <physics> entry's settings as the runner reads them (ModelExtension.cpp parse_physics): clamped; inertia /
+    inertia_move / inertia_turn / damping / radius / axis None when absent (from the chain file or inertia), the
+    settings along the tendril (CURVE_RANGES) lists of 1-8 values. None when the runner drops the entry (no clt, a bad
+    axis, a list that isn't 1-8 numbers)."""
     if not e.get("clt", "").strip():
         return None
     out = {}
@@ -435,14 +480,18 @@ def physics_values(e):
     def number(name, kind, default, low, high):
         value = _leading(e.get(name, ""), kind) if e.has(name) else default
         return min(max(value, low), high) if high is not None else max(value, low)
-    out["substeps"] = number("substeps", int, 4, 1, 16)
-    out["iterations"] = number("iterations", int, 2, 1, 8)
-    out["stiffness"] = number("stiffness", float, 0.0, 0.0, 1.0)
-    out["pin"] = number("pin", float, 0.0, 0.0, 1.0)
-    out["inertia"] = number("inertia", float, 1.0, 0.0, 1.0) if e.has("inertia") else None
-    out["limit"] = number("limit", float, 0.0, 0.0, 180.0)
+    out["substeps"] = number("substeps", int, 8, 1, 16)
+    out["iterations"] = number("iterations", int, 1, 1, 8)
+    for name, default in (("stiffness", [0.0]), ("pin", [0.0]), ("limit", [0.0]), ("damping", None),
+                          ("radius", None), ("gravity", [1.0])):
+        numbers, problem = parse_curve(e.get(name, ""))
+        if problem is not None:
+            return None
+        low, high = CURVE_RANGES[name]
+        out[name] = [min(max(v, low), high) for v in numbers] if numbers else default
+    for name in ("inertia", "inertia_move", "inertia_turn"):
+        out[name] = number(name, float, 1.0, 0.0, 1.0) if e.has(name) else None
     out["friction"] = number("friction", float, 0.2, 0.0, 1.0)
-    out["radius"] = number("radius", float, 0.0, 0.0, None) if e.has("radius") else None
     out["ground"] = is_true(e.get("ground", "false"))
     out["self"] = is_true(e.get("self", "false"))
     out["axis"] = None

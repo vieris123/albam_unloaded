@@ -202,9 +202,15 @@ The game behaviour is known; Blender only approximates it. The other preview gap
     on the solver; Albam mirrors both. Coat mean worst penetration 0.09 cm (the game's solver 0.11).
   - [x] **`<cloth>` sheets** (2026-11-10, runner not built): format and checks (dropped entries, shared roots, a sheet
     that can't run and why), panel entry, the preview solving sheets across chain files. Test: `test_chain_physics`.
+  - [x] **Chain solver version 2** (2026-11-10, runner by albam-df, not built): XPBD soft constraints, settings along
+    the tendril, inertia_move / inertia_turn, damping toward the animated motion, defaults 8 x 1; preview, list format,
+    Chain panel, `test_chain_physics` (checks 1 / 3 / 5; 2 and 4 in scratch, numbers in CLAUDE.md).
+  - [ ] **Outer coat tails creep:** Nero's front tails _00 / _05 on the hook solver alone keep moving ~0.3-0.4 cm a
+    frame after the body stops (both versions); the sheet holds them. Look at the contacts there.
   - [ ] **`<physics>` / `<cloth>` in the game:** compare Nero's coat with the preview (the runner's test package has both
-    coats as sheets). As a sheet the coat sinks 0.22 cm into the body shapes on average at 2 iterations (0.09 alone);
-    the runner may add a final shapes-only pass if that shows.
+    coats as sheets). The coat swung for good in the game at its file's mDamping 1.0; the runner added `damping=`
+    (auto floor 0.1), mirrored 2026-11-10. With it the sheet sinks 0.12 cm into the body shapes on average at 2
+    iterations (0.10 alone, the game's solver 0.11).
   - [ ] **Ellen's dress and 2B's seam as sheets** (later): their link rows could become one `<cloth>` per skirt with the
     chains on `<physics>`. Keep the links until a sheet has been tried in the game.
   - [ ] **2B's front-left file is at Blend 1.0 too**: likely the same in the game; check her after a run.

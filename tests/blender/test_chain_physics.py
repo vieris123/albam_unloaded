@@ -2,6 +2,7 @@
 preview. The list entry parses, checks and round-trips; the Chain panel's settings write it; the preview runs the
 solver for the chain it names: the rest pose holds without forces, lengths hold under gravity, the same time at 30 and
 60 fps gives the same pose, pin holds the animation, shapes and the stage floor keep the points out, links still run."""
+import math
 import os
 import sys
 from types import SimpleNamespace
@@ -27,16 +28,49 @@ def check(cond, msg):
 # ---- the format -------------------------------------------------------------------------------------------------------
 TEXT = ('<extensions>\n  <model path="model\\game\\x\\skirt">\n'
         '    <physics clt="chains\\lk" substeps="20" axis="+Z" radius="3" ground="true"/>\n'
-        '    <physics clt="chains\\lk" stiffness="0.5"/>\n'
+        '    <physics clt="chains\\lk" stiffness="0.5" damping="1.5"/>\n'
         '    <physics clt="chains\\bad" axis="w"/>\n'
         '  </model>\n</extensions>\n')
 d = ext_list.parse(TEXT)
 check(d.text() == TEXT, "a list with <physics> round-trips byte for byte")
 first, _, bad = [e for e, _ in ext_list.physics(d)]
 values = ext_list.physics_values(first)
-check(values["substeps"] == 16 and values["axis"] == 2 and values["radius"] == 3.0 and values["ground"],
+check(values["substeps"] == 16 and values["axis"] == 2 and values["radius"] == [3.0] and values["ground"],
       f"values as the runner reads them, clamped ({values})")
-check(values["inertia"] is None and values["friction"] == 0.2 and values["iterations"] == 2, "absent ones: defaults")
+check(values["inertia"] is None and values["inertia_turn"] is None and values["friction"] == 0.2
+      and values["iterations"] == 1 and values["gravity"] == [1.0], "absent ones: defaults (version 2: 8 x 1)")
+check(values["damping"] is None and ext_list.physics_values(d.elems[[e.tag for e in d.elems].index("physics") + 1])
+      ["damping"] == [1.0], "damping: None (auto) when absent, clamped to 0-1")
+any_s = {"pos_local": False, "pos_local_y": False, "rot_local": False, "radius": 0.01, "dir": 1, "up": 1}
+check(abs(cns_chain_hook.Hook(values, dict(any_s, damping=1.0)).damping[0] - 0.1) < 1e-9
+      and abs(cns_chain_hook.Hook(values, dict(any_s, damping=0.6)).damping[0] - 0.4) < 1e-9
+      and cns_chain_hook.Hook(dict(values, damping=[0.3]), dict(any_s, damping=1.0)).damping == [0.3],
+      "auto damping = 1 - the chain file's, at least 0.1; the attribute wins")
+hook = cns_chain_hook.Hook(dict(values, inertia=0.5, inertia_turn=1.0), dict(any_s, damping=1.0))
+check(hook.inertia_move == 0.5 and hook.inertia_turn == 1.0, "inertia_move / inertia_turn default to inertia")
+
+# lists along the tendril (V2.2), parsed as the runner's parse_curve
+LISTS = ('<extensions>\n  <model path="m">\n'
+         '    <physics clt="a" radius="6 2" stiffness="0.15,0.02, 2" gravity="200" limit=""/>\n'
+         '    <physics clt="b" pin="0.1 x"/>\n'
+         '    <physics clt="c" damping="1 2 3 4 5 6 7 8 9"/>\n'
+         '  </model>\n</extensions>\n')
+lists = ext_list.parse(LISTS)
+la, lb, lc = [ext_list.physics_values(e) for e, _ in ext_list.physics(lists)]
+check(la["radius"] == [6.0, 2.0] and la["stiffness"] == [0.15, 0.02, 1.0] and la["gravity"] == [100.0]
+      and la["limit"] == [0.0], f"lists: spaces or commas, each clamped, an empty one the default ({la})")
+check(lb is None and lc is None, "a value that isn't a number, or a 9th, drops the entry as the runner does")
+list_issues = [(level, m) for level, _, m in ext_list.issues([("lists.xml", lists)])]
+check(any(level == "error" and "pin=" in m and "drops" in m for level, m in list_issues)
+      and any(level == "error" and "damping=" in m for level, m in list_issues)
+      and any(level == "warning" and "gravity=" in m and "clamps" in m for level, m in list_issues),
+      f"list problems reported ({list_issues})")
+check(cns_chain_hook.along([6.0, 2.0], 0.0) == 6.0 and cns_chain_hook.along([6.0, 2.0], 0.5) == 4.0
+      and cns_chain_hook.along([0.0, 1.0, 0.0], 0.75) == 0.5 and cns_chain_hook.along([3.0], 0.9) == 3.0,
+      "along: evenly spread, read linearly")
+check(cns_chain_hook.compliance(1.0) == 0.0 and cns_chain_hook.compliance(0.0) is None
+      and abs(1.0 / (1.0 + 16.0 * cns_chain_hook.compliance(0.3)) - cns_chain_hook._per_step(0.3, 0.25)) < 1e-12,
+      "compliance: hard at 1, off at 0, version 1's share at 4 substeps")
 check(ext_list.physics_values(bad) is None, "a bad axis drops the entry, as the runner does")
 found = ext_list.issues([("lk.xml", d)])
 messages = [m for _, _, m in found]
@@ -100,18 +134,35 @@ text = model_ext.list_doc(lists[0]).text()
 check('<model path="model\\game\\x\\skirt">' in text and '<physics clt="chains\\lk"/>' in text, f"the entry:\n{text}")
 
 s = chain.albam_phs
-check(s.hook_substeps == 4 and abs(s.hook_inertia - 1.0) < 1e-6 and s.hook_axis == "+y",
+check(s.hook_substeps == 8 and s.hook_iterations == 1 and abs(s.hook_inertia - 1.0) < 1e-6
+      and abs(s.hook_inertia_turn - 1.0) < 1e-6 and s.hook_axis == "+y",
       "the panel shows the runner's defaults, inertia and axis from the chain file")
 s.hook_stiffness = 0.25
 s.hook_axis = "+z"
 s.hook_substeps = 6
 text = model_ext.list_doc(lists[0]).text()
 check('stiffness="0.25"' in text and 'axis="+z"' in text and 'substeps="6"' in text, "the settings write the entry")
-s.hook_substeps = 4
+s.hook_substeps = 8
 check('substeps' not in model_ext.list_doc(lists[0]).text(), "a setting set to its default is taken out")
 bpy.ops.albam.phs_hook_default(attr="axis")
 bpy.ops.albam.phs_hook_default(attr="stiffness")
 check('<physics clt="chains\\lk"/>' in model_ext.list_doc(lists[0]).text(), "Use Default takes settings out")
+s.hook_inertia_move = 0.0
+check('inertia_move="0"' in model_ext.list_doc(lists[0]).text() and abs(s.hook_inertia_turn - 1.0) < 1e-6,
+      "Inertia Move writes its own attribute, Inertia Turn still follows Inertia")
+bpy.ops.albam.phs_hook_default(attr="inertia_move")
+bpy.ops.albam.phs_hook_along(attr="radius")
+radius_cm = round(cns_chain_preview._settings(chain)["radius"] / cns_chain_hook.SCALE, 4)
+check(f'radius="{radius_cm:g} {radius_cm:g}"' in model_ext.list_doc(lists[0]).text(),
+      f"Along the Tendril makes the setting a list (root and tail): {model_ext.list_doc(lists[0]).text()}")
+s.hook_radius_along = "6, 2"
+check('radius="6 2"' in model_ext.list_doc(lists[0]).text() and abs(s.hook_radius - 6.0) < 1e-6,
+      "the list is edited as text; the single field shows the root's value")
+s.hook_radius_along = "6 x"
+check('radius="6 2"' in model_ext.list_doc(lists[0]).text(), "text the runner would drop isn't written")
+bpy.ops.albam.phs_hook_along(attr="radius")
+check('radius="6"' in model_ext.list_doc(lists[0]).text(), "Along the Tendril again: back to one value, the root's")
+bpy.ops.albam.phs_hook_default(attr="radius")
 check(not [i for i in model_ext.all_issues(context, lists[0]) if i[0] == "error"], "the list checks clean")
 
 
@@ -204,7 +255,7 @@ check(model_ext.cloth_sheets(arm) == [{"roots": [10, 20], "closed": False, "stre
                                       "members": [(chain.name, 0), (chain.name, 4)]}], "the sheet's members are found")
 check(not [i for i in model_ext.all_issues(context, lists[0]) if "cloth" in i[2]], "the list checks clean")
 try:
-    cns_chain_preview._draw_hook(Stub(), context, chain)      # the sheet line and the iterations hint
+    cns_chain_preview._draw_hook(Stub(), context, chain)      # the sheet line
     drawn = True
 except Exception as err:        # noqa: BLE001
     print(err)
@@ -327,6 +378,53 @@ check(low > -0.15 - 2e-3, f"ground keeps the points on the stage floor (lowest {
 fake, fake_arm = fake_chain({"ground": True, "radius": 0.0})
 low = min(p.z for p in run(fake, fake_arm, ground=None, local=SLANT))
 check(low < -0.25, f"without stage collision ground is skipped (lowest {low:.4f} m)")
+
+
+def swinging(values, frames=240):
+    """a slanted tendril swinging down under gravity, its chain file's Damping 1.0 (the coats'): how far its tip
+    still moves in the last frame"""
+    fake, fake_arm = fake_chain(values, damping=1.0)
+    before = run(fake, fake_arm, frames=frames - 1, local=SLANT)[3]
+    return (run(fake, fake_arm, frames=1, local=SLANT)[3] - before).length
+
+
+calm, lively = swinging({}), swinging({"damping": 0.0})
+check(calm < lively / 20, f"the chain file's Damping 1.0 still settles (auto 0.1: {calm * 100:.4f} cm per frame); "
+                            f"damping 0 keeps swinging ({lively * 100:.3f} cm)")
+
+
+# ---- version 2's checks (chain_solver.md "Checks before it counts as done") ---------------------------------------
+def settled_angle(substeps, iterations, frames=400):
+    """check 1: stiffness 0.03 against a sideways gravity: the tendril's angle from its animated (straight down)
+    direction once it has settled, in degrees"""
+    fake, fake_arm = fake_chain({"stiffness": 0.03, "substeps": substeps, "iterations": iterations},
+                                gravity=Vector((0.01, 0.0, 0.0)), damping=0.5)
+    points = run(fake, fake_arm, frames=frames)
+    d = points[3] - points[0]
+    return math.degrees(math.acos(min(max(-d.z / d.length, -1.0), 1.0)))
+
+
+angles = {(n, i): settled_angle(n, i) for n in (4, 8, 16) for i in (1, 2, 4)}
+spread = max(angles.values()) - min(angles.values())
+check(spread < 0.5 and min(angles.values()) > 1.0,
+      f"stiffness settles at the same angle at any substeps / iterations ({min(angles.values()):.2f} to "
+      f"{max(angles.values()):.2f} deg)")
+
+# check 5: radius="6 2" = 6 cm at the root, 2 at the tail, linear in between; a segment tapers between its ends
+fake, fake_arm = fake_chain({"radius": [6.0, 2.0]}, gravity=Vector())
+t = cns_chain_hook._Tendril(fake, 0, Matrix.Identity(4), fake_arm, lambda n: Matrix.Translation((0.0, 0.0, -0.1)),
+                            1.0, [])
+want = [6.0, 6.0 - 4.0 / 3.0, 2.0 + 4.0 / 3.0, 2.0]
+check(all(abs(t.r[k] / cns_chain_hook.SCALE - want[k]) < 1e-9 for k in range(4)),
+      f"radius 6 2 along the tendril: {[round(t.r[k] * 100, 3) for k in range(4)]} cm")
+fake, fake_arm = fake_chain({"radius": [6.0, 2.0], "pin": 1.0}, gravity=Vector())
+centre = Vector((0.02, 0.0, -0.25))        # beside the last segment's middle (the tendril runs 0 to -0.3)
+points = run(fake, fake_arm, shapes=[(centre, centre, 0.0)], frames=5)     # pinned: the push alone moves it
+u, _ = cns_chain_hook._closest(points[2], points[3], centre, centre)
+dist = (points[2].lerp(points[3], u) - centre).length
+taper = (want[2] + (want[3] - want[2]) * u) * cns_chain_hook.SCALE
+check(abs(dist - taper) < 1e-3, f"a shape keeps the segment's tapered radius ({dist * 100:.2f} cm at u {u:.2f}, "
+                                f"wants {taper * 100:.2f})")
 
 print("FAILURES:", failures)
 sys.exit(1 if failures else 0)

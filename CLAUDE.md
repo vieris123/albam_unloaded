@@ -1411,8 +1411,28 @@ Researched 2026-10-05, supported 2026-10-10 (import / export, motion preview). R
     tendrils of the model's `<physics>` chains) / `cloth_sheets(arm)`; the runner `_Runner.sheets` (only when every
     member is previewed), solved at the first member root in bone order, other roots' FK from `world_of`. Checks
     say why a sheet won't run ("can't cross models", no `<physics>`, no such tendril). Coat as a sheet: ~19 ms per
-    frame; mean worst penetration 0.22 cm at 2 iterations (0.14 at 4, 0.12 at 8; alone 0.09). The links run first in
-    each pass since then (runner change after this measurement: 0.53 / 0.30 / 0.20 with the links after the shapes).
+    frame. The links run first in each pass (0.53 / 0.30 / 0.20 cm mean worst penetration at 2 / 4 / 8 iterations
+    with them after the shapes, 0.22 / 0.14 / 0.12 first, no damping).
+    **Damping** (`damping=`, 2026-11-10, after the coat swung for good in the game): speed lost per frame, auto =
+    max(0.1, 1 - mDamping) (`Hook.damping`; step 1 `v x (1 - damping)^h`). The game's solver drops the speed its
+    length correction implies (RE note 3.2g), this one keeps it, so the coats' mDamping 1.0 meant no loss. With the
+    auto 0.1: sheet 0.12 / 0.13 / 0.09 cm at 2 / 4 / 8 iterations, alone 0.10, the game's 0.11.
+    **Version 2** (chain_solver.md "Version 2", 2026-11-10, runner written by albam-df the same day, not built):
+    soft constraints in XPBD form (`compliance(rate)` in frames squared, `_project`; lambdas per substep; stiffness /
+    pin goals every pass; links and the mStretch stretch (one-sided, compliance(mSpring)) take alpha = W x compliance,
+    W = the weights' sum; the exact length pass still ends every pass; with mStretch, per segment root
+    to tail, its soft stretch then its cap at L x mStretchLimit, as the runner), settings along the
+    tendril (`CURVES`: stiffness / pin / limit / damping / gravity / radius as 1-8 values, `along(values, u)`, u = (k -
+    root) / (tail - root); radius per node, a segment's at the closest-point u, the root push at r[root]; parsed like
+    the runner's parse_curve, `ext_list.parse_curve`: a non-number or a 9th value drops the entry), inertia split
+    (`inertia_move` / `inertia_turn`, slerp(I, dR, ct) and cm x the move; a_prev carried too, root..tail) and damping
+    toward the animated speed (va from the substep targets). Defaults 8 substeps x 1 iteration. Chain panel: Inertia
+    Move / Turn, Gravity, the list settings as text (`hook_<name>_along`) behind an Along the Tendril toggle
+    (`albam.phs_hook_along`). Checks (spec's list): stiffness settles at 39.20-39.27 deg over substeps 4 / 8 / 16 x
+    iterations 1 / 2 / 4 (version 1: 11.1-34.5); version 2 = version 1 at 4 x 1, damping 0, within 4e-4 cm (scratch,
+    against the saved version 1); radius 6 2 tapers (test); Nero's coat as a sheet (run + spin): 0.119 cm mean worst
+    penetration, settles 105 frames after the spin (version 1's sheet never did), with inertia_turn 1 still swinging a
+    second later. The coat's outer front tails alone (_00, _05) keep moving ~0.3-0.4 cm a frame in both versions.
   - **Game quirks kept:** mDamping > 1 (Sanctus: 10 / 20) only bounded by mMaxSpeed; mTurbulence never applies at a
     steady 60 fps; a pushed joint position survives only for the chain root, so segments can still clip a capsule
     mid-length in fast motion; mBlend < 1 and bind offsets off the mDir axis change segment lengths.

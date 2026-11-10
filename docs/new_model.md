@@ -280,10 +280,19 @@ The chain preview runs the links, as the game does (needs a dmc4_hook with links
 
 A **Physics** entry on a Model entry hands that model's chains with one chain file to dmc4_hook's own solver instead
 of the game's. It covers the game's own chains too: Nero's coat is `pl000_03_00` to `_05` on `pl000_03`, one entry per
-file. The chain file's settings still apply (gravity, wind, damping, tail, collision radius, stretch, blend), and the
-entry adds:
+file. The chain file's settings still apply (gravity, wind, tail, collision radius, stretch, blend), and the entry
+adds:
 
-- **Substeps:** the frame is split into steps, so a fast move doesn't carry the cloth through a shape.
+- **Damping:** the speed lost per frame (lower swings longer), counted against the animation's own motion: the chain
+  keeps up with a fast animated swing of the hips and a free swing still dies down. Left out, it's 1 - the chain
+  file's Damping, at least 0.1: the game's solver loses speed in its length correction, this one doesn't, so the
+  coats' Damping 1.0 would swing for good (it did in the game before the floor, 2026-11-10).
+- **Substeps** (default 8) and **Iterations** (default 1): the frame is split into steps, so a fast move doesn't carry
+  the cloth through a shape. Every 0-1 setting means the same at any count, so these only trade cost for accuracy.
+- **Gravity:** times the chain file's gravity.
+- **Inertia Move / Inertia Turn:** Inertia split in two, the model's travel and its turning (each defaults to
+  Inertia). Move 0 with Turn 1 is a long coat that rides along when the character runs or is launched, and still
+  swings out when it spins.
 - **Collision on every segment.** The game's solver only keeps the push on a tendril's first joint.
 - **Ground:** each point stays above the stage floor.
 - **Stiffness / Pin:** a pull toward the animated shape or place.
@@ -291,8 +300,16 @@ entry adds:
 - **Self:** the tendrils push each other apart.
 - **Real-time step:** the chains move the same at any frame rate.
 
+Stiffness, Pin, Limit, Damping, Gravity and Radius can vary along the tendril: give 2 to 8 values, separated by
+spaces or commas, and they're spread evenly from the tendril's root to its tail. `stiffness="0.15 0.02"` holds a coat
+at the waist and leaves the hem loose; `radius="6 2"` is 6 cm at the root and 2 cm at the tail, each segment tapering
+between its ends. Something that isn't a number, or a 9th value, makes the game drop the whole entry (the list check
+says so).
+
 The easiest way to add one is the chain itself: select the `PHS_` Empty and click **Use dmc4_hook's Solver** in its
-Chain panel. The settings appear there, and the arrow next to each one takes it back to the default. The chain
+Chain panel. The settings appear there, and the arrow next to each one takes it back to the default. The button
+beside each setting that can vary along the tendril (**Along the Tendril**) turns it into a list of two values, root
+and tail, edited as text; click it again to go back to one value. The chain
 preview runs the same solver (`Vibed\ModelExt\chain_solver.md`). For Ground it uses an imported stage collision
 (`.sbc`) if the scene has one, and skips it otherwise.
 
@@ -316,11 +333,10 @@ can't cross models. Each tendril keeps its own settings; the sheet uses the high
 them. The list panel says when a sheet won't run, and why. The Chain panel says when a chain is in one. A tendril
 belongs to one sheet, and a later sheet that repeats a root is dropped.
 
-What it costs: the sheet's ties can pull the cloth into the body a little. On Nero's coat in the preview, segments end
-up 0.22 cm inside the body shapes on average at 2 iterations (0.14 at 4, 0.12 at 8), against 0.09 without the sheet
-and 0.11 with the game's solver. For a sheet that sits close to the body, set Iterations to 4 on its chains' Physics
-entries: that brings it level with the game's solver. Keep a model's Links until a sheet has been tried on it in the
-game. Not checked in the game yet (2026-11-10).
+What it costs: on Nero's coat in the preview (the defaults, a run and a fast spin), segments end up 0.12 cm inside
+the body shapes on average as a sheet, and the coat settles 105 frames (under 2 seconds) after the spin. With Inertia
+Turn 1 the spin throws the coat out and it's still swinging a second later. Keep a model's Links until a sheet has been tried on it in the game.
+Not checked in the game yet (2026-11-10).
 
 **Preview Attachments** shows the attachments and constraints in the viewport. A chain's bones stay free, because the game gives
 them to the chain. It uses `ALBAM_` constraints and `EXTP_` Empties, which are never exported. It's close, not exact: Blend is

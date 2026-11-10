@@ -980,19 +980,23 @@ def _poll_col_root(self, obj):
 
 # ---- dmc4_hook's solver: the chain's <physics> entry, edited from the Chain panel ---------------------------------
 # (name, the runner's default when it isn't fixed by the chain file, as written in the list)
-HOOK_ATTRS = (("substeps", "4"), ("iterations", "2"), ("stiffness", "0"), ("pin", "0"), ("inertia", None),
-              ("limit", "0"), ("friction", "0.2"), ("radius", None), ("ground", "false"), ("self", "false"),
-              ("axis", None))
-_HOOK_DEFAULTS = {"substeps": 4, "iterations": 2, "stiffness": 0.0, "pin": 0.0, "inertia": None, "limit": 0.0,
-                  "friction": 0.2, "radius": None, "ground": False, "self": False, "axis": None}
+HOOK_ATTRS = (("substeps", "8"), ("iterations", "1"), ("stiffness", "0"), ("pin", "0"), ("inertia", None),
+              ("inertia_move", None), ("inertia_turn", None), ("limit", "0"), ("friction", "0.2"), ("damping", None),
+              ("gravity", "1"), ("radius", None), ("ground", "false"), ("self", "false"), ("axis", None))
+_HOOK_DEFAULTS = {"substeps": 8, "iterations": 1, "stiffness": [0.0], "pin": [0.0], "inertia": None,
+                  "inertia_move": None, "inertia_turn": None, "limit": [0.0], "friction": 0.2, "damping": None,
+                  "gravity": [1.0], "radius": None, "ground": False, "self": False, "axis": None}
 
 
 def _hook_effective(ob):
-    """the settings the runner solves this chain with (the chain file's where the entry leaves one out)"""
+    """the settings the runner solves this chain with (the chain file's where the entry leaves one out); the ones
+    along the tendril (cns_chain_hook.CURVES) as lists, radius in cm"""
     hook = cns_chain_hook.Hook(_physics(ob) or _HOOK_DEFAULTS, _settings(ob))
     return {"substeps": hook.substeps, "iterations": hook.iterations, "stiffness": hook.stiffness, "pin": hook.pin,
-            "inertia": hook.inertia, "limit": hook.limit, "friction": hook.friction,
-            "radius": hook.radius / cns_chain_hook.SCALE, "ground": hook.ground, "self": hook.self, "axis": hook.axis}
+            "inertia": hook.inertia, "inertia_move": hook.inertia_move, "inertia_turn": hook.inertia_turn,
+            "limit": hook.limit, "friction": hook.friction, "damping": hook.damping, "gravity": hook.gravity,
+            "radius": [r / cns_chain_hook.SCALE for r in hook.radius], "ground": hook.ground, "self": hook.self,
+            "axis": hook.axis}
 
 
 def _hook_text(name, value):
@@ -1002,14 +1006,27 @@ def _hook_text(name, value):
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, (list, tuple)):
+        return " ".join(_hook_text(name, v) for v in value)
     return f"{round(value, 4):g}"
+
+
+def _along(ob, name):
+    """the values of an entry's setting along the tendril as written ([] when it isn't in the entry)"""
+    from albam.engines.mtfw import model_ext
+    from albam.engines.mtfw.movedef import ext_list
+    e = model_ext.physics_entry(bpy.context, ob)[2]
+    if e is None or not e.has(name):
+        return []
+    return ext_list.parse_curve(e.get(name, ""))[0] or []
 
 
 def _hook_prop(name):
     default = dict(HOOK_ATTRS)[name]
 
     def get(self):
-        return _hook_effective(self.id_data)[name]
+        value = _hook_effective(self.id_data)[name]
+        return value[0] if isinstance(value, list) else value      # along the tendril: the root's
 
     def set_(self, value):
         from albam.engines.mtfw import model_ext
@@ -1018,6 +1035,27 @@ def _hook_prop(name):
     return {"get": get, "set": set_}
 
 
+def _hook_list_prop(name):
+    """a setting along the tendril as its text: 2-8 numbers, root to tail"""
+    default = dict(HOOK_ATTRS)[name]
+
+    def get(self):
+        return _hook_text(name, _hook_effective(self.id_data)[name])
+
+    def set_(self, value):
+        from albam.engines.mtfw import model_ext
+        from albam.engines.mtfw.movedef import ext_list
+        numbers, problem = ext_list.parse_curve(value)
+        if problem is not None or not numbers:
+            return          # the runner would drop the entry: keep what's there
+        low, high = ext_list.CURVE_RANGES[name]
+        text = _hook_text(name, [min(max(v, low), high) for v in numbers])
+        model_ext.set_physics_attr(bpy.context, self.id_data, name, None if text == default else text)
+    return {"get": get, "set": set_}
+
+
+_ALONG_TIP = (": 2-8 numbers separated by spaces, spread evenly from the tendril's root to its tail and read "
+              "linearly")
 _AXIS_ITEMS = [(code, code.upper(), f"The joint's {code.upper()} axis points down the chain", i)
                for i, code in enumerate(cns_chain_hook.AXES)]
 
@@ -1054,14 +1092,30 @@ class AlbamChainPreview(bpy.types.PropertyGroup):
         name="Inertia", min=0.0, max=1.0, subtype="FACTOR", **_hook_prop("inertia"),
         description="How much of the model's motion the chain lags behind (1 = all of it). Left out of the list: 0 "
                     "when the chain file follows its parent (Follow Position / Height / Rotation), else 1")
+    hook_inertia_move: bpy.props.FloatProperty(
+        name="Inertia Move", min=0.0, max=1.0, subtype="FACTOR", **_hook_prop("inertia_move"),
+        description="How much of the model's travel the chain lags behind. Left out of the list: Inertia. 0 with "
+                    "Inertia Turn 1: a long coat rides along when the character runs or is launched, and still swings "
+                    "out when it spins")
+    hook_inertia_turn: bpy.props.FloatProperty(
+        name="Inertia Turn", min=0.0, max=1.0, subtype="FACTOR", **_hook_prop("inertia_turn"),
+        description="How much of the model's turning the chain lags behind. Left out of the list: Inertia")
     hook_limit: bpy.props.FloatProperty(
         name="Limit", min=0.0, max=180.0, **_hook_prop("limit"),
         description="Degrees a segment may leave its animated direction (0 = no limit)")
     hook_friction: bpy.props.FloatProperty(
         name="Friction", min=0.0, max=1.0, subtype="FACTOR", **_hook_prop("friction"),
         description="Per frame, the sliding speed a point loses while it touches a shape or the floor")
+    hook_damping: bpy.props.FloatProperty(
+        name="Damping", min=0.0, max=1.0, subtype="FACTOR", **_hook_prop("damping"),
+        description="Per frame, the speed the chain loses beyond the animation's own motion: lower swings longer, "
+                    "higher calms it. Left out of the list: 1 - the chain file's Damping, at least 0.1 (the coats' "
+                    "Damping 1.0 never loses speed on this solver, the game's own loses it in its length correction)")
+    hook_gravity: bpy.props.FloatProperty(
+        name="Gravity", min=-100.0, max=100.0, soft_min=0.0, soft_max=2.0, **_hook_prop("gravity"),
+        description="Times the chain file's gravity (1 = as it is)")
     hook_radius: bpy.props.FloatProperty(
-        name="Radius (cm)", min=0.0, **_hook_prop("radius"),
+        name="Radius (cm)", min=0.0, max=1000.0, **_hook_prop("radius"),
         description="The segments' radius against the collision shapes, in cm. Left out of the list: the chain "
                     "file's Collision Radius")
     hook_ground: bpy.props.BoolProperty(
@@ -1075,6 +1129,22 @@ class AlbamChainPreview(bpy.types.PropertyGroup):
         name="Axis", items=_AXIS_ITEMS, **_hook_prop("axis"),
         description="The joint axis aimed down the chain (+Z works on this solver, the game's can't). Left out of "
                     "the list: the chain file's Pointing Axis, where 2 means +Z here")
+    # the settings along the tendril as text (2-8 numbers, root to tail), drawn instead of the single value once the
+    # entry holds a list
+    hook_stiffness_along: bpy.props.StringProperty(
+        name="Stiffness", **_hook_list_prop("stiffness"),
+        description="Stiffness along the tendril" + _ALONG_TIP + " (0.15 0.02: a firm waist, a loose hem)")
+    hook_pin_along: bpy.props.StringProperty(
+        name="Pin", **_hook_list_prop("pin"), description="Pin along the tendril" + _ALONG_TIP)
+    hook_limit_along: bpy.props.StringProperty(
+        name="Limit", **_hook_list_prop("limit"), description="Limit in degrees along the tendril" + _ALONG_TIP)
+    hook_damping_along: bpy.props.StringProperty(
+        name="Damping", **_hook_list_prop("damping"), description="Damping along the tendril" + _ALONG_TIP)
+    hook_gravity_along: bpy.props.StringProperty(
+        name="Gravity", **_hook_list_prop("gravity"), description="Gravity multiplier along the tendril" + _ALONG_TIP)
+    hook_radius_along: bpy.props.StringProperty(
+        name="Radius (cm)", **_hook_list_prop("radius"),
+        description="Radius in cm along the tendril" + _ALONG_TIP + " (6 2: 6 cm at the root, 2 at the tail)")
 
 
 # ---- finding and connecting the pieces ----------------------------------------------------------------------------
@@ -1356,6 +1426,28 @@ class ALBAM_OT_PhsHookDefault(bpy.types.Operator):
         return {"FINISHED"}
 
 
+@blender_registry.register_blender_type
+class ALBAM_OT_PhsHookAlong(bpy.types.Operator):
+    """Vary this setting along the tendril (two values, root and tail, to edit as text), or go back to one value for
+    the whole tendril (the root's)"""
+    bl_idname = "albam.phs_hook_along"
+    bl_label = "Along the Tendril"
+    bl_options = {"REGISTER", "UNDO", "INTERNAL"}
+
+    attr: bpy.props.StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+
+    def execute(self, context):
+        from albam.engines.mtfw import model_ext
+        ob = context.object
+        value = _hook_effective(ob)[self.attr]
+        if len(_along(ob, self.attr)) > 1:
+            text = _hook_text(self.attr, value[0])
+            model_ext.set_physics_attr(context, ob, self.attr, None if text == dict(HOOK_ATTRS)[self.attr] else text)
+        else:
+            model_ext.set_physics_attr(context, ob, self.attr, _hook_text(self.attr, [value[0], value[-1]]))
+        return {"FINISHED"}
+
+
 def _draw_hook(layout, context, ob):
     from albam.engines.mtfw import model_ext
     box = layout.box()
@@ -1375,7 +1467,10 @@ def _draw_hook(layout, context, ob):
     col = box.column(align=True)
     for name, _ in HOOK_ATTRS:
         row = col.row(align=True)
-        row.prop(settings, f"hook_{name}")
+        listed = name in cns_chain_hook.CURVES and len(_along(ob, name)) > 1
+        row.prop(settings, f"hook_{name}_along" if listed else f"hook_{name}")
+        if name in cns_chain_hook.CURVES:
+            row.operator("albam.phs_hook_along", text="", icon="IPO_LINEAR", depress=listed).attr = name
         sub = row.row(align=True)
         sub.enabled = e.has(name)       # the setting is in the list: it can go back to the default
         sub.operator("albam.phs_hook_default", text="", icon="LOOP_BACK").attr = name
@@ -1384,9 +1479,6 @@ def _draw_hook(layout, context, ob):
         if members and any(member == ob for member, _ in members):
             box.label(text=f"In a <cloth> sheet of {len(members)} tendrils ({list_name}): it solves with them",
                       icon="MOD_CLOTH")
-            if max(model_ext.physics_settings(m)["iterations"] for m, _ in members) < 4:
-                box.label(text="A sheet close to the body: Iterations 4 keeps it out of the shapes as well as the "
-                               "game's solver does", icon="INFO")
     if settings.hook_ground and not cns_chain_hook.stage_meshes(context.scene):
         box.label(text="Ground: no stage collision (.sbc) in the scene, the preview skips it", icon="INFO")
     arm = chain_armature(ob)

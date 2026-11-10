@@ -12,11 +12,15 @@ The game side runs once per drawn frame with T = the frame's length in 60 fps fr
 min(mDeltaTime, 2), other chains their t clamped to 2), so a scene frame here is one solve of T = 60 / fps, whatever
 round(60 / fps) steps the game's solver takes in the preview.
 
+Version 2 of the note (its last section): soft constraints in XPBD form (`compliance`: a 0-1 rate keeps its meaning at
+any substep or pass count, and is version 1 at 4 substeps exactly), settings spread along the tendril (`along`), the
+reference motion carried apart for moving and turning (the animated pose too), and damping toward the animated speed.
+
 `ground` casts a line per point at the scene's imported stage collision (.sbc meshes); without any it's skipped.
 """
 import math
 
-from mathutils import Matrix, Vector
+from mathutils import Matrix, Quaternion, Vector
 from mathutils.bvhtree import BVHTree
 
 SCALE = 0.01                    # game cm -> m
@@ -27,6 +31,31 @@ DOWN = Vector((0.0, 0.0, -1.0))
 TINY = 1e-6 * SCALE             # safe_normalize
 SHORT = 1e-5 * SCALE            # a segment too short to have a direction
 AXES = ("+x", "+y", "+z", "-x", "-y", "-z")     # axis codes 0-5
+# <physics> settings that take one value or 2-8 along the tendril (chain_solver.md V2.2)
+CURVES = ("stiffness", "pin", "damping", "radius", "limit", "gravity")
+
+
+def _values(v):
+    return [float(x) for x in v] if isinstance(v, (list, tuple)) else [float(v)]
+
+
+def along(values, u):
+    """a setting spread evenly from the root (u 0) to the tail (u 1), read linearly; one value holds everywhere"""
+    if len(values) == 1:
+        return values[0]
+    t = min(max(u, 0.0), 1.0) * (len(values) - 1)
+    i = min(int(t), len(values) - 2)
+    return values[i] + (values[i + 1] - values[i]) * (t - i)
+
+
+def compliance(rate):
+    """a 0-1 per-frame rate as an XPBD compliance, in frames squared (chain_solver.md V2.1): version 1's share per
+    substep at 4 substeps exactly. 0 = hard (rate 1); None = the constraint is off (rate 0 or less)"""
+    if rate <= 0.0:
+        return None
+    if rate >= 1.0:
+        return 0.0
+    return (1.0 / (1.0 - (1.0 - rate) ** 0.25) - 1.0) / 16.0
 
 
 class Hook:
@@ -37,13 +66,24 @@ class Hook:
         self.values = dict(values)
         self.substeps = values["substeps"]
         self.iterations = values["iterations"]
-        self.stiffness = values["stiffness"]
-        self.pin = values["pin"]
+        # the settings that can vary along the tendril are lists of 1-8 values (along)
+        self.stiffness = _values(values["stiffness"])
+        self.pin = _values(values["pin"])
+        self.limit = _values(values["limit"])
+        self.gravity = _values(values.get("gravity", 1.0))
         local = s["pos_local"] or s["pos_local_y"] or s["rot_local"]
         self.inertia = values["inertia"] if values["inertia"] is not None else (0.0 if local else 1.0)
-        self.limit = values["limit"]
+        move, turn = values.get("inertia_move"), values.get("inertia_turn")
+        self.inertia_move = move if move is not None else self.inertia
+        self.inertia_turn = turn if turn is not None else self.inertia
         self.friction = values["friction"]
-        self.radius = values["radius"] * SCALE if values["radius"] is not None else s["radius"]
+        # speed lost per frame; auto = 1 - mDamping, at least 0.1: the game's solver drops the speed its length
+        # correction implies (RE note 3.2g), so mDamping 1.0 still loses energy there; here it would swing for good
+        damping = values.get("damping")
+        self.damping = (_values(damping) if damping is not None
+                        else [max(0.1, 1.0 - min(max(s["damping"], 0.0), 1.0))])
+        radius = values["radius"]
+        self.radius = [r * SCALE for r in _values(radius)] if radius is not None else [s["radius"]]
         self.ground = values["ground"]
         self.self = values["self"]
         self.axis = values["axis"] if values["axis"] is not None else min(max(s["dir"], 0), 5)
@@ -123,6 +163,15 @@ def _per_step(rate, h):
     return 1.0 - (1.0 - min(max(rate, 0.0), 1.0)) ** h
 
 
+def _project(lams, key, C, w_sum, alpha_t):
+    """one XPBD step of constraint `key` (its lambda kept in `lams` for the substep): dlambda for value C over the
+    weights w_sum, compliance alpha_t = alpha / h^2"""
+    lam = lams.get(key, 0.0)
+    dl = (-C - alpha_t * lam) / (w_sum + alpha_t)
+    lams[key] = lam + dl
+    return dl
+
+
 class _Tendril:
     """One tendril being solved (ChainSolver's Tendril): steps 1-4 of the note on construction (the animated pose from
     a_root = the root's FK world, the reset, the points, the inertia carry), then the substep phases and the output.
@@ -149,6 +198,18 @@ class _Tendril:
         self.a = a = {k: A[k].translation.copy() for k in nodes}
         self.L = {k: (a[k + 1] - a[k]).length for k in range(root, tail)}
 
+        # settings along the tendril (V2.2): node k's value acts on segment k-1..k (stiffness, pin, limit) or on
+        # point k (damping, gravity); radius per node, a segment's taken where it's closest
+        u = {k: (k - root) / (tail - root) for k in nodes}
+        self.r = {k: along(hook.radius, u[k]) for k in nodes}
+        later = range(root + 1, tail + 1)
+        self.stiff_c = {k: compliance(along(hook.stiffness, u[k])) for k in later}
+        self.pin_c = {k: compliance(along(hook.pin, u[k])) for k in later}
+        self.limit = {k: min(max(along(hook.limit, u[k]), 0.0), 180.0) for k in later}
+        self.damping = {k: min(max(along(hook.damping, u[k]), 0.0), 1.0) for k in later}
+        self.gravity = {k: along(hook.gravity, u[k]) for k in later}
+        self.stretch_c = compliance(s["spring"]) if s["stretch"] else None
+
         # 2. reset: the first solve, the game's reset state (cCnsChain::move still runs), or the root jumped
         self.reset = root not in hook.seen or chain.in_reset or (a[root] - hook.anim_prev[root]).length > TELEPORT
         # 3. points
@@ -161,28 +222,35 @@ class _Tendril:
             hook.seen.add(k)
         self.x[root] = a[root].copy()
 
-        # 4. inertia: the part of the reference frame's motion the points are carried by
+        # 4. inertia (V2.3): the parts of the reference frame's turn and move the points are carried by, and the
+        # previous animated pose with them, so the substep targets start where the carried points are
         ref = chain.parent
         self.ref_rot = ref.to_3x3()
         if not self.reset:
-            carry = 1.0 - min(max(hook.inertia, 0.0), 1.0)
+            turn_part = 1.0 - min(max(hook.inertia_turn, 0.0), 1.0)
+            move_part = 1.0 - min(max(hook.inertia_move, 0.0), 1.0)
             prev = hook.ref_prev.get(root)
-            if carry > 0.0 and prev is not None and T > 0.0:
-                move = ref @ prev.inverted_safe()
-                turn = move.to_3x3()
+            if (turn_part > 0.0 or move_part > 0.0) and prev is not None and T > 0.0:
+                r0, r1 = prev.to_3x3().normalized(), ref.to_3x3().normalized()
+                p0 = prev.translation.copy()
+                turn = Quaternion().slerp((r1 @ r0.transposed()).to_quaternion(), turn_part).to_matrix()
+                shift = (ref.translation - p0) * move_part
                 for k in range(root + 1, tail + 1):
-                    self.x[k] = self.x[k].lerp(move @ self.x[k], carry)
-                    self.v[k] = self.v[k].lerp(turn @ self.v[k], carry)
+                    self.x[k] = p0 + turn @ (self.x[k] - p0) + shift
+                    self.v[k] = turn @ self.v[k]
+                for k in nodes:
+                    hook.anim_prev[k] = p0 + turn @ (hook.anim_prev[k] - p0) + shift
         hook.ref_prev[root] = ref.copy()
 
         self.g = self.ref_rot @ s["gravity"] if s["gravity_local"] else s["gravity"].copy()
         self.wind = Vector() if s["mute_wind"] else chain.wind.copy()
         if s["wind_local"]:
             self.wind = self.ref_rot @ self.wind
-        self.r = hook.radius
         self.shapes = [] if s["mute_collision"] else list(shapes)
-        self.old, self.contact, self.touched, self.at = {}, {}, {}, {}
+        self.old, self.contact, self.touched = {}, {}, {}
+        self.at = {k: hook.anim_prev[k].copy() for k in nodes}      # the substep targets, before the first
         self.planes, self.others = {}, []
+        self.lams, self.alpha_t = {}, 1.0
 
     def nodes(self):
         return self.tail - self.root
@@ -191,7 +259,7 @@ class _Tendril:
         return 0.0 if k == self.root else 1.0
 
     def gather(self, ground):
-        """before the substeps: the ground under each point, the other tendrils' segments (self)"""
+        """before the substeps: the ground under each point, the other tendrils' segments with their radii (self)"""
         x, a = self.x, self.a
         self.planes = {}
         if self.hook.ground and ground is not None:
@@ -203,50 +271,68 @@ class _Tendril:
                     self.planes[k] = hit
         self.others = []
         if self.hook.self:
-            chain = self.chain
+            chain, radius = self.chain, self.hook.radius
             for k, name in enumerate(chain.joints):
-                if name is None or self.root <= k <= self.tip or tendril(chain, k)[0] in self.neighbours:
+                if name is None or self.root <= k <= self.tip:
                     continue
-                self.others.append((chain.mats[k].translation.copy(), chain.mats[k + 1].translation.copy()))
+                o_root, o_tip = tendril(chain, k)
+                if o_root in self.neighbours:
+                    continue
+                span = o_tip + 1 - o_root
+                self.others.append((chain.mats[k].translation.copy(), chain.mats[k + 1].translation.copy(),
+                                    along(radius, (k - o_root) / span), along(radius, (k + 1 - o_root) / span)))
 
     def begin_substep(self, h, f):
-        hook, s, x, v, root = self.hook, self.s, self.x, self.v, self.root
-        self.damp = min(max(s["damping"], 0.0), 1.0) ** h
-        self.pin, self.stiff, self.fric = (_per_step(r, h) for r in (hook.pin, hook.stiffness, hook.friction))
+        """targets, root push, forces: damping toward the animated speed, then gravity and wind (V2.3)"""
+        hook, x, v, root, r = self.hook, self.x, self.v, self.root, self.r
+        self.fric = _per_step(hook.friction, h)
+        self.lams, self.alpha_t = {}, 1.0 / (h * h)
+        at_prev = self.at
         self.at = {k: hook.anim_prev[k].lerp(self.a[k], f) for k in range(root, self.tail + 1)}
         x[root] = self.at[root].copy()
-        # root push: the root, a sphere of the chain's radius, out of every shape (the game keeps a root's push too;
-        # Nero's coat roots _02 / _03 sit inside a body shape at bind and would hold their first segment in it)
+        # root push: the root, a sphere of its radius, out of every shape (the game keeps a root's push too; Nero's
+        # coat roots _02 / _03 sit inside a body shape at bind and would hold their first segment in it)
         for ca, cb, cr in self.shapes:
             _, w = _closest(x[root], x[root], ca, cb)
             d = x[root] - ca.lerp(cb, w)
-            pen = self.r + cr - d.length
+            pen = r[root] + cr - d.length
             if pen > 0.0:
                 x[root] = x[root] + _unit(d, UP) * pen
         for k in range(root + 1, self.tail + 1):
-            v[k] = (v[k] + (self.g + self.wind) * h) * self.damp
+            va = (self.at[k] - at_prev[k]) / h
+            v[k] = va + (v[k] - va) * (1.0 - self.damping[k]) ** h
+            v[k] = v[k] + (self.g * self.gravity[k] + self.wind) * h
             self.old[k] = x[k].copy()
             x[k] = x[k] + v[k] * h
             self.touched[k] = False
 
-    def constrain(self, first):
-        """one constraint pass up to the lengths (stiffness and pin in the first pass only)"""
-        hook, s, x, at, r = self.hook, self.s, self.x, self.at, self.r
+    def _goal(self, kind, k, p, goal, alpha):
+        """a soft goal constraint |p - goal| (only p moves, the goal fixed), XPBD"""
+        d = p - goal
+        C = d.length
+        if C < SHORT:
+            return p
+        dl = _project(self.lams, (kind, k), C, 1.0, alpha * self.alpha_t)
+        return p + d * (dl / C)
+
+    def constrain(self):
+        """one constraint pass up to the lengths: stiffness and pin (soft, every pass), shapes, self, ground, limit"""
+        s, x, at, r = self.s, self.x, self.at, self.r
         root, tail = self.root, self.tail
         touched, contact = self.touched, self.contact
-        if first and (self.pin > 0.0 or self.stiff > 0.0):
-            for k in range(root + 1, tail + 1):
-                if self.stiff > 0.0:        # stiffness
-                    length = (x[k] - x[k - 1]).length
-                    d = _unit(at[k] - at[k - 1], DOWN)
-                    x[k] = x[k] + (x[k - 1] + d * length - x[k]) * self.stiff
-                if self.pin > 0.0:          # pin
-                    x[k] = x[k] + (at[k] - x[k]) * self.pin
+        for k in range(root + 1, tail + 1):
+            alpha = self.stiff_c[k]
+            if alpha is not None:       # stiffness: toward the animated direction, the length kept as it is
+                goal = x[k - 1] + _unit(at[k] - at[k - 1], DOWN) * (x[k] - x[k - 1]).length
+                x[k] = self._goal("stiffness", k, x[k], goal, alpha)
+            alpha = self.pin_c[k]
+            if alpha is not None:       # pin: toward the animated place
+                x[k] = self._goal("pin", k, x[k], at[k], alpha)
         for k in range(root, tail):         # shapes: both ends pushed, weighted by u; the root doesn't move
             for ca, cb, cr in self.shapes:
                 u, w = _closest(x[k], x[k + 1], ca, cb)
                 p, q = x[k].lerp(x[k + 1], u), ca.lerp(cb, w)
-                pen = r + cr - (p - q).length
+                pen = r[k] + (r[k + 1] - r[k]) * u + cr - (p - q).length
                 if pen <= 0.0:
                     continue
                 n = _unit(p - q, _unit(x[k + 1] - ca, UP))
@@ -260,13 +346,13 @@ class _Tendril:
                     touched[k], contact[k] = True, n
                 x[k + 1] = x[k + 1] + n * (lam * wb)
                 touched[k + 1], contact[k + 1] = True, n
-        if self.others:                     # self: the other tendrils, radius 2r, half the push
+        if self.others:                     # self: the other tendrils, both radii, half the push
             for k in range(root, tail):
-                for oa, ob in self.others:
+                for oa, ob, ra, rb in self.others:
                     u, w = _closest(x[k], x[k + 1], oa, ob)
                     p, q = x[k].lerp(x[k + 1], u), oa.lerp(ob, w)
                     dist = (p - q).length
-                    pen = 2.0 * r - dist
+                    pen = r[k] + (r[k + 1] - r[k]) * u + ra + (rb - ra) * w - dist
                     if pen <= 0.0 or dist < SHORT:
                         continue
                     n = (p - q) / dist
@@ -281,43 +367,60 @@ class _Tendril:
         for k in range(root + 1, tail + 1):     # ground plane, mFloorLevel
             if k in self.planes:
                 n, p = self.planes[k]
-                d = (x[k] - p).dot(n) - r
+                d = (x[k] - p).dot(n) - r[k]
                 if d < 0.0:
                     x[k] = x[k] - n * d
                     touched[k], contact[k] = True, n
-            if s["floor_on"] and x[k].z < s["floor"] + r:
-                x[k].z = s["floor"] + r
+            if s["floor_on"] and x[k].z < s["floor"] + r[k]:
+                x[k].z = s["floor"] + r[k]
                 touched[k], contact[k] = True, UP.copy()
-        if hook.limit > 0.0:                # limit: within `limit` of the animated direction, length kept
-            lim = math.radians(min(hook.limit, 180.0))
+        for k in range(root + 1, tail + 1):     # limit: within node k's degrees of the animated direction, length kept
+            if self.limit[k] <= 0.0:
+                continue
+            lim = math.radians(self.limit[k])
             cos_limit, sin_limit = math.cos(lim), math.sin(lim)
-            for k in range(root + 1, tail + 1):
-                seg = x[k] - x[k - 1]
-                length = seg.length
-                if length < SHORT:
-                    continue
-                d = _unit(at[k] - at[k - 1], seg / length)
-                if (seg / length).dot(d) >= cos_limit:
-                    continue
-                side = _unit(seg - d * seg.dot(d), Vector())
-                if side.length == 0.0:
-                    continue
-                x[k] = x[k - 1] + (d * cos_limit + side * sin_limit) * length
+            seg = x[k] - x[k - 1]
+            length = seg.length
+            if length < SHORT:
+                continue
+            d = _unit(at[k] - at[k - 1], seg / length)
+            if (seg / length).dot(d) >= cos_limit:
+                continue
+            side = _unit(seg - d * seg.dot(d), Vector())
+            if side.length == 0.0:
+                continue
+            x[k] = x[k - 1] + (d * cos_limit + side * sin_limit) * length
 
-    def lengths(self, h):
-        """lengths last, root to tail, each child moved onto its parent's sphere"""
-        s, x, at, L = self.s, self.x, self.at, self.L
-        spring = _per_step(s["spring"], h)
-        for k in range(self.root, self.tail):
-            d = x[k + 1] - x[k]
-            length = d.length
-            direction = d / length if length > SHORT else _unit(at[k + 1] - at[k], DOWN)
-            want = L[k]
-            if s["stretch"]:
-                want = length + (L[k] - length) * spring if length > L[k] else length
-                if s["stretch_limit"] >= 0.0:
-                    want = min(want, L[k] * s["stretch_limit"])
-            x[k + 1] = x[k] + direction * want
+    def lengths(self):
+        """lengths last, root to tail, each child moved onto its parent's sphere (exact); with mStretch a soft stretch
+        (len - L > 0, compliance from mSpring) instead, each segment then capped at L x mStretchLimit"""
+        s, x, at, L, root = self.s, self.x, self.at, self.L, self.root
+        if not s["stretch"]:
+            for k in range(root, self.tail):
+                d = x[k + 1] - x[k]
+                length = d.length
+                direction = d / length if length > SHORT else _unit(at[k + 1] - at[k], DOWN)
+                x[k + 1] = x[k] + direction * L[k]
+            return
+        for k in range(root, self.tail):    # per segment, root to tail: its soft stretch, then its cap (the runner's)
+            if self.stretch_c is not None:
+                d = x[k + 1] - x[k]
+                length = d.length
+                if length - L[k] > 0.0 and length >= SHORT:
+                    wa = 0.0 if k == root else 1.0
+                    n = d / length
+                    # two points: alpha = W x compliance, W = the weights' sum (version 1's share was split over both)
+                    dl = _project(self.lams, ("stretch", k), length - L[k], wa + 1.0,
+                                  (wa + 1.0) * self.stretch_c * self.alpha_t)
+                    x[k] = x[k] - n * (wa * dl)
+                    x[k + 1] = x[k + 1] + n * dl
+            if s["stretch_limit"] >= 0.0:
+                d = x[k + 1] - x[k]
+                length = d.length
+                cap = L[k] * s["stretch_limit"]
+                if length > cap:
+                    direction = d / length if length > SHORT else _unit(at[k + 1] - at[k], DOWN)
+                    x[k + 1] = x[k] + direction * cap
 
     def end_substep(self, h):
         """speeds; on a contact the speed into the surface goes and the sliding part loses friction"""
@@ -371,16 +474,19 @@ class _Tendril:
             chain.vel[k] = v[k]
 
 
-def _link(p, wp, q, wq, rest, k):
-    """a distance constraint softened to k (this pass's share), roots unmoved; returns the new (p, q)"""
-    if k <= 0.0 or wp + wq <= 0.0:
+def _link(lams, key, p, wp, q, wq, rest, alpha_t):
+    """a soft distance constraint |q - p| - rest (both signs, XPBD, compliance alpha_t = alpha / h^2), roots
+    unmoved; returns the new (p, q)"""
+    if wp + wq <= 0.0:
         return p, q
     d = q - p
     length = d.length
     if length < SHORT:
         return p, q
-    c = d * ((length - rest) / length * k / (wp + wq))
-    return p + c * wp, q - c * wq
+    n = d / length
+    # two points: alpha = W x compliance, W = wp + wq (version 1's share per substep was split over both ends)
+    dl = _project(lams, key, length - rest, wp + wq, (wp + wq) * alpha_t)
+    return p - n * (wp * dl), q + n * (wq * dl)
 
 
 def sheet_links(members, cloth):
@@ -417,7 +523,7 @@ def sheet_links(members, cloth):
 def solve_set(members, cloth, T, ground):
     """steps 5-6 for a set of prepared tendrils: one, or a <cloth>'s sheet (cloth = its values, members in sheet
     order), its links first in each pass, then the members' constraints, then their lengths. T = the time the solve
-    covers."""
+    covers. Every soft constraint (links, stiffness, pin, stretch) is XPBD: its lambda starts at 0 each substep."""
     if not members:
         return
     substeps = max(min(max(t.hook.substeps, 1), 16) for t in members)
@@ -428,21 +534,21 @@ def solve_set(members, cloth, T, ground):
         for t in members:
             t.gather(ground)
         links = sheet_links(members, cloth)
-        # a per-frame rate, as a share per substep, spread over the passes
-        shares = {rate: 1.0 - (1.0 - _per_step(rate, h)) ** (1.0 / iterations) for *_, rate in links}
+        alphas = [compliance(rate) / (h * h) for *_, rate in links]     # rate > 0 there, so never None
         for step in range(1, steps + 1):
             for t in members:
                 t.begin_substep(h, step / steps)
-            for it in range(iterations):
+            lams = {}
+            for _ in range(iterations):
                 # the sheet's links first, so the members' shapes / ground then push out what they pulled in (after
                 # the shapes, the coat ended passes 0.53 cm inside the body against 0.09 alone)
-                for ta, ka, tb, kb, rest, rate in links:
+                for i, (ta, ka, tb, kb, rest, _rate) in enumerate(links):
                     a, b = members[ta], members[tb]
-                    a.x[ka], b.x[kb] = _link(a.x[ka], a.weight(ka), b.x[kb], b.weight(kb), rest, shares[rate])
+                    a.x[ka], b.x[kb] = _link(lams, i, a.x[ka], a.weight(ka), b.x[kb], b.weight(kb), rest, alphas[i])
                 for t in members:
-                    t.constrain(it == 0)
+                    t.constrain()
                 for t in members:
-                    t.lengths(h)
+                    t.lengths()
             for t in members:
                 t.end_substep(h)
     for t in members:
