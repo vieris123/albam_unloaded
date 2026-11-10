@@ -1,0 +1,332 @@
+"""ModelExtension <physics>: dmc4_hook's chain solver (Vibed/ModelExt/chain_solver.md) in the list format and the chain
+preview. The list entry parses, checks and round-trips; the Chain panel's settings write it; the preview runs the
+solver for the chain it names: the rest pose holds without forces, lengths hold under gravity, the same time at 30 and
+60 fps gives the same pose, pin holds the animation, shapes and the stage floor keep the points out, links still run."""
+import os
+import sys
+from types import SimpleNamespace
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import common  # noqa: E402
+
+common.register()
+import bpy  # noqa: E402
+from mathutils import Matrix, Vector  # noqa: E402
+from albam.engines.mtfw import cns_chain, cns_chain_hook, cns_chain_preview, joints, model_ext  # noqa: E402
+from albam.engines.mtfw.movedef import ext_list  # noqa: E402
+
+failures = []
+
+
+def check(cond, msg):
+    print(("ok   " if cond else "FAIL ") + msg)
+    if not cond:
+        failures.append(msg)
+
+
+# ---- the format -------------------------------------------------------------------------------------------------------
+TEXT = ('<extensions>\n  <model path="model\\game\\x\\skirt">\n'
+        '    <physics clt="chains\\lk" substeps="20" axis="+Z" radius="3" ground="true"/>\n'
+        '    <physics clt="chains\\lk" stiffness="0.5"/>\n'
+        '    <physics clt="chains\\bad" axis="w"/>\n'
+        '  </model>\n</extensions>\n')
+d = ext_list.parse(TEXT)
+check(d.text() == TEXT, "a list with <physics> round-trips byte for byte")
+first, _, bad = [e for e, _ in ext_list.physics(d)]
+values = ext_list.physics_values(first)
+check(values["substeps"] == 16 and values["axis"] == 2 and values["radius"] == 3.0 and values["ground"],
+      f"values as the runner reads them, clamped ({values})")
+check(values["inertia"] is None and values["friction"] == 0.2 and values["iterations"] == 2, "absent ones: defaults")
+check(ext_list.physics_values(bad) is None, "a bad axis drops the entry, as the runner does")
+found = ext_list.issues([("lk.xml", d)])
+messages = [m for _, _, m in found]
+check(any("substeps" in m and "1-16" in m for m in messages), "substeps out of range is reported")
+check(any(level == "error" and "axis" in m for level, _, m in found), "a bad axis is an error")
+check(any("listed already" in m for m in messages), "a second entry for the same model and file is reported")
+
+CLOTHS = ('<extensions>\n  <model path="m">\n'
+          '    <cloth roots="1, 8 14 20 26 32" closed="true" shear="2"/>\n'
+          '    <cloth roots="40 8"/>\n'
+          '    <cloth roots="5"/>\n'
+          '    <cloth roots="5 5"/>\n'
+          '    <cloth roots="5 300"/>\n'
+          '  </model>\n</extensions>\n')
+d = ext_list.parse(CLOTHS)
+sheets = [e for e, _ in ext_list.cloths(d)]
+values = ext_list.cloth_values(sheets[0])
+check(values == {"roots": [1, 8, 14, 20, 26, 32], "closed": True, "stretch": 1.0, "shear": 1.0, "bend": 0.0},
+      f"a <cloth> as the runner reads it ({values})")
+check([ext_list.cloth_values(e) is None for e in sheets[2:]] == [True] * 3, "one root, a root twice, a root over 255: dropped")
+messages = [m for _, _, m in ext_list.issues([("c.xml", d)])]
+check(any("root 8 is in an earlier <cloth>" in m for m in messages), "a root in an earlier sheet: the later one is dropped")
+check(sum("the game drops it" in m for m in messages) == 3, "the dropped entries are errors")
+
+# ---- the preview ------------------------------------------------------------------------------------------------------
+common.skip_unless(common.NERO)
+context = bpy.context
+scene = context.scene
+scene.albam.rfs.add_root_folder("dmc4", common.NERO)      # a chain file to build the new one on
+
+# the skirt of test_chain_link: hips (joint 0) and two tendrils of three bones, splayed apart, hanging down
+BONES = {"hips": (0, None, (0, 0, 1.0), (0, 0, 1.1))}
+for side, sign, base in (("L", -1, 10), ("R", 1, 20)):
+    for k in range(3):
+        head = (sign * (0.05 + 0.02 * k), 0, 0.9 - 0.1 * k)
+        tail = (sign * (0.07 + 0.02 * k), 0, 0.8 - 0.1 * k)
+        BONES[f"{side}{k}"] = (base + k, "hips" if k == 0 else f"{side}{k - 1}", head, tail)
+data = bpy.data.armatures.new("skirt")
+arm = bpy.data.objects.new("skirt", data)
+scene.collection.objects.link(arm)
+context.view_layer.objects.active = arm
+bpy.ops.object.mode_set(mode="EDIT")
+for name, (_, parent, head, tail) in BONES.items():
+    eb = data.edit_bones.new(name)
+    eb.head, eb.tail = head, tail
+    if parent:
+        eb.parent = data.edit_bones[parent]
+bpy.ops.object.mode_set(mode="OBJECT")
+for name, (number, _, _, _) in BONES.items():
+    data.bones[name][joints.JOINT_PROP] = str(number)
+arm.albam_asset.app_id, arm.albam_asset.relative_path, arm.albam_asset.extension = "dmc4", "model\\game\\x\\skirt.mod", "mod"
+
+settings = dict(cns_chain.DEFAULTS, mDir=1, mUp=2, mGravity=[0.0, 0.0, 0.0], mBlend=1.0)
+chain = cns_chain.new_chain(context, arm, [data.bones[n] for n in BONES if n != "hips"], "chains\\lk.clt", settings)
+check(model_ext.chain_model_path(chain) == "model\\game\\x\\skirt", "the chain's model path")
+context.view_layer.objects.active = chain
+check(bpy.ops.albam.phs_hook_use() == {"FINISHED"}, "Use dmc4_hook's Solver adds an entry")
+lists = [o for o in bpy.data.objects if model_ext.is_list(o)]
+check(len(lists) == 1 and lists[0].albam_asset.relative_path == "model_ext\\skirt.xml", "in a new list for the model")
+text = model_ext.list_doc(lists[0]).text()
+check('<model path="model\\game\\x\\skirt">' in text and '<physics clt="chains\\lk"/>' in text, f"the entry:\n{text}")
+
+s = chain.albam_phs
+check(s.hook_substeps == 4 and abs(s.hook_inertia - 1.0) < 1e-6 and s.hook_axis == "+y",
+      "the panel shows the runner's defaults, inertia and axis from the chain file")
+s.hook_stiffness = 0.25
+s.hook_axis = "+z"
+s.hook_substeps = 6
+text = model_ext.list_doc(lists[0]).text()
+check('stiffness="0.25"' in text and 'axis="+z"' in text and 'substeps="6"' in text, "the settings write the entry")
+s.hook_substeps = 4
+check('substeps' not in model_ext.list_doc(lists[0]).text(), "a setting set to its default is taken out")
+bpy.ops.albam.phs_hook_default(attr="axis")
+bpy.ops.albam.phs_hook_default(attr="stiffness")
+check('<physics clt="chains\\lk"/>' in model_ext.list_doc(lists[0]).text(), "Use Default takes settings out")
+check(not [i for i in model_ext.all_issues(context, lists[0]) if i[0] == "error"], "the list checks clean")
+
+
+class Stub:
+    """a layout that takes any call (panels can't be drawn headless)"""
+
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: Stub()
+
+    def __setattr__(self, name, value):
+        pass
+
+
+try:
+    cns_chain_preview._draw_hook(Stub(), context, chain)
+    drawn = True
+except Exception as err:        # noqa: BLE001
+    print(err)
+    drawn = False
+check(drawn, "the Chain panel's dmc4_hook box draws")
+
+
+def runner():
+    return cns_chain_preview._runners.get(arm.name)
+
+
+def head(name):
+    return arm.matrix_world @ arm.pose.bones[name].head
+
+
+def play(frames, fps=60):
+    scene.render.fps, scene.render.fps_base = fps, 1.0
+    chain.albam_phs.preview = False
+    scene.frame_set(1)
+    chain.albam_phs.preview = True
+    for f in range(1, frames + 1):
+        scene.frame_set(f)
+
+
+def set_chain(**props):
+    for key, value in props.items():
+        chain[key] = value
+
+
+rest = {n: arm.matrix_world @ data.bones[n].head_local for n in BONES}
+play(30)
+check(runner() is not None and all(c.hook is not None for _, c in runner().chains), "the preview runs the hook solver")
+worst = max((head(n) - rest[n]).length for n in BONES)
+check(worst < 1e-5, f"without forces the rest pose holds ({worst:.2e} m)")
+
+set_chain(mGravity=[0.0, -1.0, 0.0])
+play(60)
+lengths = max(abs((head(f"{t}{k}") - head(f"{t}{k - 1}")).length - (rest[f"{t}{k}"] - rest[f"{t}{k - 1}"]).length)
+              for t in "LR" for k in (1, 2))
+check(lengths < 1e-4, f"under gravity the segments keep their lengths ({lengths:.2e} m)")
+swing = abs(head("L2").x) < abs(rest["L2"].x) - 0.005
+check(swing, f"gravity swings the splayed tendrils toward hanging straight (x {rest['L2'].x:.3f} -> {head('L2').x:.3f})")
+at60 = {n: head(n) for n in BONES}
+play(31, fps=30)        # the first 2 frames copy the animation: 58 solved frames at 60 fps, 29 of 2 at 30 fps
+apart = max((head(n) - at60[n]).length for n in BONES)
+check(apart < 1e-4, f"one second at 30 fps ends where one at 60 fps does ({apart:.2e} m)")
+scene.render.fps = 60
+
+model_ext.set_physics_attr(context, chain, "pin", "1")
+play(30)
+worst = max((head(n) - rest[n]).length for n in BONES)
+check(worst < 1e-4, f"pin 1 holds the animated places under gravity ({worst:.2e} m)")
+model_ext.set_physics_attr(context, chain, "pin", None)
+
+# links run after the hook solver as after the game's; a chain the <physics> entry puts on the solver counts as listed
+# without a <chain> (the game's own chains: Nero's coat)
+d = model_ext.list_doc(lists[0])
+model = d.children(d.root, "model")[0]
+model_ext.add_element(d, "link", model, [("a", "12"), ("b", "22"), ("max", "10")])
+model_ext.store(lists[0], d)
+set_chain(mGravity=[0.0, 0.0, 0.0])
+play(30)
+gap = (head("L2") - head("R2")).length
+check(abs(gap - 0.1) < 2e-3, f"a <link> on <physics> chains (no <chain>) pulls the tips to max ({gap * 100:.2f} cm)")
+check(not [i for i in model_ext.all_issues(context, lists[0]) if "link" in i[2]], "and the list check accepts it")
+
+# <cloth>: the two tendrils as one sheet (roots 10 and 20, one chain file)
+d = model_ext.list_doc(lists[0])
+model = d.children(d.root, "model")[0]
+for e in d.children(model, "link"):
+    d.remove(e)
+model_ext.add_element(d, "cloth", model, [("roots", "10 20")])
+model_ext.store(lists[0], d)
+check(model_ext.cloth_sheets(arm) == [{"roots": [10, 20], "closed": False, "stretch": 1.0, "shear": 0.5, "bend": 0.0,
+                                      "members": [(chain.name, 0), (chain.name, 4)]}], "the sheet's members are found")
+check(not [i for i in model_ext.all_issues(context, lists[0]) if "cloth" in i[2]], "the list checks clean")
+try:
+    cns_chain_preview._draw_hook(Stub(), context, chain)      # the sheet line and the iterations hint
+    drawn = True
+except Exception as err:        # noqa: BLE001
+    print(err)
+    drawn = False
+check(drawn, "the Chain panel draws a chain in a sheet")
+play(30)
+worst = max((head(n) - rest[n]).length for n in BONES)
+check(runner().sheets and worst < 1e-5, f"a sheet without forces holds the rest pose ({worst:.2e} m)")
+set_chain(mGravity=[0.0, -1.0, 0.0])
+play(60)
+gaps = [abs((head(f"L{k}") - head(f"R{k}")).length - (rest[f"L{k}"] - rest[f"R{k}"]).length) for k in (1, 2)]
+check(max(gaps) < 5e-3, f"under gravity the sheet keeps the tendrils' spacing (off by {max(gaps) * 100:.2f} cm)")
+d = model_ext.list_doc(lists[0])
+model = d.children(d.root, "model")[0]
+d.children(model, "cloth")[0].set("roots", "10 99")
+model_ext.store(lists[0], d)
+play(60)
+gap = (head("L2") - head("R2")).length
+check(not runner().sheets and abs(gap - (rest["L2"] - rest["R2"]).length) > 0.02,
+      f"a sheet with a root no tendril starts doesn't run (tips {gap * 100:.1f} cm apart, rest 18)")
+found = [m for _, _, m in model_ext.all_issues(context, lists[0])]
+check(any("root 99: no chain of this model starts a tendril there" in m for m in found), "and the check says why")
+
+# a root on another model: a <cloth> can't cross models
+data2 = bpy.data.armatures.new("cape")
+arm2 = bpy.data.objects.new("cape", data2)
+scene.collection.objects.link(arm2)
+context.view_layer.objects.active = arm2
+bpy.ops.object.mode_set(mode="EDIT")
+for k in range(2):
+    eb = data2.edit_bones.new(f"C{k}")
+    eb.head, eb.tail = (0.3, 0, 0.9 - 0.1 * k), (0.3, 0, 0.8 - 0.1 * k)
+    if k:
+        eb.parent = data2.edit_bones["C0"]
+bpy.ops.object.mode_set(mode="OBJECT")
+for k in range(2):
+    data2.bones[f"C{k}"][joints.JOINT_PROP] = str(30 + k)
+arm2.albam_asset.app_id, arm2.albam_asset.relative_path, arm2.albam_asset.extension = "dmc4", "model\\game\\x\\cape.mod", "mod"
+cape = cns_chain.new_chain(context, arm2, list(data2.bones), "chains\\cape.clt", settings)
+model_ext.add_physics(context, cape)
+d = model_ext.list_doc(lists[0])
+model = next(m for m in d.children(d.root, "model") if m.get("path") == "model\\game\\x\\skirt")
+d.children(model, "cloth")[0].set("roots", "10 30")
+model_ext.store(lists[0], d)
+found = [m for _, _, m in model_ext.all_issues(context, lists[0])]
+check(any("root 30" in m and "can't cross models" in m for m in found), "a root on another model: can't cross models")
+model_ext.remove_physics(context, chain)
+d = model_ext.list_doc(lists[0])
+model = next(m for m in d.children(d.root, "model") if m.get("path") == "model\\game\\x\\skirt")
+d.children(model, "cloth")[0].set("roots", "10 20")
+model_ext.store(lists[0], d)
+found = [m for _, _, m in model_ext.all_issues(context, lists[0])]
+check(any("root 10" in m and "no <physics> entry" in m for m in found), "a root on a chain without <physics>: said so")
+model_ext.add_physics(context, chain)
+chain.albam_phs.preview = False
+
+
+# ---- shapes and the floor, on the solver directly -----------------------------------------------------------------
+def fake_chain(values, **overrides):
+    """three joints hanging down 10 cm apart from the origin, aimed along -Z, and its tail"""
+    s = dict(cns_chain_preview._settings(chain), gravity=Vector((0.0, 0.0, -0.01)), tail=0.1, dir=5, up=1,
+             blend=1.0, stretch=False, pos_local=False, pos_local_y=False, rot_local=False, floor_on=False)
+    s.update(overrides)
+    names = ["a", "b", "c"]
+    fake = SimpleNamespace(joints=names, mats=[Matrix.Identity(4) for _ in range(4)], vel=[Vector() for _ in range(4)],
+                           s=s, wind=Vector(), parent=Matrix.Identity(4), in_reset=False)
+    fake.hook = cns_chain_hook.Hook(dict(ext_list.physics_values(ext_list.parse(
+        '<extensions><model path="m"><physics clt="c"/></model></extensions>').elems[-1]), **values), s)
+    bones = {"a": SimpleNamespace(parent=None)}
+    bones["b"] = SimpleNamespace(parent=SimpleNamespace(name="a"))
+    bones["c"] = SimpleNamespace(parent=SimpleNamespace(name="b"))
+    fake_arm = SimpleNamespace(data=SimpleNamespace(bones=bones))
+    return fake, fake_arm
+
+
+def run(fake, fake_arm, shapes=(), ground=None, frames=60, local=(0.0, 0.0, -0.1)):
+    for _ in range(frames):
+        cns_chain_hook.solve_tendril(fake, 0, Matrix.Identity(4), fake_arm, lambda n: Matrix.Translation(local),
+                                     1.0, list(shapes), ground)
+    return [fake.mats[k].translation.copy() for k in range(4)]
+
+
+def segment_distance(p0, p1, c):
+    ab = p1 - p0
+    t = max(0.0, min(1.0, (c - p0).dot(ab) / ab.length_squared))
+    return (p0 + ab * t - c).length
+
+
+fake, fake_arm = fake_chain({})
+points = run(fake, fake_arm, frames=5)
+check(max((points[k] - Vector((0, 0, -0.1 * k))).length for k in range(4)) < 1e-6, "hanging straight stays put")
+
+centre = Vector((0.02, 0.0, -0.2))
+fake, fake_arm = fake_chain({"radius": 1.0, "friction": 0.2})
+points = run(fake, fake_arm, shapes=[(centre, centre, 0.05)])
+inside = min(segment_distance(points[k], points[k + 1], centre) for k in range(3))
+check(inside > 0.05 + 0.01 - 0.003, f"the segments stay out of a sphere (closest {inside * 100:.2f} cm, wants 6)")
+check(abs((points[3] - points[2]).length - 0.1) < 1e-5, "and keep their lengths")
+
+centre = Vector((0.02, 0.0, 0.0))       # the root sits inside: the root push moves it out (chain_solver.md step 5)
+fake, fake_arm = fake_chain({"radius": 1.0})
+points = run(fake, fake_arm, shapes=[(centre, centre, 0.05)])
+check((points[0] - centre).length > 0.06 - 1e-5, f"a root inside a shape is pushed out ({(points[0] - centre).length * 100:.2f} cm "
+                                                 "from the centre, wants 6)")
+inside = min(segment_distance(points[k], points[k + 1], centre) for k in range(3))
+check(inside > 0.06 - 0.003, f"so its first segment gets out too (closest {inside * 100:.2f} cm)")
+
+plane = bpy.data.meshes.new("stage")
+plane.from_pydata([(-1, -1, -0.15), (1, -1, -0.15), (1, 1, -0.15), (-1, 1, -0.15)], [], [(0, 1, 2, 3)])
+stage = bpy.data.objects.new("stage_0", plane)
+stage["sbc_group"] = 0
+scene.collection.objects.link(stage)
+ground = cns_chain_hook.ground_caster(scene)
+check(ground is not None and abs(ground(Vector((0, 0, 0.5)), 1.0)[1].z + 0.15) < 1e-6, "the stage collision is found")
+SLANT = (0.03, 0.0, -0.1)      # a chain hanging exactly plumb can't fold: each length pass pushes it straight down
+fake, fake_arm = fake_chain({"ground": True, "radius": 0.0})
+points = run(fake, fake_arm, ground=ground, local=SLANT)
+low = min(p.z for p in points)
+check(low > -0.15 - 2e-3, f"ground keeps the points on the stage floor (lowest {low:.4f} m)")
+fake, fake_arm = fake_chain({"ground": True, "radius": 0.0})
+low = min(p.z for p in run(fake, fake_arm, ground=None, local=SLANT))
+check(low < -0.25, f"without stage collision ground is skipped (lowest {low:.4f} m)")
+
+print("FAILURES:", failures)
+sys.exit(1 if failures else 0)

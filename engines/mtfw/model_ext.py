@@ -10,6 +10,9 @@ no chain or constraint entry holds; rigid = Child Of `ALBAM_Attach` on the model
 <aim> / <offset> are bone constraints `ALBAM_Cns <list>`, with an Empty `EXTP_...` holding each offset (the world matrices
 are in Vibed/ModelExt/schema.md). Constraint influence stands in for the runner's blend (close, not equal), an aim's
 Damped Track only approximates its up axis, and an aim's limit isn't previewed.
+
+<link>s and <physics> (dmc4_hook's chain solver) act in the chain preview (cns_chain_preview, cns_chain_hook); the chain
+Empty's Chain panel edits its <physics> entry here (add_physics, set_physics_attr).
 """
 import math
 
@@ -164,7 +167,8 @@ def _cns_issues(context, d, name, found):
 
 
 def listed_chains(context, model_path):
-    """The chain objects the scene's lists put on a model: <chain clt=> under every <model> with that path"""
+    """The chain objects a <link> on a model may use, as the runner's update_links finds them: <chain clt=> under every
+    <model> with that path, then the model's chains (the game's own too) that a <physics> entry puts on the hook's solver"""
     by_path = {_stem(o.albam_asset.relative_path): o for o in chains(context)}
     out = []
     for root in scene_lists(context):
@@ -173,6 +177,9 @@ def listed_chains(context, model_path):
             if _stem(model.get("path", "")) == model_path:
                 out += [by_path[p] for p in (_stem(c.get("clt", "")) for c in d.children(model, "chain"))
                         if p in by_path and by_path[p] not in out]
+    for ob in chains(context):
+        if ob not in out and _stem(chain_model_path(ob)) == model_path and physics_settings(ob) is not None:
+            out.append(ob)
     return out
 
 
@@ -198,8 +205,8 @@ def _link_issues(context, d, name, found):
         slots = _chain_slots(listed_chains(context, path))
         missing = [j for j in values[:2] if j not in slots]
         if missing:
-            out.append(("warning", name, f"<link> {values[0]}-{values[1]}: no chain listed on {model.get('path')} holds "
-                                         f"joint {missing[0]}, the game refuses it"))
+            out.append(("warning", name, f"<link> {values[0]}-{values[1]}: no chain listed on {model.get('path')} (a "
+                                         f"<chain>, or a <physics> one) holds joint {missing[0]}, the game refuses it"))
         elif slots[values[0]] and slots[values[1]]:
             out.append(("warning", name, f"<link> {values[0]}-{values[1]}: both are tendril roots, which keep their "
                                          "animated place: the game refuses it"))
@@ -225,6 +232,165 @@ def preview_links(arm):
                 continue
             scale = sum(arm.matrix_world.to_scale()) / 3.0
             out.append((a.name, b.name, values[2] * 0.01 * scale, values[3]))
+    return out
+
+
+def chain_model_path(chain):
+    """The game path (stem) of the model a chain Empty is on, '' without one: the path <physics> entries match"""
+    model = model_object(cns_chain.chain_armature(chain) or chain.parent)
+    return ext_list.stem(model.albam_asset.relative_path) if model is not None else ""
+
+
+def physics_entry(context, chain):
+    """(list root, Doc, <physics>) of the entry the runner would use for a chain Empty (the first listed for its model
+    and file, lists in name order), else (None, None, None)"""
+    model, clt = _stem(chain_model_path(chain)), _stem(chain.albam_asset.relative_path)
+    if not model or not clt:
+        return None, None, None
+    for root in sorted(scene_lists(context), key=file_name):
+        d = list_doc(root)
+        for e, m in ext_list.physics(d):
+            if _stem(m.get("path", "")) == model and _stem(e.get("clt", "")) == clt:
+                return root, d, e
+    return None, None, None
+
+
+def physics_settings(chain):
+    """The runner's settings for a chain Empty (ext_list.physics_values), or None: the game's solver"""
+    _, _, e = physics_entry(bpy.context, chain)
+    return ext_list.physics_values(e) if e is not None else None
+
+
+def add_physics(context, chain):
+    """A <physics> entry for a chain Empty in the list that has its model, else the first list, else a new list
+    model_ext\\<model>.xml. Returns the list's root."""
+    model = chain_model_path(chain)
+    root, d, parent = _model_entry(context, model)
+    if root is None:
+        lists = sorted(scene_lists(context), key=file_name)
+        if lists:
+            root = lists[0]
+            d = list_doc(root)
+        else:
+            path = f"{FOLDER}\\{file_name_of(model)}.xml"
+            if any(ob.albam_asset.relative_path.lower() == path.lower() for ob in context.scene.objects):
+                path = next_path(context)
+            root = new_root(context, path, ext_list.new_list().text(), b"")
+            d = list_doc(root)
+        parent = add_element(d, "model", d.root, [("path", model)])
+    add_element(d, "physics", parent, [("clt", ext_list.stem(chain.albam_asset.relative_path))])
+    store(root, d)
+    return root
+
+
+def remove_physics(context, chain):
+    root, d, e = physics_entry(context, chain)
+    if root is not None:
+        d.remove(e)
+        store(root, d)
+
+
+def set_physics_attr(context, chain, name, value):
+    """Write one attribute of the chain's <physics> entry; None takes it out (the runner's default)"""
+    root, d, e = physics_entry(context, chain)
+    if root is None:
+        return
+    if value is None:
+        if e.has(name):
+            e.remove(name)
+    else:
+        e.set(name, value)
+    store(root, d)
+
+
+def _tendril_roots(chain):
+    """{joint number: slot} of the first joints of a chain Empty's tendrils"""
+    slots = cns_chain.chain_joints(chain, [])
+    return {j: k for k, j in enumerate(slots) if j >= 0 and (k == 0 or slots[k - 1] < 0)}
+
+
+def cloth_entries(context):
+    """The <cloth> entries the runner keeps, in its order (lists by name, then file order): [(list name, <model> path,
+    values)]. A later entry sharing a root with an earlier one on its model is dropped, as parse_cloth does."""
+    out, taken = [], {}
+    for root in sorted(scene_lists(context), key=file_name):
+        d = list_doc(root)
+        for e, model in ext_list.cloths(d):
+            values = ext_list.cloth_values(e)
+            if values is None:
+                continue
+            path = _stem(model.get("path", ""))
+            used = taken.setdefault(path, set())
+            if used & set(values["roots"]):
+                continue
+            used.update(values["roots"])
+            out.append((file_name(root), path, values))
+    return out
+
+
+def cloth_members(context, path, values):
+    """[(chain Empty, root slot)] of a sheet in its order, as update_cloths finds them: for each root, a tendril it
+    starts on a chain of the model on the hook's solver; (None, the first root not found) when the sheet isn't live"""
+    solved = [ob for ob in chains(context) if _stem(chain_model_path(ob)) == path and physics_settings(ob) is not None]
+    members = []
+    for joint in values["roots"]:
+        hit = next(((ob, _tendril_roots(ob)[joint]) for ob in solved if joint in _tendril_roots(ob)), None)
+        if hit is None:
+            return None, joint
+        members.append(hit)
+    return members, None
+
+
+def cloth_sheets(arm):
+    """The live sheets on `arm`'s chains for the preview: [{closed, stretch, shear, bend, members: [(chain Empty name,
+    root slot)]}]"""
+    context = bpy.context
+    out = []
+    for _, path, values in cloth_entries(context):
+        members, _ = cloth_members(context, path, values)
+        if members and all(cns_chain.chain_armature(ob) == arm for ob, _ in members):
+            out.append(dict(values, members=[(ob.name, slot) for ob, slot in members]))
+    return out
+
+
+def _cloth_issues(context, d, name, found):
+    """a sheet that won't be live (the runner logs it once and solves its tendrils alone): a root no chain of the
+    model on the solver starts, also when it's on another model (a <cloth> can't cross models)"""
+    out = []
+    for e, model in ext_list.cloths(d):
+        path = _stem(model.get("path", ""))
+        values = ext_list.cloth_values(e)
+        if values is None or path not in found:
+            continue
+        members, missing = cloth_members(context, path, values)
+        if members is not None:
+            continue
+        elsewhere = next((ob for ob in chains(context)
+                          if _stem(chain_model_path(ob)) != path and missing in _tendril_roots(ob)), None)
+        plain = next((ob for ob in chains(context)
+                      if _stem(chain_model_path(ob)) == path and missing in _tendril_roots(ob)), None)
+        if elsewhere is not None and plain is None:
+            why = f"it starts a tendril of {elsewhere.name} on {chain_model_path(elsewhere)}: a <cloth> can't cross models"
+        elif plain is not None:
+            why = f"its chain {plain.name} has no <physics> entry, so it isn't on dmc4_hook's solver"
+        else:
+            why = "no chain of this model starts a tendril there"
+        out.append(("warning", name, f"<cloth> on {model.get('path')}: root {missing}: {why}. The sheet won't run and "
+                                     "its tendrils solve alone"))
+    return out
+
+
+def _physics_issues(context, d, name, found):
+    """a <physics> for a model in the scene whose chains are imported, none with that file"""
+    out = []
+    on_model = {}
+    for ob in chains(context):
+        on_model.setdefault(_stem(chain_model_path(ob)), set()).add(_stem(ob.albam_asset.relative_path))
+    for e, model in ext_list.physics(d):
+        path, clt = _stem(model.get("path", "")), _stem(e.get("clt", ""))
+        if clt and path in found and on_model.get(path) and clt not in on_model[path]:
+            out.append(("warning", name, f"<physics> {e.get('clt')}: no chain of {model.get('path')} in the scene has "
+                                         "this file, so nothing uses it here"))
     return out
 
 
@@ -254,6 +420,8 @@ def scene_issues(context, lists):
                         break
         out += _cns_issues(context, d, name, found)
         out += _link_issues(context, d, name, found)
+        out += _physics_issues(context, d, name, found)
+        out += _cloth_issues(context, d, name, found)
         for e, _ in ext_list.shapes(d):
             ob = found.get(_stem(e.get("shp", "")))
             if ob is not None and not shape_keys.model_has_keys(ob):
@@ -737,8 +905,15 @@ class ALBAM_OT_ExtAdd(bpy.types.Operator):
                 "aim": "Make an axis of a joint of this model point at another joint",
                 "offset": "Move, turn or scale a joint of this model",
                 "link": "Keep two chain joints of this model within a distance, so neighbouring tendrils can't part. "
-                        "The chain preview runs it",
+                        "Both must be on chains this model lists: a <chain>, or a chain a <physics> entry puts on "
+                        "dmc4_hook's solver. The chain preview runs it",
                 "shape": "Make this model's shape keys move in the game: the .shp and .shw its .mod export writes",
+                "physics": "Solve this model's chains with one file on dmc4_hook's solver instead of the game's "
+                           "(substeps, collision on every segment, optional floor, pull toward the animation). The "
+                           "chain preview runs it",
+                "cloth": "Join tendrils of this model's chains on dmc4_hook's solver into one sheet (a coat, skirt or "
+                         "cape stays one piece): list their first joints in order across the sheet. The chain preview "
+                         "runs it",
                 "weights": "Play another weight list (.shw) with this shape's, 4 lists in all",
                 "hide": "Add a model not to draw"}.get(properties.tag, "Add an entry")
 
@@ -888,7 +1063,7 @@ class ALBAM_OT_ExtPickPath(bpy.types.Operator):
 
 CHILD_BUTTONS = {
     "model": (("chain", "Chain"), ("pin", "Pin"), ("aim", "Aim"), ("offset", "Offset"), ("link", "Link"),
-              ("shape", "Shape")),
+              ("shape", "Shape"), ("physics", "Physics"), ("cloth", "Cloth")),
     "shape": (("weights", "Weights"),),
 }
 

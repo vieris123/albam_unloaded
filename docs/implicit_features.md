@@ -81,6 +81,12 @@ Panels mentioned here are in the Properties editor (Object / Bone tabs) unless a
   the simulation. A frame already played shows its stored result. Jumping to any other frame restarts the
   simulation there, as the game does on a reset. **Simulate Range** fills the whole scene range at once. Nothing is
   keyed or exported.
+- **A `<physics>` entry switches the preview to dmc4_hook's solver.** When any ModelExtension list in the scene has a
+  `<physics>` for the chain's file on its model, the preview runs that solver instead of the game's, with the entry's
+  settings. Editing the entry, in the list or in the Chain panel, takes effect on the next frame. Its `ground`
+  setting uses the scene's imported stage collision (`.sbc` meshes); without any, ground is skipped. `<link>`s run
+  after either solver. A `<cloth>` entry makes its tendrils solve together as one sheet, across chain files, as soon as
+  every root is found on a chain of that model with a `<physics>` entry. Otherwise each tendril solves alone.
 - **Delete the `PHS_` Empty** (X) and its bones go back to their pose without the preview. Its bone collection and
   its Export row are removed.
 

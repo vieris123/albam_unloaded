@@ -4,6 +4,7 @@ which owns the format (`Vibed\\ModelExt\\schema.md`): every element and attribut
 The text handling is MoveDef's (`doc.py`: a file comes back byte for byte apart from what was edited, elements the
 runner doesn't read are kept). `issues` reports what the runner would warn about or refuse.
 """
+import re
 from collections import namedtuple
 
 from .doc import new_doc, parse as parse_doc
@@ -102,12 +103,47 @@ ELEMENTS["weights"] = (
     Attr("shw", "weights", "", "Another weight list (.shw, without extension), playing with the others"),
 ) + _WEIGHT_LIST
 MAX_WEIGHT_LISTS = 4    # cShape::WeightNode[4]
+# dmc4_hook's chain solver (sdk/ChainSolver.cpp; the algorithm is Vibed/ModelExt/chain_solver.md)
+ELEMENTS["physics"] = (
+    Attr("clt", "chain", "", "The chain file this model's chains with it are solved for: its game path, without "
+                             "extension. The game's own chains count (Nero's coat: pl000_03_00 .. _05 on pl000_03)"),
+    Attr("substeps", "count", "4", "Steps per 60 fps frame, 1-16. More keeps fast moves from carrying a segment "
+                                   "through a collision shape"),
+    Attr("iterations", "count", "2", "Constraint passes per step, 1-8"),
+    Attr("stiffness", "unit", "0", "0-1 per frame: each segment turns toward its animated direction (keeps a skirt's "
+                                   "shape)"),
+    Attr("pin", "unit", "0", "0-1 per frame: each point moves toward its animated place"),
+    Attr("inertia", "unit", "", "0-1: how much of the model's motion the chain lags behind. Absent: 0 if the chain "
+                                "file has Follow Position, Follow Height Only or Follow Rotation on, else 1"),
+    Attr("limit", "degrees", "0", "Degrees a segment may leave its animated direction, 0-180. 0 = no limit"),
+    Attr("friction", "unit", "0.2", "0-1 per frame: sliding speed lost while a point touches a shape or the floor"),
+    Attr("radius", "cm", "", "The segments' radius against the collision shapes, in cm. Absent: the chain file's "
+                             "collision radius (mCollisionSize)"),
+    Attr("ground", "bool", "false", "true: every point stays above the stage floor (a line cast per point per frame)"),
+    Attr("self", "bool", "false", "true: the chain's tendrils push each other apart"),
+    Attr("axis", "axis", "", "The joint axis aimed down the chain: x, +x, -x, ... (+z works here, the game's solver "
+                             "can't). Absent: the chain file's mDir"),
+)
+RANGES = {("physics", "substeps"): (1, 16), ("physics", "iterations"): (1, 8), ("physics", "limit"): (0.0, 180.0)}
+# tendrils on that solver joined into one sheet (chain_solver.md "Sheets")
+ELEMENTS["cloth"] = (
+    Attr("roots", "roots", "", "The first joint of each tendril, in order across the sheet, two or more (Nero's coat: "
+                               "1 8 14 20 26 32). Each must start a tendril of a chain on this model that a <physics> "
+                               "entry puts on dmc4_hook's solver. A <cloth> can't cross models"),
+    Attr("closed", "bool", "false", "true: the last tendril joins the first too (a skirt all the way round). The coats "
+                                    "are open at the front"),
+    Attr("stretch", "unit", "1", "0-1 per frame: neighbouring tendrils keep their animated distance, point by point"),
+    Attr("shear", "unit", "0.5", "0-1 per frame: the diagonals between neighbours, which stop the sheet skewing"),
+    Attr("bend", "unit", "0", "0-1 per frame: each tendril and the one after next, which resists folding across the "
+                              "sheet"),
+)
+MAX_CLOTH_ROOTS = 32        # parse_cloth reads 32 numbers at most
 CONSTRAINTS = ("pin", "aim", "offset")
 PARENTS = {"attach": ROOT, "model": ROOT, "hide": ROOT, "chain": "model", "pin": "model", "aim": "model", "offset": "model",
-           "link": "model", "shape": "model", "weights": "shape"}
+           "link": "model", "shape": "model", "weights": "shape", "physics": "model", "cloth": "model"}
 REQUIRED = {"attach": ("path", "to"), "model": ("path",), "chain": ("clt",), "hide": ("path",),
             "pin": ("joint", "to"), "aim": ("joint", "to"), "offset": ("joint",), "link": ("a", "b", "max"),
-            "shape": ("shp",), "weights": ("shw",)}
+            "shape": ("shp",), "weights": ("shw",), "physics": ("clt",), "cloth": ("roots",)}
 EXTENSIONS = (".mod", ".phs", ".clt", ".col", ".shp", ".shw")
 AXES = ("x", "+x", "-x", "y", "+y", "-y", "z", "+z", "-z")
 
@@ -226,6 +262,26 @@ def _check_elem(d, e, say):
             values = _floats(value)
             if not values or len(values) != 1:
                 say("error", f"<{e.tag}> {a.name}=\"{value}\": a number")
+        elif a.kind == "roots":
+            problem = cloth_problem(e)
+            if problem is not None:
+                say("error", f"<cloth> roots=\"{value}\": {problem}, the game drops it")
+                continue
+            numbers, left = _number_list(value, MAX_CLOTH_ROOTS)
+            if left:
+                say("warning", f"<cloth> roots=\"{value}\": the game reads only the first {len(numbers)} numbers")
+            elif any(v != int(v) for v in numbers):
+                say("warning", f"<cloth> roots=\"{value}\": joint numbers are whole numbers")
+        elif a.kind in ("count", "degrees", "cm"):
+            try:
+                number = int(value) if a.kind == "count" else float(value)
+            except ValueError:
+                say("error", f"<{e.tag}> {a.name}=\"{value}\": " + ("a whole number" if a.kind == "count" else "a number"))
+                continue
+            low, high = RANGES.get((e.tag, a.name), (0.0, None))
+            if number < low or (high is not None and number > high):
+                limits = f"{low}-{high}" if high is not None else f"at least {low}"
+                say("warning", f"<{e.tag}> {a.name}=\"{value}\": {limits}, the game clamps it")
         elif a.kind == "length" and value.strip():
             values = _floats(value)
             if not values or len(values) != 1 or values[0] <= 0.0:
@@ -304,6 +360,99 @@ def weight_lists(d, shape):
     return ([shape] if shape.get("shw", "").strip() else []) + d.children(shape, "weights")
 
 
+def physics(d):
+    """The <physics> entries of a list, with their <model>"""
+    return [(e, d.parent_of(e)) for e in d.elems if e.tag == "physics" and d.parent_of(e).tag == "model"]
+
+
+def axis_code(value):
+    """the runner's parse_axis: 0-5 = +x +y +z -x -y -z, None if it isn't one"""
+    value = value.strip().lower()
+    if value not in AXES:
+        return None
+    return "xyz".index(value[-1]) + (3 if value[0] == "-" else 0)
+
+
+def _leading(value, kind):
+    """pugixml's as_int / as_float on a present attribute: the leading number of the text, else 0"""
+    pattern = r"[+-]?\d+" if kind is int else r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?"
+    match = re.match(pattern, value.strip())
+    return kind(match.group(0)) if match else kind(0)
+
+
+def cloths(d):
+    """The <cloth> entries of a list, with their <model>"""
+    return [(e, d.parent_of(e)) for e in d.elems if e.tag == "cloth" and d.parent_of(e).tag == "model"]
+
+
+def _number_list(value, limit):
+    """the runner's parse_floats: numbers separated by spaces / commas / tabs, up to `limit`, stopping at the first
+    thing that isn't one. (numbers, whether text was left unread)"""
+    out, rest = [], value
+    while rest.strip() and len(out) < limit:
+        match = re.match(r"\s*([+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?)", rest)
+        if not match:
+            break
+        out.append(float(match.group(1)))
+        rest = rest[match.end():].lstrip(" ,\t")
+    return out, bool(rest.strip())
+
+
+def cloth_problem(e):
+    """why the runner drops a <cloth> on its own (parse_cloth), or None"""
+    numbers, _ = _number_list(e.get("roots", ""), MAX_CLOTH_ROOTS)
+    roots = [int(v) for v in numbers]
+    if len(roots) < 2:
+        return "needs roots=, two or more joint numbers"
+    for i, root in enumerate(roots):
+        if not 0 <= root <= 255:
+            return f"root {root} isn't a joint number 0-255"
+        if root in roots[:i]:
+            return f"root {root} is listed twice"
+    return None
+
+
+def cloth_values(e):
+    """A <cloth> entry as the runner reads it: {roots (joint numbers, sheet order), closed, stretch, shear, bend}, or
+    None when it drops the entry (cloth_problem)"""
+    if cloth_problem(e) is not None:
+        return None
+
+    def unit(name, default):
+        return min(max(_leading(e.get(name), float), 0.0), 1.0) if e.has(name) else default
+    return {"roots": [int(v) for v in _number_list(e.get("roots", ""), MAX_CLOTH_ROOTS)[0]],
+            "closed": is_true(e.get("closed", "false")), "stretch": unit("stretch", 1.0),
+            "shear": unit("shear", 0.5), "bend": unit("bend", 0.0)}
+
+
+def physics_values(e):
+    """A <physics> entry's settings as the runner reads them (ModelExtension.cpp parse_physics): clamped, inertia /
+    radius / axis None when absent (from the chain file). None when the runner drops the entry (no clt, bad axis)."""
+    if not e.get("clt", "").strip():
+        return None
+    out = {}
+
+    def number(name, kind, default, low, high):
+        value = _leading(e.get(name, ""), kind) if e.has(name) else default
+        return min(max(value, low), high) if high is not None else max(value, low)
+    out["substeps"] = number("substeps", int, 4, 1, 16)
+    out["iterations"] = number("iterations", int, 2, 1, 8)
+    out["stiffness"] = number("stiffness", float, 0.0, 0.0, 1.0)
+    out["pin"] = number("pin", float, 0.0, 0.0, 1.0)
+    out["inertia"] = number("inertia", float, 1.0, 0.0, 1.0) if e.has("inertia") else None
+    out["limit"] = number("limit", float, 0.0, 0.0, 180.0)
+    out["friction"] = number("friction", float, 0.2, 0.0, 1.0)
+    out["radius"] = number("radius", float, 0.0, 0.0, None) if e.has("radius") else None
+    out["ground"] = is_true(e.get("ground", "false"))
+    out["self"] = is_true(e.get("self", "false"))
+    out["axis"] = None
+    if e.has("axis"):
+        out["axis"] = axis_code(e.get("axis"))
+        if out["axis"] is None:
+            return None
+    return out
+
+
 def link_values(e):
     """(a, b, max cm, stiffness) as the runner reads them; None while a joint or max isn't usable"""
     a, b = joint_number(e, "a"), joint_number(e, "b")
@@ -318,13 +467,31 @@ def issues(lists):
     """[(level "error" / "warning", file name, message)] for `lists` = [(file name, Doc)]: all the lists the game reads
     together, in the game's order, since a joint's first entry wins across files"""
     out = []
-    attached, taken, shaped = set(), set(), set()
+    attached, taken, shaped, solved, sheeted = set(), set(), set(), set(), {}
     for name, d in sorted(lists, key=lambda item: item[0]):
         for e, model in shapes(d):
             path = normalize(model.get("path", ""))
             if path and path in shaped:
                 out.append(("warning", name, f"{model.get('path')} has a <shape> already: the first listed wins"))
             shaped.add(path)
+        for e, model in physics(d):
+            key = (normalize(model.get("path", "")), normalize(e.get("clt", "")))
+            if key[1] and key in solved:
+                out.append(("warning", name, f"<physics> {e.get('clt')} on {model.get('path')} is listed already: the "
+                                             "first listed wins"))
+            solved.add(key)
+        for e, model in cloths(d):
+            values = cloth_values(e)
+            if values is None:
+                continue
+            path = normalize(model.get("path", ""))
+            used = sheeted.setdefault(path, set())
+            shared = [r for r in values["roots"] if r in used]
+            if shared:
+                out.append(("warning", name, f"<cloth> on {model.get('path')}: root {shared[0]} is in an earlier <cloth>: "
+                                             "a tendril takes one sheet, so the game drops this one"))
+                continue
+            used.update(values["roots"])
         for e in d.elems:
             _check_elem(d, e, lambda level, message, name=name: out.append((level, name, message)))
         for attach in d.children(d.root, "attach"):

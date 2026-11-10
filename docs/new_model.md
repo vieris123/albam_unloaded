@@ -272,10 +272,55 @@ joints refuse constraints, and the panel warns about them:
 
 A **Link** on a Model entry keeps two of its chain joints within a distance (Max, in cm), so neighbouring tendrils can't
 part: the game simulates every tendril alone, so nothing else holds them together. It isn't a constraint: it holds no joint
-and runs after the chains have moved. Both joints must be held by chains listed on that model. A tendril's first joint keeps
+and runs after the chains have moved. Both joints must be held by chains listed on that model (a Chain entry, or a chain a
+Physics entry puts on dmc4_hook's solver, below). A tendril's first joint keeps
 its place, so its partner takes the whole pull, and a link between two first joints is refused. Max at the rest distance,
 or a little more, holds the cloth without making it look stiff. A link can pull a joint into a collision shape for a frame.
 The chain preview runs the links, as the game does (needs a dmc4_hook with links).
+
+A **Physics** entry on a Model entry hands that model's chains with one chain file to dmc4_hook's own solver instead
+of the game's. It covers the game's own chains too: Nero's coat is `pl000_03_00` to `_05` on `pl000_03`, one entry per
+file. The chain file's settings still apply (gravity, wind, damping, tail, collision radius, stretch, blend), and the
+entry adds:
+
+- **Substeps:** the frame is split into steps, so a fast move doesn't carry the cloth through a shape.
+- **Collision on every segment.** The game's solver only keeps the push on a tendril's first joint.
+- **Ground:** each point stays above the stage floor.
+- **Stiffness / Pin:** a pull toward the animated shape or place.
+- **Limit:** a cone around the animated direction.
+- **Self:** the tendrils push each other apart.
+- **Real-time step:** the chains move the same at any frame rate.
+
+The easiest way to add one is the chain itself: select the `PHS_` Empty and click **Use dmc4_hook's Solver** in its
+Chain panel. The settings appear there, and the arrow next to each one takes it back to the default. The chain
+preview runs the same solver (`Vibed\ModelExt\chain_solver.md`). For Ground it uses an imported stage collision
+(`.sbc`) if the scene has one, and skips it otherwise.
+
+A tendril's first joint stays on its animated place, except that it's pushed out of the collision shapes, as the
+game's solver does. On Nero's coat the two middle back tails start inside a body shape. A **Link** works on chains a
+Physics entry puts on this solver even without a Chain entry, so the coat's own tails can be linked. Not checked in
+the game yet (2026-11-10).
+
+A **Cloth** entry on a Model entry joins tendrils on this solver into one sheet, so a coat, skirt or cape stays one
+piece. **Roots** lists the first joint of each tendril, in order across the sheet (Nero's coat: `1 8 14 20 26 32`;
+Dante's: `8 15 21 27 33 39`). Then each tendril is tied to its neighbours:
+
+- **Stretch** (default 1): neighbouring tendrils keep their animated distance, point by point. Points below the end of
+  the shorter tendril stay free.
+- **Shear** (default 0.5): the diagonals, which stop the sheet skewing.
+- **Bend** (default 0): each tendril and the one after next, which resists folding across the sheet.
+- **Closed:** the last tendril joins the first too (a skirt all the way round). The coats are open at the front.
+
+The tendrils can come from different chain files, but every one needs a Physics entry, on the same model: a sheet
+can't cross models. Each tendril keeps its own settings; the sheet uses the highest substeps and iterations among
+them. The list panel says when a sheet won't run, and why. The Chain panel says when a chain is in one. A tendril
+belongs to one sheet, and a later sheet that repeats a root is dropped.
+
+What it costs: the sheet's ties can pull the cloth into the body a little. On Nero's coat in the preview, segments end
+up 0.22 cm inside the body shapes on average at 2 iterations (0.14 at 4, 0.12 at 8), against 0.09 without the sheet
+and 0.11 with the game's solver. For a sheet that sits close to the body, set Iterations to 4 on its chains' Physics
+entries: that brings it level with the game's solver. Keep a model's Links until a sheet has been tried on it in the
+game. Not checked in the game yet (2026-11-10).
 
 **Preview Attachments** shows the attachments and constraints in the viewport. A chain's bones stay free, because the game gives
 them to the chain. It uses `ALBAM_` constraints and `EXTP_` Empties, which are never exported. It's close, not exact: Blend is

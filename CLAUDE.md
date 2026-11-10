@@ -68,7 +68,8 @@ features only make sense with it:
   new chains, collision shapes and accessory `.mod`s from Albam get into the game, since the stock game loads them per
   owner by hard-coded names. Its lists also hold joint constraints (`<pin>`, `<aim>`, `<offset>`; `sdk/ModelCns`) and `<link>`s (two chain joints kept
   within a distance after the chains solve, so tendrils can't part; `sdk/ChainLink`, 2026-11-04; Albam's chain preview runs
-  them, `cns_chain_preview.apply_links`). The format
+  them, `cns_chain_preview.apply_links`) and `<physics>` (a model's chains with one `.clt` on the hook's own solver,
+  `sdk/ChainSolver`, 2026-11-10, algorithm `Vibed\ModelExt\chain_solver.md`; the preview runs it, `cns_chain_hook.py`). The format
   is `Vibed\ModelExt\schema.md`, owned by the runner; Albam authors the lists (`engines/mtfw/model_ext.py`).
 - **LMTSlotFix** guards the `.ctn` hang (a motion without a cancel script, `Vibed/RE/chartbl_ctn_hang.md`).
 - The RE notes in `Vibed\RE` serve both: a finding for one usually applies to the other.
@@ -92,7 +93,7 @@ Working rules:
 | `vfs.py` | Virtual file system stored in scene `CollectionProperty`s (`scene.albam.vfs`, `scene.albam.exported`). File bytes live in `BYTE_STRING` props. |
 | `rfs.py` | Fork addition, and the **main DMC4 file browser** ("Game Files" panel): `scene.albam.rfs` lists folders of extracted game files. See [Game Files (RFS)](#game-files-rfs). |
 | `blender_ui/` | Panels and operators. `import_panel.py` / `export_panel.py` are in the 3D View sidebar tab "Albam [Beta]". `tools.py` has the UV seam split, normal transfer, bone rename, VG merge and collision face editor. `anim_tools.py` is the Dope Sheet LMT section (LMT → Animations → Events). `custom_properties.py` is the per-app property factory. `error_handling.py` is the error popup. |
-| `engines/mtfw/` | MT Framework: `mesh.py` (.mod), `joints.py` (which bone is which game joint: joint numbers, bones added in Blender), `new_model.py` (New DMC4 Model: a .mod from scratch) and `mesh_prep.py` (export-time triangulate / seam split / root-frame copies of meshes), `material.py` (materials/MRL), `texture.py` (tex↔DDS), `texture_convert.py` (any Blender image -> the DDS a shader slot needs), `animation.py` (.lmt), `collision.py` (.sbc import/export, Blender side), `sbc_bvh.py` (DMC4 SBC1 reader/writer, pure Python), `placement.py` (.pla) and `scheduler.py` (.sdl) Blender import/export over the vendored `dmc4xml`, `xml_edit.py` (Edit as XML / Apply XML for them), `cns_chain.py` (.phs model chains), `col_shapes.py` (.col collision shapes) and `cns_chain_preview.py` (chain motion preview, the import wiring between them), `movedef/` (MoveDef move XML: schema, byte-exact reader / writer, checks, `.ctn` extraction; pure Python) and `movedef_blender.py` (the Moves panel, see [MoveDef](#movedef-move-files)), `archive.py` (.arc + dmc4 loose files), `__init__.py` (bone anim mapping enums, file-id↔extension hash tables). |
+| `engines/mtfw/` | MT Framework: `mesh.py` (.mod), `joints.py` (which bone is which game joint: joint numbers, bones added in Blender), `new_model.py` (New DMC4 Model: a .mod from scratch) and `mesh_prep.py` (export-time triangulate / seam split / root-frame copies of meshes), `material.py` (materials/MRL), `texture.py` (tex↔DDS), `texture_convert.py` (any Blender image -> the DDS a shader slot needs), `animation.py` (.lmt), `collision.py` (.sbc import/export, Blender side), `sbc_bvh.py` (DMC4 SBC1 reader/writer, pure Python), `placement.py` (.pla) and `scheduler.py` (.sdl) Blender import/export over the vendored `dmc4xml`, `xml_edit.py` (Edit as XML / Apply XML for them), `cns_chain.py` (.phs model chains), `col_shapes.py` (.col collision shapes) and `cns_chain_preview.py` (chain motion preview, the import wiring between them; `cns_chain_hook.py` = dmc4_hook's `<physics>` solver in it), `movedef/` (MoveDef move XML: schema, byte-exact reader / writer, checks, `.ctn` extraction; pure Python) and `movedef_blender.py` (the Moves panel, see [MoveDef](#movedef-move-files)), `archive.py` (.arc + dmc4 loose files), `__init__.py` (bone anim mapping enums, file-id↔extension hash tables). |
 | `engines/mtfw/structs/` | Kaitai Struct `.ksy` sources and the **generated** read-write `.py` parsers. |
 | `engines/mtfw/efl/` | Fork addition: DMC4 DX9 `.efl` (effects) parser/writer; `edit.py` maps block fields, keyframes and sub-structs to and from custom properties and restructures records. **Pure Python, not Kaitai, relative imports only**, so it runs without Blender. `schema.py` is the single layout table, with an evidence tier per field. `model.py` holds blocks as raw bytes with typed views (exact round-trip). `check.py` has the invariants and corpus coverage, `export_json.py` the JSON dump, `primmodel.py` the PrimModel mesh builders, `ean.py` the `.ean` flipbook tables, `keyframe.py` keyframe curves, `efs.py` `.efs` path curves, `sim.py` the particle simulation, `field_help.py` the plain-language help for every field, `retype.py` block type changes. The Blender import is `engines/mtfw/effect.py`; animated playback is `engines/mtfw/effect_sim.py`; export is `engines/mtfw/effect_export.py`; the editor panel is `engines/mtfw/effect_editor.py`; keyframes as F-curves are `engines/mtfw/effect_keys.py`; the spawn filter is `engines/mtfw/effect_filter.py`; Change Type is `engines/mtfw/effect_retype.py`; `.efs` / `.ean` import / export is `engines/mtfw/effect_efs.py` / `effect_ean.py`. See [EFL](#efl-effects). |
 | `engines/mtfw/defines/shader-objects.json` | Shader-object hashes, regenerated by `scripts/dump_mfx.py` from `.mfx` files. It has no re5 or dmc4 entries; it is used only by the MRL (v21) path. |
@@ -1391,6 +1392,27 @@ Researched 2026-10-05, supported 2026-10-10 (import / export, motion preview). R
   - **Attach to Body** (`albam.phs_attach_to_body`, done by wire_scene for coats): parents the chain's model so its
     joint 0 follows a body joint (2 for Nero's coat: in the game a cCnsMatrix puts coat joint 0 on body joint 2; the
     coat's LMTs don't move joint 0). Without it the coat stays at the origin.
+  - **dmc4_hook's solver** (`cns_chain_hook.py`, 2026-11-10): a chain whose file a scene list's `<physics>` names on
+    its model (`model_ext.physics_entry`: first in list-name order, as the runner) runs Vibed/ModelExt/chain_solver.md
+    instead (the runner's `sdk/ChainSolver.cpp` step by step, Blender axes, rigid frames): one solve per scene frame
+    over T = 60 / fps (max 2), on the runner's last step; cCnsChain::move still runs once a frame (reset state,
+    wind); per-bone limits not used; `ground` ray-casts the scene's `.sbc` meshes (BVH cached), skipped without any.
+    Chain panel box: Use dmc4_hook's Solver / back to the game's, the entry's attributes as `albam_phs.hook_*`
+    get / set props over the list (a fixed default removes the attribute). Format: `ext_list.physics_values` (the
+    runner's clamps; a bad axis drops the entry). Test: `tests/blender/test_chain_physics.py` (30 vs 60 fps exact).
+    Root push (step 5, added by the runner after the coat check): each substep the root, a sphere of radius r, is
+    pushed out of the shapes, and the root's output position is x[root]. `<link>` accepts joints of chains on the
+    solver without a `<chain>` (`model_ext.listed_chains`, as the runner's update_links). Nero's coat (scratch
+    check): 6 chains ~8 ms per frame; roots _02 / _03 start 1.2 cm inside a body shape and come out; mean worst
+    penetration 0.09 cm (the game's solver 0.11). Not checked in the game.
+    **Sheets** (`<cloth roots closed stretch shear bend>`, chain_solver.md "Sheets"): `cns_chain_hook` mirrors the
+    runner's structure (`_Tendril` phases, `solve_set` for one tendril or a sheet, `sheet_links`, `solve_sheet`);
+    `model_ext.cloth_entries` (the runner's order, a later sheet sharing a root dropped) / `cloth_members` (roots ->
+    tendrils of the model's `<physics>` chains) / `cloth_sheets(arm)`; the runner `_Runner.sheets` (only when every
+    member is previewed), solved at the first member root in bone order, other roots' FK from `world_of`. Checks
+    say why a sheet won't run ("can't cross models", no `<physics>`, no such tendril). Coat as a sheet: ~19 ms per
+    frame; mean worst penetration 0.22 cm at 2 iterations (0.14 at 4, 0.12 at 8; alone 0.09). The links run first in
+    each pass since then (runner change after this measurement: 0.53 / 0.30 / 0.20 with the links after the shapes).
   - **Game quirks kept:** mDamping > 1 (Sanctus: 10 / 20) only bounded by mMaxSpeed; mTurbulence never applies at a
     steady 60 fps; a pushed joint position survives only for the chain root, so segments can still clip a capsule
     mid-length in fast motion; mBlend < 1 and bind offsets off the mDir axis change segment lengths.

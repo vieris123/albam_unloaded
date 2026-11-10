@@ -29,6 +29,11 @@ character's movement in the game); mode 1 uses the armature's parent armature wh
 Collision: the shapes of an imported `.col` (col_shapes.py, a COL_ object: spheres / capsules on joints of the body
 model), every group and shape tested in file order as the game does.
 
+A chain a ModelExtension `<physics>` entry names (a scene list, its model and file) runs dmc4_hook's solver instead
+(cns_chain_hook.py, Vibed/ModelExt/chain_solver.md): once per scene frame over the frame's time, with substeps. The
+Chain panel's dmc4_hook box adds, edits and removes that entry. A `<cloth>` joins such tendrils, from any of the
+armature's chains, into one sheet solved together (cns_chain_hook.solve_sheet). `<link>`s run after either solver.
+
 wire_scene connects the pieces after any .mod / .phs / .col import, in any order: a chain or .col waiting for its
 model attaches when it comes, a chain picks up the COL_ object of its default .col (pl000_03_00.phs ->
 pl000_03.col), and a coat model (COAT_BODY_JOINT) is attached to the shapes' body armature at its joint. What's still
@@ -47,6 +52,7 @@ from albam.lib import nla
 from albam.registry import blender_registry
 from albam.engines.mtfw import col_shapes
 from albam.engines.mtfw import cns_chain
+from albam.engines.mtfw import cns_chain_hook
 from albam.engines.mtfw.cns_chain import (ARMATURE_PROP, COLLECTION_PROP, JOINTS_PROP, _stem, attach_chain,
                                           chain_armature, chain_joints, find_chain_armature, _joint_bones)
 
@@ -81,6 +87,9 @@ def _settings(ob):
         "pos_local": bool(ob.get("mPosLocal", False)), "pos_local_y": bool(ob.get("mPosLocalY", False)),
         "rot_local": bool(ob.get("mRotLocal", False)), "wind_local": bool(ob.get("mWindLocal", False)),
         "gravity_local": bool(ob.get("mGravityLocal", False)),
+        # read by dmc4_hook's solver only (cns_chain_hook)
+        "mute_wind": bool(ob.get("mMuteWind", False)), "mute_collision": bool(ob.get("mMuteCollision", False)),
+        "floor_on": f("mFloorLevel", -9999.0) > -9000.0,
     }
 
 
@@ -240,12 +249,16 @@ class _Chain:
         self.rng = random.Random(self.name)
         self.mats = [Matrix.Identity(4) for _ in range(len(self.joints) + 1)]
         self.vel = [Vector() for _ in range(len(self.joints) + 1)]
+        values = _physics(ob)       # a ModelExtension <physics> entry: dmc4_hook's solver (cns_chain_hook)
+        self.hook = cns_chain_hook.Hook(values, self.s) if values is not None else None
         self.reset()
 
     def reset(self):
         self.resetting = RESET_FRAMES
         self.prev_parent = None
         self.turb_timer, self.turb = 0.0, Vector()
+        if self.hook is not None:
+            self.hook.clear()
 
     def move(self, parent, t):
         """per-frame part (0x42DB00): wind with turbulence, the parent frame delta"""
@@ -473,6 +486,26 @@ def _links(arm):
         return []
 
 
+def _cloths(arm):
+    """the live <cloth> sheets on the armature's chains (model_ext.cloth_sheets), [] when a list is broken"""
+    from albam.engines.mtfw.model_ext import cloth_sheets
+    try:
+        return cloth_sheets(arm)
+    except Exception as err:            # noqa: BLE001 - a broken list mustn't stop the chains
+        print(f"PHS preview ({arm.name}): <cloth> skipped: {err}")
+        return []
+
+
+def _physics(ob):
+    """the chain's <physics> settings (movedef.ext_list.physics_values) from the scene's lists, None: the game's solver"""
+    from albam.engines.mtfw.model_ext import physics_settings
+    try:
+        return physics_settings(ob)
+    except Exception as err:            # noqa: BLE001 - a broken list mustn't stop the chains
+        print(f"PHS preview ({ob.name}): <physics> skipped: {err}")
+        return None
+
+
 def _tendril(chain, slot):
     """(root slot, tip slot) of the tendril holding `slot`; the tip's tail point is mats[tip + 1]"""
     root, tip = slot, slot
@@ -563,6 +596,11 @@ class _Runner:
         self.arm_name = arm.name
         self.key = _key(arm, chain_obs)
         self.chains = [(ob.name, _Chain(ob, arm)) for ob in chain_obs]
+        # <cloth> sheets whose members are all previewed here on the hook solver (else their tendrils solve alone)
+        hooked = {chain.name: chain for _, chain in self.chains if chain.hook is not None}
+        self.sheets = [sheet for sheet in _cloths(arm)
+                       if all(c in hooked and hooked[c].joints[s] is not None for c, s in sheet["members"])]
+        self.sheet_of = {member: sheet for sheet in self.sheets for member in sheet["members"]}
         self.cache = {}         # frame -> {bone name: matrix_basis}
         self.last = None
 
@@ -571,7 +609,12 @@ class _Runner:
             chain.reset()
 
     def step(self, scene, steps):
+        """one scene frame: `steps` steps of the game's solver; chains on dmc4_hook's solver (a <physics> entry) solve
+        once, on the last step, over the frame's time (cns_chain_hook)"""
         arm = bpy.data.objects[self.arm_name]
+        hook_time = cns_chain_hook.frame_time(scene)
+        ground = cns_chain_hook.ground_caster(scene) if any(c.hook is not None and c.hook.ground
+                                                           for _, c in self.chains) else None
         owners = {}
         for ob_name, chain in self.chains:
             for slot, name in enumerate(chain.joints):
@@ -599,10 +642,21 @@ class _Runner:
 
         order = [b.name for b in arm.data.bones if b.name in owners]
         links = [link for link in _links(arm) if link[0] in owners and link[1] in owners]
-        for _ in range(steps):
+        by_name = {chain.name: chain for _, chain in self.chains}
+        rank = {name: i for i, name in enumerate(order)}
+        for sheet in self.sheets:
+            sheet["first"] = min((by_name[c].joints[s] for c, s in sheet["members"]), key=lambda n: rank.get(n, 1 << 30))
+        def local_of(name):
+            return _rest_rel(arm.data.bones[name]) @ basis[name]
+
+        for i in range(steps):
+            last = i == steps - 1
             final.clear()
             for ob_name, chain in self.chains:
-                chain.move(_parent_frame(arm, chain.s["parent_mode"]), 1.0)
+                if chain.hook is None:
+                    chain.move(_parent_frame(arm, chain.s["parent_mode"]), 1.0)
+                elif last:      # cCnsChain::move runs as usual (wind, turbulence, the reset state), once a frame
+                    chain.move(_parent_frame(arm, chain.s["parent_mode"]), hook_time)
             shapes_by_chain = {}
             for name in order:
                 chain, slot = owners[name]
@@ -613,7 +667,28 @@ class _Runner:
                 if chain.name not in shapes_by_chain:
                     ob = bpy.data.objects.get(chain.name)
                     shapes_by_chain[chain.name] = _shapes(ob, arm, world_of) if ob is not None else []
-                final[name] = chain.solve(slot, anim, parent_final, arm, 1.0, shapes_by_chain[chain.name])
+                if chain.hook is None:
+                    final[name] = chain.solve(slot, anim, parent_final, arm, 1.0, shapes_by_chain[chain.name])
+                    continue
+                if last and cns_chain_hook.tendril(chain, slot)[0] == slot:     # a tendril root's call solves it
+                    sheet = self.sheet_of.get((chain.name, slot))
+                    if sheet is None:
+                        cns_chain_hook.solve_tendril(chain, slot, anim, arm, local_of, hook_time,
+                                                     cns_chain_hook.capsules(shapes_by_chain[chain.name]), ground)
+                    elif sheet["first"] == name:
+                        # a sheet solves at its first root the pass reaches; the other roots' FK is composed from
+                        # their parents (world_of), their own calls only take their results
+                        members = []
+                        for chain_name, root in sheet["members"]:
+                            member = by_name[chain_name]
+                            if member.name not in shapes_by_chain:
+                                ob = bpy.data.objects.get(member.name)
+                                shapes_by_chain[member.name] = _shapes(ob, arm, world_of) if ob is not None else []
+                            bone_name = member.joints[root]
+                            members.append((member, root, anim if bone_name == name else world_of(bone_name),
+                                            cns_chain_hook.capsules(shapes_by_chain[member.name])))
+                        cns_chain_hook.solve_sheet(members, sheet, arm, local_of, hook_time, ground)
+                final[name] = chain.hook.out.get(slot, anim).copy()
             apply_links(links, owners, final)
         out = {}
         inv = arm.matrix_world.inverted_safe()
@@ -664,13 +739,14 @@ def _animation_key(arm):
 
 
 def _key(arm, chain_obs):
-    parts = [arm.name, repr(_links(arm)), _animation_key(arm)]
+    parts = [arm.name, repr(_links(arm)), repr(_cloths(arm)), _animation_key(arm)]
     for ob in chain_obs:
         s = ob.albam_phs
         parts.append((ob.name, repr(sorted((k, repr(_settings(ob)[k])) for k in _settings(ob))),
                       tuple(chain_joints(ob, [])), _limits_key(ob), s.collision,
                       s.collision_shapes.name if s.collision_shapes else "",
-                      repr(s.collision_shapes.get(ARMATURE_PROP)) if s.collision_shapes else ""))
+                      repr(s.collision_shapes.get(ARMATURE_PROP)) if s.collision_shapes else "",
+                      repr(_physics(ob))))
     return repr(parts)
 
 
@@ -726,6 +802,7 @@ def _on_frame_change_post(scene, depsgraph=None):
 def _on_load(_dummy=None):
     _runners.clear()
     _col_cache.clear()
+    cns_chain_hook.forget_ground()
 
 
 # ---- Shift+D on a chain Empty makes a new chain ---------------------------------------------------------------------
@@ -901,6 +978,50 @@ def _poll_col_root(self, obj):
     return col_shapes.is_col_root(obj)
 
 
+# ---- dmc4_hook's solver: the chain's <physics> entry, edited from the Chain panel ---------------------------------
+# (name, the runner's default when it isn't fixed by the chain file, as written in the list)
+HOOK_ATTRS = (("substeps", "4"), ("iterations", "2"), ("stiffness", "0"), ("pin", "0"), ("inertia", None),
+              ("limit", "0"), ("friction", "0.2"), ("radius", None), ("ground", "false"), ("self", "false"),
+              ("axis", None))
+_HOOK_DEFAULTS = {"substeps": 4, "iterations": 2, "stiffness": 0.0, "pin": 0.0, "inertia": None, "limit": 0.0,
+                  "friction": 0.2, "radius": None, "ground": False, "self": False, "axis": None}
+
+
+def _hook_effective(ob):
+    """the settings the runner solves this chain with (the chain file's where the entry leaves one out)"""
+    hook = cns_chain_hook.Hook(_physics(ob) or _HOOK_DEFAULTS, _settings(ob))
+    return {"substeps": hook.substeps, "iterations": hook.iterations, "stiffness": hook.stiffness, "pin": hook.pin,
+            "inertia": hook.inertia, "limit": hook.limit, "friction": hook.friction,
+            "radius": hook.radius / cns_chain_hook.SCALE, "ground": hook.ground, "self": hook.self, "axis": hook.axis}
+
+
+def _hook_text(name, value):
+    if name == "axis":
+        return cns_chain_hook.AXES[value]
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    return f"{round(value, 4):g}"
+
+
+def _hook_prop(name):
+    default = dict(HOOK_ATTRS)[name]
+
+    def get(self):
+        return _hook_effective(self.id_data)[name]
+
+    def set_(self, value):
+        from albam.engines.mtfw import model_ext
+        text = _hook_text(name, value)
+        model_ext.set_physics_attr(bpy.context, self.id_data, name, None if text == default else text)
+    return {"get": get, "set": set_}
+
+
+_AXIS_ITEMS = [(code, code.upper(), f"The joint's {code.upper()} axis points down the chain", i)
+               for i, code in enumerate(cns_chain_hook.AXES)]
+
+
 @blender_registry.register_blender_props_to_type("Object", "albam_phs")
 class AlbamChainPreview(bpy.types.PropertyGroup):
     preview: bpy.props.BoolProperty(
@@ -915,6 +1036,45 @@ class AlbamChainPreview(bpy.types.PropertyGroup):
         description="Imported collision shapes (a COL_ object from a .col file) the chain collides with. The game "
                     "uses the body's: for Nero's coat, model\\game\\pl000\\pl000_03.col on pl000.mod. Set by itself "
                     "when that file is imported")
+    # dmc4_hook's solver: the attributes of the chain's <physics> entry (Vibed/ModelExt/schema.md), read and written
+    # in its ModelExtension list
+    hook_substeps: bpy.props.IntProperty(
+        name="Substeps", min=1, max=16, **_hook_prop("substeps"),
+        description="Steps per 60 fps frame. More keeps fast moves from carrying a segment through a collision shape")
+    hook_iterations: bpy.props.IntProperty(
+        name="Iterations", min=1, max=8, **_hook_prop("iterations"),
+        description="Constraint passes per step: more holds lengths and collisions more exactly")
+    hook_stiffness: bpy.props.FloatProperty(
+        name="Stiffness", min=0.0, max=1.0, subtype="FACTOR", **_hook_prop("stiffness"),
+        description="Per frame, how far each segment turns toward its animated direction (keeps a skirt's shape)")
+    hook_pin: bpy.props.FloatProperty(
+        name="Pin", min=0.0, max=1.0, subtype="FACTOR", **_hook_prop("pin"),
+        description="Per frame, how far each point moves toward its animated place")
+    hook_inertia: bpy.props.FloatProperty(
+        name="Inertia", min=0.0, max=1.0, subtype="FACTOR", **_hook_prop("inertia"),
+        description="How much of the model's motion the chain lags behind (1 = all of it). Left out of the list: 0 "
+                    "when the chain file follows its parent (Follow Position / Height / Rotation), else 1")
+    hook_limit: bpy.props.FloatProperty(
+        name="Limit", min=0.0, max=180.0, **_hook_prop("limit"),
+        description="Degrees a segment may leave its animated direction (0 = no limit)")
+    hook_friction: bpy.props.FloatProperty(
+        name="Friction", min=0.0, max=1.0, subtype="FACTOR", **_hook_prop("friction"),
+        description="Per frame, the sliding speed a point loses while it touches a shape or the floor")
+    hook_radius: bpy.props.FloatProperty(
+        name="Radius (cm)", min=0.0, **_hook_prop("radius"),
+        description="The segments' radius against the collision shapes, in cm. Left out of the list: the chain "
+                    "file's Collision Radius")
+    hook_ground: bpy.props.BoolProperty(
+        name="Ground", **_hook_prop("ground"),
+        description="Keep every point above the stage floor (the game casts a line per point). The preview uses "
+                    "the scene's imported stage collision (.sbc); without any it skips this")
+    hook_self: bpy.props.BoolProperty(
+        name="Self Collision", **_hook_prop("self"),
+        description="The chain's tendrils push each other apart")
+    hook_axis: bpy.props.EnumProperty(
+        name="Axis", items=_AXIS_ITEMS, **_hook_prop("axis"),
+        description="The joint axis aimed down the chain (+Z works on this solver, the game's can't). Left out of "
+                    "the list: the chain file's Pointing Axis, where 2 means +Z here")
 
 
 # ---- finding and connecting the pieces ----------------------------------------------------------------------------
@@ -1135,6 +1295,107 @@ class ALBAM_OT_PhsSimulateRange(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _chain_of(context):
+    ob = context.object
+    return ob if ob is not None and ob.type == "EMPTY" and ob.albam_asset.extension in ("phs", "clt") else None
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_PhsHookUse(bpy.types.Operator):
+    """Solve this chain with dmc4_hook's solver instead of the game's: adds a <physics> entry for its file and model
+    to a ModelExtension list (the one with its model, else the first, else a new one). The preview follows it"""
+    bl_idname = "albam.phs_hook_use"
+    bl_label = "Use dmc4_hook's Solver"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        from albam.engines.mtfw import model_ext
+        ob = _chain_of(context)
+        return ob is not None and bool(model_ext.chain_model_path(ob)) and \
+            model_ext.physics_entry(context, ob)[0] is None
+
+    def execute(self, context):
+        from albam.engines.mtfw import model_ext
+        root = model_ext.add_physics(context, context.object)
+        self.report({"INFO"}, f"<physics> added to {root.albam_asset.relative_path}")
+        return {"FINISHED"}
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_PhsHookRemove(bpy.types.Operator):
+    """Go back to the game's solver for this chain: removes its <physics> entry from the ModelExtension list"""
+    bl_idname = "albam.phs_hook_remove"
+    bl_label = "Use the Game's Solver"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        from albam.engines.mtfw import model_ext
+        ob = _chain_of(context)
+        return ob is not None and model_ext.physics_entry(context, ob)[0] is not None
+
+    def execute(self, context):
+        from albam.engines.mtfw import model_ext
+        model_ext.remove_physics(context, context.object)
+        return {"FINISHED"}
+
+
+@blender_registry.register_blender_type
+class ALBAM_OT_PhsHookDefault(bpy.types.Operator):
+    """Take this setting out of the <physics> entry, so the runner's default (or the chain file's value) applies"""
+    bl_idname = "albam.phs_hook_default"
+    bl_label = "Use Default"
+    bl_options = {"REGISTER", "UNDO", "INTERNAL"}
+
+    attr: bpy.props.StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+
+    def execute(self, context):
+        from albam.engines.mtfw import model_ext
+        model_ext.set_physics_attr(context, context.object, self.attr, None)
+        return {"FINISHED"}
+
+
+def _draw_hook(layout, context, ob):
+    from albam.engines.mtfw import model_ext
+    box = layout.box()
+    box.label(text="dmc4_hook's Solver (ModelExtension <physics>)", icon="MOD_PHYSICS")
+    root, _, e = model_ext.physics_entry(context, ob)
+    if e is None:
+        box.operator("albam.phs_hook_use", icon="ADD")
+        if not model_ext.chain_model_path(ob):
+            box.label(text="The chain's model has no game path", icon="ERROR")
+        else:
+            box.label(text="Solved by the game's solver", icon="INFO")
+        return
+    row = box.row()
+    row.label(text=f"In {model_ext.file_name(root)}", icon="FILE_TEXT")
+    row.operator("albam.phs_hook_remove", text="", icon="X")
+    settings = ob.albam_phs
+    col = box.column(align=True)
+    for name, _ in HOOK_ATTRS:
+        row = col.row(align=True)
+        row.prop(settings, f"hook_{name}")
+        sub = row.row(align=True)
+        sub.enabled = e.has(name)       # the setting is in the list: it can go back to the default
+        sub.operator("albam.phs_hook_default", text="", icon="LOOP_BACK").attr = name
+    for list_name, path, values in model_ext.cloth_entries(context):
+        members, _ = model_ext.cloth_members(context, path, values)
+        if members and any(member == ob for member, _ in members):
+            box.label(text=f"In a <cloth> sheet of {len(members)} tendrils ({list_name}): it solves with them",
+                      icon="MOD_CLOTH")
+            if max(model_ext.physics_settings(m)["iterations"] for m, _ in members) < 4:
+                box.label(text="A sheet close to the body: Iterations 4 keeps it out of the shapes as well as the "
+                               "game's solver does", icon="INFO")
+    if settings.hook_ground and not cns_chain_hook.stage_meshes(context.scene):
+        box.label(text="Ground: no stage collision (.sbc) in the scene, the preview skips it", icon="INFO")
+    arm = chain_armature(ob)
+    if arm is not None and any(cns_chain.bone_limits(arm.pose.bones[n]) is not None for n in _chain_bone_names(ob)[1]):
+        box.label(text="Per-bone limits (Chain Bone) aren't used by this solver", icon="INFO")
+    if model_ext.physics_settings(ob) is None:
+        box.label(text="The runner drops this entry (its axis isn't x, +x, -x, ...)", icon="ERROR")
+
+
 # ---- panels ---------------------------------------------------------------------------------------------------------
 
 # the chain's settings in the Chain panel, grouped (they're the Empty's custom properties, so each shows its
@@ -1221,6 +1482,8 @@ class ALBAM_PT_PhsChain(bpy.types.Panel):
             row.label(text=f"Model on {body.name}: {arm.parent_bone}" if arm.parent == body else
                       "Model not on the body", icon="CONSTRAINT_BONE")
             row.operator("albam.phs_attach_to_body", text="Attach to Body")
+
+        _draw_hook(layout, context, ob)
 
         box = layout.box()
         row = box.row()

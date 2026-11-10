@@ -192,6 +192,21 @@ The game behaviour is known; Blender only approximates it. The other preview gap
     (1.4 before). **In the game the front folded up at her hips** (2026-11-04): at Blend 1.0 it never recovers after a
     run or a spawn. `dress_00` is now Blend 0.4, gravity 0.1, radius and links kept (both mods and blends; docs/new_model.md
     has the numbers). Not checked in the game yet.
+  - [x] **`<physics>`: dmc4_hook's chain solver** (2026-11-10, runner `sdk/ChainSolver`, not built yet; algorithm
+    `Vibed\ModelExt\chain_solver.md`): the format with the runner's clamps and checks (ranges, bad axis, one entry per
+    model and file), a Physics button on Model entries, the Chain panel's dmc4_hook box (add / remove the entry, its
+    settings), the chain preview running the solver (`cns_chain_hook.py`; ground on imported `.sbc` meshes). Test:
+    `test_chain_physics` (4.2 and 5.4).
+  - [x] **Root push and links on `<physics>` chains** (2026-11-10, after the coat check: the roots of `pl000_03_02` /
+    `_03` start 1.2 cm inside a body shape): the runner pushes roots out of the shapes and links the game's own chains
+    on the solver; Albam mirrors both. Coat mean worst penetration 0.09 cm (the game's solver 0.11).
+  - [x] **`<cloth>` sheets** (2026-11-10, runner not built): format and checks (dropped entries, shared roots, a sheet
+    that can't run and why), panel entry, the preview solving sheets across chain files. Test: `test_chain_physics`.
+  - [ ] **`<physics>` / `<cloth>` in the game:** compare Nero's coat with the preview (the runner's test package has both
+    coats as sheets). As a sheet the coat sinks 0.22 cm into the body shapes on average at 2 iterations (0.09 alone);
+    the runner may add a final shapes-only pass if that shows.
+  - [ ] **Ellen's dress and 2B's seam as sheets** (later): their link rows could become one `<cloth>` per skirt with the
+    chains on `<physics>`. Keep the links until a sheet has been tried in the game.
   - [ ] **2B's front-left file is at Blend 1.0 too**: likely the same in the game; check her after a run.
   - [ ] **`<link min=>`** (would need the runner): a minimum distance held Ellen's front columns apart in a preview
     experiment (gaps 0.9 of rest instead of 0.65); ask the dmc4_hook session if Blend 0.4 isn't enough.
