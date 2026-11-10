@@ -30,7 +30,7 @@ def check(cond, msg):
 
 
 BODY = r"model\game\pl000\pl000.mod"
-REFERENCE = r"E:\modmanager\Games\DMC4\Mods\shape_test\nativePC\shape_test\shape_test"
+REFERENCE = os.path.join(common.DATA, "Vibed", "ShapeTest", "out", "shape_test")   # the in-game test kit's files
 common.skip_unless(os.path.join(common.NERO, BODY))
 scene = bpy.context.scene
 scene.albam.rfs.add_root_folder("dmc4", common.NERO)
@@ -321,11 +321,15 @@ try:
     found = ext_list.issues([("x.xml", bad)])
     check(any("speed" in m for _, _, m in found) and any("extension" in m for _, _, m in found),
           "a non-number speed and a path with an extension are flagged")
-    ref = r"E:\modmanager\Games\DMC4\Mods\shape_test\nativePC\model_ext\shape_test.xml"
-    if os.path.exists(ref):
-        data = open(ref, "rb").read().decode("utf-8-sig")
-        check(ext_list.parse(data).text() == data and not ext_list.issues([("shape_test.xml", ext_list.parse(data))]),
-              "the runner's own shape_test.xml reads back unchanged, no issues")
+    data = """<!-- Shape test: Nero's parts rise and slide (morph targets, Vibed\ShapeTest). -->
+<extensions>
+  <model path="model\game\pl000\pl000">
+    <shape shp="shape_test\shape_test" shw="shape_test\shape_test" speed="1"/>
+  </model>
+</extensions>
+"""     # the runner session's test list (its package is gone)
+    check(ext_list.parse(data).text() == data and not ext_list.issues([("shape_test.xml", ext_list.parse(data))]),
+          "the runner's own shape_test.xml reads back unchanged, no issues")
 except Exception:
     import traceback
     traceback.print_exc()

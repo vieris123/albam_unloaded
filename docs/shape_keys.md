@@ -1,8 +1,9 @@
 # Shape keys in DMC4
 
 DMC4 (DX9) has a morph-target system that no game file uses. Albam exports a model's shape keys into it, and
-dmc4_hook's ModelExtension and MoveDef play them. Status 2026-11-08: the export is done and tested in Blender. The
-hand-made test files morphed in the game; files made by Albam haven't been tried in the game yet.
+dmc4_hook's ModelExtension and MoveDef play them. Status 2026-11-08: works in the game. In the test, Nero's body
+breathed on list 0 and puffed up on Streak's finish through a MoveDef `<shape>` (results in
+`Vibed\RE\shape_morph.md`).
 
 ## What you do
 
@@ -43,6 +44,8 @@ hand-made test files morphed in the game; files made by Albam haven't been tried
 - **Lists are averaged:** when several lists play (list 0 and a clip from a move), each key's weight is the average of
   their curves, weighted by `rate`. A clip playing beside list 0 therefore shares each weight with it. Keys a list
   doesn't animate hold their set value there, so a body shape stays as it is.
-- **One-shot clips:** with `loop="false"` a list holds its last frame, so end a one-shot clip at 0.
+- **One-shot clips** (`loop="false"` on a move's `<shape>`): the runner stops the list when the clip ends, so it
+  drops out of the average and its keys go back to the other lists' values. With `hold="true"` it keeps its last
+  frame until a `<shape_stop>` or another `<shape>` on that list. List 0 (the ModelExtension entry's) is never stopped.
 - **Timing:** clips run at 60 game frames per second from their first key (or the action's manual frame range), at
   the scene's frame rate. They are sampled on every game frame and written as straight-line keys.
