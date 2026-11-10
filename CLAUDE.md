@@ -349,7 +349,9 @@ This reproduces the game's player foot planting (`cLegIkCtrl` + `cCnsIK`, see `V
     nodes; attr from the pixels, `texture_convert.alpha_use`; SH4SPOT + SKIN_NONE / vtype 2, SKIN_4WT / 0 or SKIN_8WT / 1 by
     weights per vertex, normal and specular as found: all keys are in `XfMaterialStandard.bfx`'s table,
     `Vibed/RE/mod153_findings.md`), converts non-DDS images in a slot and refreshes converted ones
-    (`texture_convert.py`: DXT1 / DXT5 / DXT5nm from `lib/dxt.py`, full mips, power-of-two sizes, `albam_recipe` +
+    (`texture_convert.py`: DXT1 / DXT5 / DXT5nm from `lib/dxt.py`, and from an Environment CM image a DDS cube (`CUBE`:
+    a six-face vertical strip keeps its faces, any other image goes on all six; revision 0x13 as the game's `_CM`;
+    `test_env_cube.py`, recipe in `docs/edge_glow.md`), full mips, power-of-two sizes, `albam_recipe` +
     `albam_source_<n>` on the image, re-encoded only if the pixels' crc changed; `.tex` revision by slot,
     `texture._new_tex_revision`; `Tex112CustomProperties` range now defaults to 1, the old 0.7 darkened new textures). A
     mesh with no material still fails at export (only New DMC4 Model gives one; every walk over a model's meshes goes through `joints.model_meshes`, because a `.col`'s capsule tubes are meshes under the armature too). Imported models pass through
@@ -444,7 +446,8 @@ This reproduces the game's player foot planting (`cLegIkCtrl` + `cCnsIK`, see `V
     keys it doesn't animate at their rest value). Refused: vtype other than 0, shader keys without a SKIN_4WT_SHAPE
     shader (`SHADER_KEYS`, from the bfx table). `mesh_prep` transforms keys with the mesh. Blender 5 makes new keys at
     value 1 (4.2: 0). ModelExtension `<shape>` / `<weights>` in `ext_list.py`; MoveDef `<shape>` / `<shape_stop>`
-    (stage events) belong to the runner session. Test: `tests/blender/test_shape_keys.py`. Not tried in the game.
+    (stage events) belong to the runner session. Test: `tests/blender/test_shape_keys.py`. Works in the game
+    (2026-11-08: Nero breathing on list 0, puffing on Streak's finish; results in `Vibed/RE/shape_morph.md`).
 - **.tex**: re5 and dmc4 use `tex_112` / `rtex_112`; the others use `tex_157`.
 - **.sbc**: the byte at offset 3 is 49 (`SBC1`, DMC4 DX9 v18; also re5) or 255 (`Sbc21`, the other games; SE DMC4 files
   are `SBCÿ` too). See [SBC (collision)](#sbc-collision).
@@ -455,8 +458,18 @@ This reproduces the game's player foot planting (`cLegIkCtrl` + `cCnsIK`, see `V
     every track one bone over on a retargeted rig with an extra root first; the "Renamed bones" option that
     worked around it is gone).
   - **Track frames** (`rest_in_parent`, import and export): a track is the joint's local transform in its parent's
-    frame and replaces the rest value (a joint without a track keeps its rest, `motion_runtime_findings.md`), so
-    pose = rest_in_parent^-1 x track. A bone without a parent is relative to the game's model space (`GAME_FRAME`,
+    frame and replaces the rest value, so pose = rest_in_parent^-1 x track. **A joint without a track holds the
+    pose it had when the motion started** (the previous motion's: `uModel::moveMotion` copies every joint's current
+    mQuat / mTrans / mScale under the new motion's tracks; `motion_runtime_findings.md`), not its rest, which Blender
+    shows: an animation made in Blender that leaves joints unkeyed shows them frozen as the motion before left them
+    (the Gunslinger clips left the deform joints 200-215 out, and the knees / hips jerked as the next motion blended
+    in, 2026-11-09). Nero's full-body vanilla blocks key every joint (221 of 231; the rest are upper-body layers that
+    rely on it); location tracks only on 0, 150-153. The Nero rig's export bake keys the joints an action leaves out
+    (`nero_rig_ui.hold_unkeyed`); other animations still need it (ROADMAP). **Joint 0 doesn't turn in vanilla**
+    (3 of 231 blocks rotate it; the body turns on 1 and 13 under it): the rig's bake moves joint 0's rotation into
+    its children (same pose, joint 0 one constant key); the Gunslinger dodges turned it up to 179 deg against
+    30-70 deg counter-turns on 1 / 13, and the body wobbled as they blended into the next motion (fixed by the
+    transfer, confirmed in the game 2026-11-09). A bone without a parent is relative to the game's model space (`GAME_FRAME`,
     +90 deg about X, the rest frame of an imported root); root motion (joint 255) is stored as it is. Until
     2026-10-14 a bone without a parent took its track as an offset from the rest head, so a game model stood joint
     0's rest height (1.22 m on pl006) too high, and one-key location tracks were exported with y / z swapped.
@@ -496,6 +509,16 @@ This reproduces the game's player foot planting (`cLegIkCtrl` + `cCnsIK`, see `V
     - Tracks are built per (bone, property) straight from `action.fcurves` (`_get_export_tracks`), so F-Curve grouping doesn't matter: FBX and Bake Action output works as-is. Order matches the game's files: root motion first, then armature bone order, then rotation > location > scale.
     - Properties other than location/rotation/scale (e.g. `bbone_*`) are skipped and reported, and so are curves on helper bones (`joints.is_helper`:
       Not a Game Joint, `IKP_*`, constraint targets a visual bake keyed along), 2026-10-31.
+    - **Location curves that never move are left out** (`_curve_stays_at`, 2026-11-09), except on bones without a
+      parent and `LOCATION_JOINTS` (0, 150-153, 155 / 156: the only joints Nero's / Dante's vanilla LMTs move; they
+      scale only the finger bases 100, 103, ... 129). A location track replaces the joint's offset from its parent, so
+      a still one only forces bone lengths: the zero keys Blender's I key adds (the Nero rig's Gunslinger clips bent
+      and stretched the own-size Ellen's arms and legs), or another skeleton's proportions a retarget baked in (Gerb /
+      Wall Run / Free Ride / Dante's air dodge: constant offsets on every joint, Nero's shins 5 cm longer). Linear keys'
+      handles (an import never sets them) and Cycles modifiers (a looping import's) don't count as movement. Importing
+      and re-exporting an old LMT cleans it; the 4Hook Mod Pack's five were redone that way (frames, events, end
+      fields and other tracks unchanged, rotations within 0.04 deg; the end fields copied back from the sources, as
+      their zero end_quat would otherwise be filled). Test: `tests/blender/test_lmt_rest_location.py`.
     - **Timing (`ExportTiming`)** converts on the fly and never edits the action:
       - The action is shifted so its first key, or first event, lands on game frame 0.
       - It's scaled from the animation's **Frame Rate** (`source_fps`, per action: 60 for imported, the scene fps for Add Animation) to 60.

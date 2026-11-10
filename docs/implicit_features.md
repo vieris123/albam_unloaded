@@ -31,7 +31,10 @@ Panels mentioned here are in the Properties editor (Object / Bone tabs) unless a
   always helpers.
 - **Export converts a model's new materials and textures by itself** (DMC4 models): a material without the DMC4 shader,
   a PNG / TGA / JPG put in a shader slot, a source image repainted after conversion. The image in the node is replaced
-  by a packed `.dds` (the source stays in the file). New DMC4 Model does this the first time.
+  by a packed `.dds` (the source stays in the file). New DMC4 Model does this the first time. An image in the
+  **Environment CM** slot becomes a cube: a vertical strip of six faces (+X -X +Y -Y +Z -Z from the top) keeps its
+  faces, any other image goes on all six (a flat colour reflects that colour everywhere; see
+  [edge_glow.md](edge_glow.md)).
 - **Rename or reorder bones freely.** Export matches the model's bones by joint number, not name or order. Deleting
   one of the model's own bones is refused, because animations, chains, .col and effects refer to it.
 - **Move a mesh object** (relative to its model's root) and it exports where you see it. Quads, n-gons, UV seams,
@@ -115,14 +118,23 @@ Panels mentioned here are in the Properties editor (Object / Bone tabs) unless a
   - F-Curve groups don't matter, so FBX imports and Bake Action output export as they are.
   - Curves on helper bones (Not a Game Joint, `IKP_…`, constraint targets a visual bake keyed along) are left out
     with a note; only game joints get tracks.
+  - Location keys that never move (the zero ones Blender's I key adds, or another skeleton's bone lengths a retarget
+    baked in) are left out, except on the root and the weapon joints (150-153), the only joints the game's own
+    animations move. A location track sets the joint's distance from its parent, so they gave every model (a character
+    at its own size, too) those bone lengths. Importing and re-exporting an older LMT cleans it the same way.
   - What it adjusted is reported.
   - On the Nero rig (`scripts/nero_rig.py`) and the stand rig (`scripts/stand_rig.py`), actions marked **Bake on
     Export** (by default the ones that key the IK controls or switches; an arm action follows its stand half) are
     baked on a temporary copy: what the constraints make reaches the file, the action keeps only your keys. A
     stand action is baked with the arm action in the same slot of the paired LMT playing, and the other way round.
-    A switch the action doesn't key is baked as it is now, with a note.
+    A switch the action doesn't key is baked as it is now, with a note. On the Nero rig every game joint the
+    action doesn't key (the hidden deform / twist bones, the weapon joints) gets a constant key at the pose Blender
+    shows, because the game would hold such a joint as the previous motion left it. Joint 0 (`root`) is exported
+    without its turn, which goes into `spine_lower` and `hips` (the pose is the same), as the game's own animations
+    keep it.
   - Keys of helper bones (IK controls, poles, Not a Game Joint) don't count for where the clip starts.
-- **Rig switches stay with their animation** (Nero and stand rigs): changing an IK switch (or Follow Nero) while an
+- **Rig switches stay with their animation** (Nero and stand rigs): changing an IK switch (a hand grip on the Nero
+  rig, or Follow Nero) while an
   action that doesn't key it plays keys it, constant, on the action's first frame; putting another action on keys the
   switches of the one before as they were, when it bakes on export. A switch keyed that way follows later changes.
 - **Tracks the armature can't show are kept.** Joints the rig doesn't have (an LMT shared with the character's

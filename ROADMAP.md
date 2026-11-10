@@ -29,6 +29,11 @@ The preview follows the DX9 code for these, but they haven't been compared with 
   (`com\ec024_60v0`), a row gradient (`com\ec001_01v2`), a held glow with End Effect set, and a model particle
   (`ene\ee005_52v0` record 23, fading) with the game.
 
+- [ ] **Edge glow material (2026-11-09, `docs/edge_glow.md`).** A model set up by the guide (additive, black base,
+  flat-colour environment cube converted by export, FresnelFactor f / -f) should show only its outline. Also check
+  whether Fog Enable off keeps fog off the inside, and how much haze `gXfLDR2Offset` leaves. The same settings at
+  runtime (dmc4_hook AfterImage) look right in the game.
+
 - [ ] **Exported collision (`.sbc`).** The writer was rewritten on 2026-10-10 (`engines/mtfw/sbc_bvh.py`). Patch
   an edited stage collision (e.g. `st001-a-00`) and a single-group prop (e.g. `ko904-a00`) into the game: walk on
   floors, run into walls, check footstep sounds (ground material) and any scripted parts (group IDs).
@@ -76,6 +81,14 @@ in the DX9 code before trusting one.
 - [x] **LMT animations in NLA strips reach the previews.** Done 2026-11-04 (`lib/nla.py`): `.col` groups and the
   foot IK fade read the LMT animation on top at the strip's own time, the foot IK ghost mirrors the NLA, the chain
   preview's cache follows it. Test: `test_nla`.
+- [ ] **Joints an animation made in Blender doesn't key leak the previous motion's pose in the game** (found
+  2026-11-09: `uModel::moveMotion` copies the joints' current pose under the new motion's tracks, so an untracked
+  joint stays as the motion before left it, where Blender shows the rest pose). The Nero rig's export bake now keys
+  them (`hold_unkeyed`). Still open for everything else (retargets such as Ellen / 2B, Add Animation without a rig):
+  an export option (per LMT or per animation, on by default for animations not imported from a game file) writing a
+  constant rest track for every game joint without curves, and location for the joints the character's vanilla
+  LMTs move. Imported animations must stay as they are (vanilla upper-body layers leave the legs out on purpose).
+  The same option should move joint 0's turn into its children, as the rig's bake does (vanilla never turns it).
 - [ ] **Picking an LMT row while a strip is tweaked** fails (Blender locks the active action in tweak mode; the
   update callback prints a traceback and has already reset the pose). Exit tweak mode first, or say so in the panel.
 
@@ -109,7 +122,9 @@ The game behaviour is known; Blender only approximates it. The other preview gap
   - **Albam export done 2026-11-08** (`shape_keys.py`, `shape_format.py`, guide `docs/shape_keys.md`, test
     `test_shape_keys`): the .mod export writes the flag / skin 5 / texel layout, `<model>.shp`, `<model>.shw` (rest
     values) and `<model>_<clip>.shw` per shape-key action; ModelExtension `<shape>` / `<weights>`; MoveDef `<shape>` /
-    `<shape_stop>` (runner session's schema entries). **Not tried in the game; the runner's `<shape>` isn't built.**
+    `<shape_stop>` (runner session's schema entries). **Works in the game (2026-11-08)**, results in `Vibed\RE\shape_morph.md`
+    (Nero's body, Breathe looping as list 0, Puff from a MoveDef overlay on Streak's finish). Not confirmed
+    separately: the breathing back at full strength after the one-shot ends (the runner's retire).
   - Open: the sampler's address mode for the map's last column / row (Albam leaves them unused, so it doesn't matter
     for its files); Bezier / Hermite `.shw` keys (Albam bakes linear keys); morphing normals (the game doesn't);
     a preview of the game's averaging of lists by rate (Blender sums keys).
