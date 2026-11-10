@@ -617,7 +617,7 @@ def rest_in_parent(bone, joint):
     The bone's rest transform in its parent's frame, which is the frame its LMT tracks are stored in, or None for
     root motion (joint 255, stored as it is). A joint without a parent is relative to the game's model space
     (GAME_FRAME): its location track is its full position, which replaces the rest position in the game (a joint
-    without a track keeps its rest value, `motion_runtime_findings.md`). Until 2026-10-14 such bones used the track
+    without a track holds the pose it had when the motion started, `motion_runtime_findings.md`). Until 2026-10-14 such bones used the track
     as an offset from the rest head, so a game model's root (joint 0) stood its rest height (1.22 m on pl006) too high
     """
     if bone.parent:
@@ -930,6 +930,24 @@ ROTATION_PROPS = ('rotation_quaternion', 'rotation_euler', 'rotation_axis_angle'
 TRACK_PROP_ORDER = {'rotation': 0, 'location': 1, 'scale': 2}
 
 
+LOCATION_JOINTS = (0, 150, 151, 152, 153, 155, 156)   # the joints Nero's and Dante's vanilla LMTs move
+
+
+def _curve_stays_at(fc, value, tolerance=1e-4):
+    """the curve is `value` everywhere: every key on it, and the handles of the Bezier segments (an import's linear
+    keys keep handles it never set), no modifiers but Cycles (a looping import's, which repeats it)"""
+    if any(mod.type != 'CYCLES' for mod in fc.modifiers):
+        return False
+    keys = fc.keyframe_points
+    for i, k in enumerate(keys):
+        if abs(k.co[1] - value) >= tolerance:
+            return False
+        if k.interpolation == 'BEZIER' and i + 1 < len(keys) and (
+                abs(k.handle_right[1] - value) >= tolerance or abs(keys[i + 1].handle_left[1] - value) >= tolerance):
+            return False
+    return True
+
+
 def _get_export_tracks(action, armature, notes):
     """
     [(bone name, property, {array_index: fcurve})], one per exported track, ordered like the
@@ -979,6 +997,26 @@ def _get_export_tracks(action, armature, notes):
         for key in [k for k in tracks if k[0] in helpers]:
             del tracks[key]
         notes.append(f"{action.name}: no tracks for the helper bones {', '.join(helpers)} (not game joints)")
+
+    # a location track replaces the joint's offset from its parent, so one that never moves only gives every model the
+    # animated rig's bone lengths: the rest offsets Blender's I key keys, or another skeleton's proportions a retarget
+    # baked in (Gerb / Wall Run: shins 5 cm longer than Nero's). The game's player LMTs move only LOCATION_JOINTS; a
+    # joint left without a track keeps the offset it has, which outside those joints is the model's own
+    still = []
+    for (bone_name, prop), channels in tracks.items():
+        bone = armature.data.bones.get(bone_name)
+        if prop != 'location' or bone is None or bone_name == ROOT_MOTION_BONE_NAME or bone.parent is None:
+            continue
+        joint = bone.get('mtfw.anim_retarget')
+        if joint is None or int(joint) in LOCATION_JOINTS:
+            continue
+        if all(fc.keyframe_points and _curve_stays_at(fc, fc.keyframe_points[0].co[1]) for fc in channels.values()):
+            still.append(bone_name)
+    for bone_name in still:
+        del tracks[(bone_name, 'location')]
+    if still:
+        notes.append(f"{action.name}: no location tracks for {len(still)} bones whose location never moves (they "
+                     "would give every model these bone lengths)")
 
     bone_order = {bone.name: i for i, bone in enumerate(armature.data.bones)}
 
