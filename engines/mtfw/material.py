@@ -1282,7 +1282,8 @@ def _cube_uv_group():
 
 def _env_cube_display(nt, group, record):
     """Environment cube (texCUBE(reflect) in the game): rgb / max(a, 1/255) * EnvMapPower * mask
-    * (1 - sat(FresnelFactor * facing^5 + FresnelBias)), added as emission. Only for specular STANDARD / RIM (NONE
+    * (1 - sat(FresnelFactor * (2 - facing)^5 + FresnelBias)), added as emission (the shader's view vector runs from
+    the eye, so its 1 - N.V is 1 at the silhouette and 2 face-on). Only for specular STANDARD / RIM (NONE
     has no specular term, MIRROR samples the screen instead, POWMAP's shaders sample a gloss map in the environment
     map's place)."""
     if record.func_specular in (0, 2, 3):
@@ -1319,7 +1320,8 @@ def _env_cube_display(nt, group, record):
     inv_alpha = math("DIVIDE", 1.0, math("MAXIMUM", env.outputs["Alpha"], 1 / 255, (x + 200, y - 120)), (x + 360, y - 120))
     facing = nt.nodes.new("ShaderNodeLayerWeight")
     facing.location = (x + 200, y - 300)
-    fresnel = math("MULTIPLY", math("POWER", facing.outputs["Facing"], 5.0, (x + 360, y - 300)),
+    toward = math("SUBTRACT", 2.0, facing.outputs["Facing"], (x + 280, y - 360))
+    fresnel = math("MULTIPLY", math("POWER", toward, 5.0, (x + 360, y - 300)),
                    float(record.fresnel_factor[0]), (x + 520, y - 300))
     fresnel = math("ADD", fresnel, float(record.fresnel_factor[1]), (x + 680, y - 300))
     keep = nt.nodes.new("ShaderNodeMath")

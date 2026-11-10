@@ -9,6 +9,10 @@ What each kind becomes follows the DX9 files (3,674 .tex under arctool):
   the display group flips it back (`Flip Normal Green`). `flip_green` is for maps already made the DirectX way.
 - MASK: specular colour, DXT1 (`_MM`, revision 0x2). From a specular image, or 1 - roughness when there's none, or
   their product.
+- CUBE: the environment cube (`_CM`, revision 0x13 like the game's `_CM` files), six square faces, DXT1 or DXT5 by the
+  alpha (the shader divides the colour by it). A vertical strip of six faces (+X -X +Y -Y +Z -Z from the top, the way
+  imported cubes are shown) gives each face its own pixels; any other image is used for all six faces, so one flat
+  colour makes a cube that reflects that colour everywhere.
 All have full mip chains, power-of-two sizes (3,668 of the files; other sizes are moved to the nearest) and a
 colour range of 1 (`Tex112CustomProperties`). Revisions are set by `texture._new_tex_revision`, from the slot.
 
@@ -26,10 +30,12 @@ import numpy as np
 from albam.lib import dxt
 from albam.lib.dds import DDSHeader
 
-BASE, NORMAL, MASK = "BASE", "NORMAL", "MASK"
-_KINDS = {BASE: ("_BM", "sRGB"), NORMAL: ("_NM", "Non-Color"), MASK: ("_MM", "Non-Color")}
+BASE, NORMAL, MASK, CUBE = "BASE", "NORMAL", "MASK", "CUBE"
+_KINDS = {BASE: ("_BM", "sRGB"), NORMAL: ("_NM", "Non-Color"), MASK: ("_MM", "Non-Color"), CUBE: ("_CM", "sRGB")}
 SOCKET_KINDS = {"Diffuse BM": BASE, "Lightmap LM": BASE, "Normal NM": NORMAL, "Detail DNM": NORMAL,
-                "Specular MM": MASK, "Alpha Mask AM": MASK, "Special Map": MASK}
+                "Specular MM": MASK, "Alpha Mask AM": MASK, "Special Map": MASK, "Environment CM": CUBE}
+CUBE_FACES = 6
+MIN_CUBE_FACE = 4      # one DXT block
 MAX_SIZE = 4096        # the largest DX9 textures; larger ones are shrunk
 RECIPE_PROP = "albam_recipe"
 SOURCE_PROP = "albam_source_{}"
@@ -114,6 +120,8 @@ def _normal_pixels(sources, flip_green):
 
 
 def _mask_pixels(sources, channels):
+    if len(sources) < 2:   # a specular image alone (put in the mask slot)
+        sources, channels = list(sources) + [None], list(channels) + [None]
     specular = read_pixels(sources[0]) if sources[0] is not None else None
     roughness = read_pixels(sources[1]) if sources[1] is not None else None
     if specular is None and roughness is None:
@@ -127,6 +135,22 @@ def _mask_pixels(sources, channels):
     return np.concatenate((rgb, np.full(rgb.shape[:2] + (1,), 255, np.uint8)), axis=2)
 
 
+def _cube_pixels(sources):
+    """a vertical strip of six square faces (+X -X +Y -Y +Z -Z from the top): the source's own faces when it is such a
+    strip, else the source on every face"""
+    px = read_pixels(sources[0])
+    if px is None:
+        return None
+    h, w = px.shape[:2]
+    if h == CUBE_FACES * w:
+        faces = [px[i * w:(i + 1) * w] for i in range(CUBE_FACES)]
+    else:
+        faces = [px] * CUBE_FACES
+    size = min(max(dxt.nearest_power_of_two(max(faces[0].shape[:2])), MIN_CUBE_FACE), MAX_SIZE)
+    faces = [_fit(face, (size, size)) for face in faces]
+    return np.concatenate(faces, axis=0)
+
+
 def alpha_use(px):
     """how a base texture's alpha looks: NONE (opaque), TEST (cut-outs) or BLEND (mostly half transparent)"""
     alpha = px[..., 3]
@@ -138,16 +162,24 @@ def alpha_use(px):
 
 def _dds_bytes(px, kind):
     normal = kind == NORMAL
-    fourcc = b"DXT1" if kind == MASK or (kind == BASE and px[..., 3].min() >= 250) else b"DXT5"
-    levels = dxt.mip_chain(px, normal=normal)
-    if normal:
-        levels = [np.stack((np.full(lv.shape[:2], 255, np.uint8), lv[..., 1], np.full(lv.shape[:2], 255, np.uint8),
-                            lv[..., 0]), axis=2) for lv in levels]
+    fourcc = b"DXT1" if kind == MASK or (kind in (BASE, CUBE) and px[..., 3].min() >= 250) else b"DXT5"
     h, w = px.shape[:2]
-    header = DDSHeader(dwHeight=h, dwWidth=w, pixelfmt_dwFourCC=fourcc, dwMipMapCount=len(levels))
+    if kind == CUBE:   # a DDS cube: each face with its mips, in face order
+        h = w
+        faces = [dxt.mip_chain(px[i * w:(i + 1) * w]) for i in range(CUBE_FACES)]
+        data = b"".join(dxt.encode(level, fourcc) for levels in faces for level in levels)
+        count = len(faces[0])
+    else:
+        levels = dxt.mip_chain(px, normal=normal)
+        if normal:
+            levels = [np.stack((np.full(lv.shape[:2], 255, np.uint8), lv[..., 1], np.full(lv.shape[:2], 255, np.uint8),
+                                lv[..., 0]), axis=2) for lv in levels]
+        data = b"".join(dxt.encode(level, fourcc) for level in levels)
+        count = len(levels)
+    header = DDSHeader(dwHeight=h, dwWidth=w, pixelfmt_dwFourCC=fourcc, dwMipMapCount=count)
     header.set_constants()
-    header.set_variables(compressed=True)
-    return bytes(header) + b"".join(dxt.encode(level, fourcc) for level in levels)
+    header.set_variables(compressed=True, cubemap=kind == CUBE)
+    return bytes(header) + data
 
 
 def _make_image(name, px, kind):
@@ -182,11 +214,14 @@ def convert(kind, sources, channels=None, flip_green=False, use_alpha=True):
         px = _base_pixels(sources, channels, use_alpha)
     elif kind == NORMAL:
         px = _normal_pixels(sources, flip_green)
+    elif kind == CUBE:
+        px = _cube_pixels(sources)
     else:
         px = _mask_pixels(sources, channels)
     if px is None:
         return None, None
-    px = _game_size(px)
+    if kind != CUBE:   # a cube's faces are sized already
+        px = _game_size(px)
     crc = zlib.crc32(px.tobytes())
     use = alpha_use(px) if kind == BASE else "NONE"
     recipe = {"kind": kind, "channels": channels, "flip_green": flip_green, "use_alpha": use_alpha, "crc": crc}

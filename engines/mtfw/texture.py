@@ -547,15 +547,15 @@ def serialize_textures(app_id, bl_materials):
 
 def _new_tex_revision(dict_tex, dds_header):
     """the revision of a texture with no source file, by the slot it's used in (DX9 files: 0x22 colour, 0x32 normal,
-    2 mask)"""
+    2 mask, 0x13 environment cube, 0x23 other cubes)"""
     from .material import _group_socket_name
-    if dds_header.image_count > 1:
-        return 0x23
     for _mat, node in dict_tex["materials"].values():
         socket = _group_socket_name(node.outputs["Color"])
+        if dds_header.image_count > 1:
+            return 0x13 if socket == "Environment CM" else 0x23
         if socket in TEX_REVISION_BY_SOCKET:
             return TEX_REVISION_BY_SOCKET[socket]
-    return 0x22
+    return 0x23 if dds_header.image_count > 1 else 0x22
 
 
 def _serialize_texture_156(app_id, dict_tex):

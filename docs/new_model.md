@@ -70,6 +70,7 @@ modifier and the vertex groups are what skinning uses, so keep those.
 | Specular image | mask map (specular colour) |
 | Roughness image | mask map, as 1 - roughness (multiplied with a Specular image if there's both). Channels of packed images are followed through a Separate Color node |
 | Roughness value | the specular highlight's sharpness |
+| An image plugged into the DMC4 group's Environment CM | environment cube (see [edge_glow.md](edge_glow.md)): a strip of six faces, or one image for all six |
 
 Not used (the panel says so): Bump nodes (the game takes normal maps), Metallic and Emission maps. A material with no
 Specular or Roughness image has no specular at all.
