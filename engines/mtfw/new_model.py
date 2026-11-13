@@ -254,6 +254,85 @@ def _alpha_source(nt, shader):
     return None, None
 
 
+def _pbr_value(shader, names, default, mat, notes):
+    """(constant, image node, channel) of a Principled input for a PBR material: an image (constant 1, the image
+    scaled by it) or the input's value. names: the input's names across Blender versions"""
+    socket = next((shader.inputs.get(n) for n in names if shader is not None and shader.inputs.get(n) is not None),
+                  None)
+    if socket is None:
+        return default, None, None
+    if socket.is_linked:
+        node, channel = _upstream(socket)
+        if node is not None and node.image is not None:
+            return 1.0, node, channel
+        notes.append(f"{mat.name}: its {socket.name} comes from nodes that aren't an image; "
+                     f"{socket.default_value:.2f} is used")
+    return float(socket.default_value), None, None
+
+
+def _occlusion_source(nt):
+    """(image node, channel) of the occlusion map in the glTF Material Output node Blender's glTF importer makes"""
+    for node in nt.nodes:
+        tree = getattr(node, "node_tree", None)
+        if node.type == "GROUP" and tree is not None and tree.name.lower().startswith("gltf") and \
+                "Occlusion" in node.inputs:
+            found, channel = _upstream(node.inputs["Occlusion"])
+            if found is not None and found.image is not None:
+                return found, channel
+    return None, None
+
+
+def _pbr_material(mat, nt, shader, group, x, y, functions, notes):
+    """the PBR part of a conversion (pbr.py): ORM mask / additional map images linked to the group, and the
+    record's values {name: value}. None if dmc4_hook has no PBR shader for these functions (classic then)."""
+    from . import pbr
+    rough, rough_node, rough_ch = _pbr_value(shader, ("Roughness",), 0.5, mat, notes)
+    metal, metal_node, metal_ch = _pbr_value(shader, ("Metallic",), 0.0, mat, notes)
+    level, _node, _ch = _pbr_value(shader, ("Specular IOR Level", "Specular"), 0.5, mat, [])
+    if _node is not None:
+        notes.append(f"{mat.name}: a specular map isn't used by PBR materials; its strength is "
+                     f"{pbr.DEFAULT_F0 / pbr.F0_PER_LEVEL:.2f}")
+        level = pbr.DEFAULT_F0 / pbr.F0_PER_LEVEL
+    weight, weight_node, weight_ch = _pbr_value(shader, ("Subsurface Weight", "Subsurface"), 0.0, mat, notes)
+    radius_in = shader.inputs.get("Subsurface Radius") if shader is not None else None
+    radius = tuple(radius_in.default_value) if radius_in is not None else (1.0, 0.2, 0.1)
+    occ_node, occ_ch = _occlusion_source(nt)
+    sss = weight_node is not None or weight > 0
+    functions = dict(functions, func_lighting=4 if sss else 2)
+    reason = pbr.unsupported_reason(functions)
+    if reason is not None:
+        notes.append(f"{mat.name}: made a classic material: {reason}")
+        return None
+
+    nodes = [n for n in (occ_node, rough_node, metal_node) if n is not None]
+    if nodes:
+        image = texture_convert.convert(
+            texture_convert.ORM, [n.image if n is not None else None for n in (occ_node, rough_node, metal_node)],
+            [occ_ch, rough_ch, metal_ch])[0]
+        if image is None:
+            notes.append(f"{WARNING}{mat.name}: can't read its roughness / metal / occlusion images (missing files?)")
+            rough = 1.0 if rough_node is not None else rough   # NullWhite reads 1
+            metal = 0.0 if metal_node is not None else metal
+        else:
+            node = _image_node(nt, image, nodes[0], (x, y - 600))
+            nt.links.new(node.outputs["Color"], group.inputs["Specular MM"])
+    scatter = (1.0, 1.0, 1.0)
+    if sss:
+        scatter = pbr.scatter_from_principled(1.0 if weight_node is not None else weight, radius)
+        if weight_node is not None:
+            image = texture_convert.convert(texture_convert.ADDITIONAL, [None, weight_node.image],
+                                            [None, weight_ch])[0]
+            if image is None:
+                notes.append(f"{WARNING}{mat.name}: can't read {weight_node.image.name} (a missing file?)")
+            else:
+                node = _image_node(nt, image, weight_node, (x, y - 900))
+                nt.links.new(node.outputs["Color"], group.inputs["Alpha Mask AM"])
+    return {"func_lighting": pbr.THIN if sss else pbr.SH4SPOT, "func_specular": pbr.RIM,
+            "envmap_bias": pbr.ENV_BIAS, "fresnel_factor": (rough, metal, level * pbr.F0_PER_LEVEL,
+                                                             pbr.DEFAULT_REFLECTION),
+            "lightmap_factor": scatter + (0.0,) if sss else pbr.DEFAULT_LIGHTMAP_FACTOR}
+
+
 def _specular_power(shader):
     """SpecularPow for a shader's Roughness: the display's roughness = sqrt(2 / (power + 2)) turned around"""
     rough = shader.inputs.get("Roughness") if shader is not None else None
@@ -289,8 +368,9 @@ def _prune(nt, output):
             nt.nodes.remove(node)
 
 
-def convert_material(mat, skinned, weights, notes, flip_green=False):
-    """give mat the MT Framework shader group and DMC4 properties, from what its shader shows (see the module doc)"""
+def convert_material(mat, skinned, weights, notes, flip_green=False, pbr=False):
+    """give mat the MT Framework shader group and DMC4 properties, from what its shader shows (see the module doc).
+    pbr: a PBR material for dmc4_hook's PbrMaterials (pbr.py) where it has a shader, else classic"""
     from . import material as mtfw_material
     mat.use_nodes = True
     nt = mat.node_tree
@@ -312,7 +392,7 @@ def convert_material(mat, skinned, weights, notes, flip_green=False):
     rough_in = shader.inputs.get("Roughness") if shader is not None else None
     rough, rough_channel = _upstream(rough_in) if rough_in is not None else (None, None)
     power = _specular_power(shader)
-    for name in ("Metallic", "Emission Color", "Emission"):
+    for name in ("Emission Color", "Emission") if pbr else ("Metallic", "Emission Color", "Emission"):
         socket = shader.inputs.get(name) if shader is not None else None
         if socket is not None and socket.is_linked and _upstream_image(socket) is not None:
             notes.append(f"{mat.name}: its {name.lower()} map isn't used (the game has no slot for it)")
@@ -360,10 +440,15 @@ def convert_material(mat, skinned, weights, notes, flip_green=False):
             nt.links.new(node.outputs["Alpha"], group.inputs["Alpha NM"])
             has_normal = True
 
+    vtype, func_skin = shader_functions(skinned, weights)
+    functions = {"func_skin": func_skin, "func_lighting": 2, "func_normalmap": int(has_normal), "func_specular": 4,
+                 "func_lightmap": 0, "func_multitexture": 0}
+    pbr_values = _pbr_material(mat, nt, shader, group, x, y, functions, notes) if pbr else None
+
     has_mask = False
     spec_image = specular.image if specular is not None else None
     rough_image = rough.image if rough is not None else None
-    if spec_image is not None or rough_image is not None:
+    if pbr_values is None and (spec_image is not None or rough_image is not None):
         image = texture_convert.convert(texture_convert.MASK, [spec_image, rough_image],
                                         [spec_channel, rough_channel])[0]
         if image is not None:
@@ -373,7 +458,6 @@ def convert_material(mat, skinned, weights, notes, flip_green=False):
     _prune(nt, output)
 
     props = mat.albam_custom_properties.get_custom_properties_for_appid(APP_ID)
-    vtype, func_skin = shader_functions(skinned, weights)
     props.vtype = hex(vtype)
     props.func_skin = hex(func_skin)
     props.func_lighting = "0x2"      # SH4SPOT
@@ -383,6 +467,10 @@ def convert_material(mat, skinned, weights, notes, flip_green=False):
     props.func_multitexture = "0x0"
     props.attr, props.alpha_ref = ATTR[use]
     props.fresnel_factor = (0.0, 0.0, power, 0.0)   # no fresnel loss, no environment map
+    props.lightmap_factor = (1.0, 1.0, 1.0, 0.0)
+    props.envmap_bias = 0
+    for name, value in (pbr_values or {}).items():
+        setattr(props, name, value)
     record = SimpleNamespace()
     props.copy_custom_properties_to(record)
     mtfw_material.setup_dmc4_material(record, mat)
@@ -602,17 +690,22 @@ def update_model(root, default_material=False):
             weights = _weights_per_vertex(mesh_ob, joint_names) if skinned else 0
             to_convert[mat] = max(to_convert.get(mat, 0), weights)
     for mat, weights in to_convert.items():
-        convert_material(mat, skinned, weights, notes, flip_green)
-        notes.append(f"{mat.name}: converted to a DMC4 material")
+        convert_material(mat, skinned, weights, notes, flip_green, pbr=root.albam_mod.pbr)
+        kind = "PBR " if mat.albam_custom_properties.get_custom_properties_for_appid(APP_ID).func_specular == "0x4" \
+            else ""
+        notes.append(f"{mat.name}: converted to a DMC4 {kind}material")
         _prepare_images(mat, folder, notes)
+    from . import pbr
     for mat in ready:
         _update_images(mat, flip_green, notes)
         _prepare_images(mat, folder, notes)
+        pbr.update_display(mat)   # PBR materials set by hand or saved before the preview had PBR inputs
     return notes
 
 
-def setup_new_model(context, ob, path, normal_directx=False):
-    """Make a new DMC4 model of ob (see root_candidate) at game path `path`. Returns (root, notes)."""
+def setup_new_model(context, ob, path, normal_directx=False, pbr=True):
+    """Make a new DMC4 model of ob (see root_candidate) at game path `path`; pbr: its materials become PBR materials
+    (model_settings.AlbamModSettings.pbr). Returns (root, notes)."""
     path = path.strip().replace("/", "\\")
     if not path.lower().endswith(".mod"):
         path += ".mod"
@@ -669,6 +762,7 @@ def setup_new_model(context, ob, path, normal_directx=False):
     split_meshes(root, notes)
     if normal_directx:
         root["mod_normal_directx"] = 1
+    root.albam_mod.pbr = pbr
     notes += update_model(root, default_material=True)
     set_light_group(root.albam_mod, DEFAULT_LIGHT_GROUP)
     set_lod_distances(root.albam_mod, *DEFAULT_LOD)
@@ -704,6 +798,11 @@ class ALBAM_OT_ModNew(bpy.types.Operator):
         name="DirectX Normal Maps",
         description="Turn on if the model's normal maps are made the DirectX way (green pointing down, usual for "
                     "models taken from other games). Off for maps that look right in Blender's Normal Map node")
+    pbr: bpy.props.BoolProperty(
+        name="PBR Materials", default=True,
+        description="Convert the materials to PBR (roughness, metal, occlusion and subsurface from the Principled "
+                    "BSDF), drawn by dmc4_hook's PbrMaterials. Off: the game's own shading, which works without "
+                    "dmc4_hook")
 
     @classmethod
     def poll(cls, context):
@@ -720,7 +819,7 @@ class ALBAM_OT_ModNew(bpy.types.Operator):
         if context.object is not None and context.object.mode != "OBJECT":
             bpy.ops.object.mode_set(mode="OBJECT")
         try:
-            root, notes = setup_new_model(context, context.object, self.path, self.normal_directx)
+            root, notes = setup_new_model(context, context.object, self.path, self.normal_directx, self.pbr)
         except AlbamCheckFailure:
             bpy.ops.albam.error_handler_popup("INVOKE_DEFAULT")
             return {"CANCELLED"}
@@ -772,6 +871,7 @@ class ALBAM_PT_NewModel(bpy.types.Panel):
             notes = root.get("mod_new_notes", "")
             layout.label(text=f"Model: {root.albam_asset.relative_path}", icon="OBJECT_DATA")
             layout.operator("albam.mod_update", icon="FILE_REFRESH")
+            layout.prop(root.albam_mod, "pbr")
             if root.type == "ARMATURE":
                 layout.operator("albam.match_skeleton", icon="ARMATURE_DATA")
             for note in notes.split("\n") if notes else []:

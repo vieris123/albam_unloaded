@@ -85,6 +85,8 @@ class Hook:
         radius = values["radius"]
         self.radius = [r * SCALE for r in _values(radius)] if radius is not None else [s["radius"]]
         self.ground = values["ground"]
+        self.backstop = bool(values.get("backstop", False))     # V2.4: contacts push toward the animated side
+        self.damp_world = bool(values.get("damp_world", False))  # V2.5: damping toward zero world speed
         self.self = values["self"]
         self.axis = values["axis"] if values["axis"] is not None else min(max(s["dir"], 0), 5)
         self.up = s["up"] % 3
@@ -94,7 +96,18 @@ class Hook:
         self.seen = set()           # nodes with a previous animated place
         self.anim_prev = {}
         self.ref_prev = {}          # tendril root -> the reference frame at its last solve
+        self.shapes_prev = {}       # tendril root -> the shapes [(a, b, r)] at its last solve (V2.6)
         self.out = {}               # slot -> the joint's last result (world, rigid)
+        self.solved = {}            # slot -> the point after the last solve (V2.7: the solver's own state)
+        self.written = {}           # slot -> what output() put in mats[slot] (the drawn position)
+
+    def state_point(self, chain, k):
+        """V2.7: node k's point to start from: the solver's own while mats[k] still holds what output() wrote, else
+        mats[k] (another writer: the game's solver, a reset)"""
+        drawn = chain.mats[k].translation
+        if k in self.solved and (drawn - self.written[k]).length < 1e-3 * SCALE:
+            return self.solved[k].copy()
+        return drawn.copy()
 
 
 def frame_time(scene):
@@ -215,17 +228,20 @@ class _Tendril:
         # 3. points
         self.x, self.v = {}, {}
         for k in nodes:
-            self.x[k] = a[k].copy() if self.reset else chain.mats[k].translation.copy()
+            self.x[k] = a[k].copy() if self.reset else hook.state_point(chain, k)
             self.v[k] = Vector() if self.reset else chain.vel[k].copy()
             if self.reset or k not in hook.seen:
                 hook.anim_prev[k] = a[k].copy()
             hook.seen.add(k)
         self.x[root] = a[root].copy()
+        if self.reset:
+            hook.shapes_prev.pop(root, None)
 
         # 4. inertia (V2.3): the parts of the reference frame's turn and move the points are carried by, and the
         # previous animated pose with them, so the substep targets start where the carried points are
         ref = chain.parent
         self.ref_rot = ref.to_3x3()
+        self.carry = None               # (origin, turn, shift) when this solve carries: the last shapes go with it
         if not self.reset:
             turn_part = 1.0 - min(max(hook.inertia_turn, 0.0), 1.0)
             move_part = 1.0 - min(max(hook.inertia_move, 0.0), 1.0)
@@ -235,6 +251,7 @@ class _Tendril:
                 p0 = prev.translation.copy()
                 turn = Quaternion().slerp((r1 @ r0.transposed()).to_quaternion(), turn_part).to_matrix()
                 shift = (ref.translation - p0) * move_part
+                self.carry = (p0, turn, shift)
                 for k in range(root + 1, tail + 1):
                     self.x[k] = p0 + turn @ (self.x[k] - p0) + shift
                     self.v[k] = turn @ self.v[k]
@@ -246,7 +263,8 @@ class _Tendril:
         self.wind = Vector() if s["mute_wind"] else chain.wind.copy()
         if s["wind_local"]:
             self.wind = self.ref_rot @ self.wind
-        self.shapes = [] if s["mute_collision"] else list(shapes)
+        self.shapes_to = [] if s["mute_collision"] else [(sa.copy(), sb.copy(), sr) for sa, sb, sr in shapes]
+        self.shapes_from = self.shapes = self.shapes_to
         self.old, self.contact, self.touched = {}, {}, {}
         self.at = {k: hook.anim_prev[k].copy() for k in nodes}      # the substep targets, before the first
         self.planes, self.others = {}, []
@@ -259,8 +277,21 @@ class _Tendril:
         return 0.0 if k == self.root else 1.0
 
     def gather(self, ground):
-        """before the substeps: the ground under each point, the other tendrils' segments with their radii (self)"""
+        """before the substeps: the shapes' start (V2.6), the ground under each point, the other tendrils' segments with
+        their radii (self)"""
         x, a = self.x, self.a
+        # V2.6: the substeps move the shapes from where they were at the last solve, carried like the points, to where
+        # they are now (taken once at the frame's pose, a leg's whole frame of motion hit the points in the first
+        # substep). None before (first solve, a reset, another shape count): as now throughout
+        prev = self.hook.shapes_prev.get(self.root)
+        self.shapes_from = self.shapes_to
+        if prev is not None and len(prev) == len(self.shapes_to):
+            if self.carry is not None:
+                p0, turn, shift = self.carry
+                prev = [(p0 + turn @ (pa - p0) + shift, p0 + turn @ (pb - p0) + shift, pr) for pa, pb, pr in prev]
+            self.shapes_from = [(pa, pb, now[2]) for (pa, pb, _), now in zip(prev, self.shapes_to)]
+        self.hook.shapes_prev[self.root] = self.shapes_to
+        self.shapes = self.shapes_to
         self.planes = {}
         if self.hook.ground and ground is not None:
             for k in range(self.root + 1, self.tail + 1):
@@ -279,16 +310,21 @@ class _Tendril:
                 if o_root in self.neighbours:
                     continue
                 span = o_tip + 1 - o_root
-                self.others.append((chain.mats[k].translation.copy(), chain.mats[k + 1].translation.copy(),
+                self.others.append((self.hook.state_point(chain, k), self.hook.state_point(chain, k + 1),
                                     along(radius, (k - o_root) / span), along(radius, (k + 1 - o_root) / span)))
 
     def begin_substep(self, h, f):
-        """targets, root push, forces: damping toward the animated speed, then gravity and wind (V2.3)"""
+        """targets, root push, forces: damping toward the animated speed (V2.3; zero world speed with damp_to="world",
+        V2.5), then gravity and wind"""
         hook, x, v, root, r = self.hook, self.x, self.v, self.root, self.r
         self.fric = _per_step(hook.friction, h)
         self.lams, self.alpha_t = {}, 1.0 / (h * h)
         at_prev = self.at
         self.at = {k: hook.anim_prev[k].lerp(self.a[k], f) for k in range(root, self.tail + 1)}
+        if self.shapes_from is not self.shapes_to:
+            self.shapes = [(fa.lerp(ta, f), fb.lerp(tb, f), tr)
+                           for (fa, fb, _), (ta, tb, tr) in zip(self.shapes_from, self.shapes_to)]
+        self.old[root] = x[root].copy()         # where the root was, for V2.4's side (before its target and push)
         x[root] = self.at[root].copy()
         # root push: the root, a sphere of its radius, out of every shape (the game keeps a root's push too; Nero's
         # coat roots _02 / _03 sit inside a body shape at bind and would hold their first segment in it)
@@ -299,7 +335,7 @@ class _Tendril:
             if pen > 0.0:
                 x[root] = x[root] + _unit(d, UP) * pen
         for k in range(root + 1, self.tail + 1):
-            va = (self.at[k] - at_prev[k]) / h
+            va = Vector() if hook.damp_world else (self.at[k] - at_prev[k]) / h
             v[k] = va + (v[k] - va) * (1.0 - self.damping[k]) ** h
             v[k] = v[k] + (self.g * self.gravity[k] + self.wind) * h
             self.old[k] = x[k].copy()
@@ -332,10 +368,22 @@ class _Tendril:
             for ca, cb, cr in self.shapes:
                 u, w = _closest(x[k], x[k + 1], ca, cb)
                 p, q = x[k].lerp(x[k + 1], u), ca.lerp(cb, w)
-                pen = r[k] + (r[k + 1] - r[k]) * u + cr - (p - q).length
+                ru = r[k] + (r[k + 1] - r[k]) * u
+                pen = ru + cr - (p - q).length
                 if pen <= 0.0:
                     continue
                 n = _unit(p - q, _unit(x[k + 1] - ca, UP))
+                # V2.4: a point that crossed to the other side of the shape from its reference is pushed out on the
+                # reference's side. The reference is where the segment was at the substep's start (a tunnelled point
+                # goes back where it entered), or with backstop its animated place (a stuck strip comes back: Ellen's
+                # skirt behind a thigh, 2026-11-11; opt-in, since long coat tails swinging round the legs get thrown
+                # across them)
+                ra, rb = (at[k], at[k + 1]) if self.hook.backstop else (self.old[k], self.old[k + 1])
+                ua, wa_ = _closest(ra, rb, ca, cb)
+                side = ra.lerp(rb, ua) - ca.lerp(cb, wa_)
+                if (p - q).dot(side) < 0.0 and side.length > 1e-4 * SCALE:
+                    n = side.normalized()
+                    pen = ru + cr - (p - q).dot(n)
                 wa, wb = (0.0 if k == root else 1.0 - u), u
                 den = wa * wa + wb * wb
                 if den < 1e-6:
@@ -469,7 +517,13 @@ class _Tendril:
             out.translation = F.translation.lerp(pos, blend)
             hook.out[k] = out
             chain.mats[k] = out.copy()
+            hook.written[k] = out.translation.copy()
+        # V2.7: the solver keeps its own points; mBlend only shapes what's drawn (fed back, it snapped the points
+        # 1 - mBlend of the way to the FK every frame while their speeds stayed the solver's)
+        for k in range(root, tail + 1):
+            hook.solved[k] = x[k].copy()
         chain.mats[tail].translation = x[tail]
+        hook.written[tail] = x[tail].copy()
         for k in range(root + 1, tail + 1):
             chain.vel[k] = v[k]
 
@@ -526,6 +580,8 @@ def solve_set(members, cloth, T, ground):
     covers. Every soft constraint (links, stiffness, pin, stretch) is XPBD: its lambda starts at 0 each substep."""
     if not members:
         return
+    if T <= 0.0 and not any(t.reset for t in members):
+        return      # nothing stepped: the joints keep their stored result (the game's pause, RE note 3.2b; step 6)
     substeps = max(min(max(t.hook.substeps, 1), 16) for t in members)
     iterations = max(min(max(t.hook.iterations, 1), 8) for t in members)
     if T > 0.0 and not any(t.reset for t in members):

@@ -104,7 +104,7 @@ try:
     cube.data.materials.append(principled_material("CrateMat", image))
     check(bpy.ops.albam.mod_new.poll(), "New DMC4 Model is offered on a plain mesh")
     n_objects = len(bpy.data.objects)
-    res = bpy.ops.albam.mod_new("EXEC_DEFAULT", path=r"model\game\crate\crate.mod")
+    res = bpy.ops.albam.mod_new("EXEC_DEFAULT", path=r"model\game\crate\crate.mod", pbr=False)
     root = cube.parent
     check(res == {"FINISHED"} and root is not None and root.type == "EMPTY" and root.name == "crate",
           f"it puts the cube under a new Empty root ({root and root.name})")
@@ -137,6 +137,8 @@ try:
             return self
         def operator(self, idname, **_):
             self.texts.append(idname)
+        def prop(self, data, name, **_):
+            self.texts.append(name)
     layout = Layout()
     check(new_model.ALBAM_PT_NewModel.poll(bpy.context), "the DMC4 Model panel shows on the new model")
     new_model.ALBAM_PT_NewModel.draw(type("P", (), {"layout": layout})(), bpy.context)
@@ -184,7 +186,7 @@ try:
     empty = bpy.data.objects.new("lonely", None)
     scene.collection.objects.link(empty)
     try:
-        new_model.setup_new_model(bpy.context, empty, r"model\game\lonely\lonely.mod")
+        new_model.setup_new_model(bpy.context, empty, r"model\game\lonely\lonely.mod", pbr=False)
         check(False, "a model with no meshes is refused")
     except AlbamCheckFailure as err:
         check("no meshes" in err.message, f"a model with no meshes is refused ({err.message})")
@@ -223,7 +225,7 @@ try:
         o.select_set(False)
     arm.select_set(True)
     bpy.context.view_layer.objects.active = arm
-    rig_root, notes = new_model.setup_new_model(bpy.context, arm, r"model\game\rig\rig.mod")
+    rig_root, notes = new_model.setup_new_model(bpy.context, arm, r"model\game\rig\rig.mod", pbr=False)
     check(rig_root == arm and body.parent == arm, "the rig is the root and adopts the mesh it deforms")
     check([joints.joint_of(arm.data.bones[n]) for n in ("hip", "spine", "head")] == [0, 1, 2],
           "its bones become joints 0, 1, 2 in bone order")

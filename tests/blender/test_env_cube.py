@@ -56,7 +56,7 @@ try:
     ob.name = "glow_mesh"
     ob.data.materials.append(mat)
     bpy.context.view_layer.objects.active = ob
-    root, _notes = new_model.setup_new_model(bpy.context, ob, r"model\game\glow\glow.mod")
+    root, _notes = new_model.setup_new_model(bpy.context, ob, r"model\game\glow\glow.mod", pbr=False)
 
     # the recipe: black albedo, white mask, the glow colour as the environment, the edge fresnel
     flat = png("glow_colour", 8, 8, lambda y: (*GLOW, 1.0))

@@ -185,6 +185,29 @@ except Exception as err:        # noqa: BLE001
 check(drawn, "the Chain panel's dmc4_hook box draws")
 
 
+# a skin attachment's model matrix is its owner's (dmc4_hook ModelAttach: mpParent = the owner): the chain's
+# reference frame follows the armature its bones follow (ALBAM_FollowBody), as its own object stands still
+owner_data = bpy.data.armatures.new("owner")
+owner = bpy.data.objects.new("owner", owner_data)
+scene.collection.objects.link(owner)
+context.view_layer.objects.active = owner
+bpy.ops.object.mode_set(mode="EDIT")
+owner_data.edit_bones.new("hips").tail = (0.0, 0.0, 0.1)
+bpy.ops.object.mode_set(mode="OBJECT")
+owner.location = (1.0, 2.0, 0.0)
+owner.rotation_euler = (0.0, 0.0, 0.5)
+context.view_layer.update()
+follow = arm.pose.bones["hips"].constraints.new("COPY_TRANSFORMS")
+follow.name, follow.target, follow.subtarget = model_ext.FOLLOW, owner, "hips"
+frame = cns_chain_preview._parent_frame(arm, 0)
+check((frame.translation - owner.location).length < 1e-6
+      and abs(frame.to_euler().z - 0.5) < 1e-6, "an attachment's reference frame is its owner's")
+arm.pose.bones["hips"].constraints.remove(follow)
+check(cns_chain_preview._parent_frame(arm, 0).translation.length < 1e-6, "without one, its own")
+bpy.data.objects.remove(owner)
+context.view_layer.objects.active = chain
+
+
 def runner():
     return cns_chain_preview._runners.get(arm.name)
 
@@ -425,6 +448,129 @@ dist = (points[2].lerp(points[3], u) - centre).length
 taper = (want[2] + (want[3] - want[2]) * u) * cns_chain_hook.SCALE
 check(abs(dist - taper) < 1e-3, f"a shape keeps the segment's tapered radius ({dist * 100:.2f} cm at u {u:.2f}, "
                                 f"wants {taper * 100:.2f})")
+
+# V2.4: a strand trapped on the far side of a shape comes back to its animated side (Ellen's skirt behind a thigh).
+# The animated strand hangs straight down at x = 0, clear of a sphere at x = 5 cm; the solved one starts behind it.
+def trap(backstop):
+    """the tip after 120 frames of a strand started on the far side of a sphere its animated pose clears"""
+    fake, fake_arm = fake_chain({"radius": 0.5, "stiffness": 0.3, "backstop": backstop},
+                                gravity=Vector((0.0, 0.0, -0.001)))
+    run(fake, fake_arm, frames=1)                               # the first solve copies the animation
+    trapped = [Vector((0, 0, 0)), Vector((0.06, 0, -0.08)), Vector((0.10, 0, -0.17)), Vector((0.12, 0, -0.27))]
+    for k, p in enumerate(trapped):
+        fake.mats[k].translation = p
+        fake.vel[k] = Vector()
+    centre = Vector((0.05, 0.0, -0.15))
+    return run(fake, fake_arm, shapes=[(centre, centre, 0.04)], frames=120)
+
+
+points = trap(True)
+check(max(abs(p.x) for p in points) < 0.02 and points[3].z < -0.25,
+      f"backstop: a strand trapped behind a shape comes back to its animated side (tip x {points[3].x * 100:.1f} cm, "
+      f"z {points[3].z * 100:.1f})")
+points = trap(False)
+check(points[3].x > 0.08, f"without backstop it stays where it went (tip x {points[3].x * 100:.1f} cm)")
+backstop = ext_list.parse('<extensions><model path="m"><physics clt="c" backstop="true"/></model></extensions>')
+check(ext_list.physics_values(backstop.elems[-1])["backstop"] and not ext_list.physics_values(ext_list.parse(
+      '<extensions><model path="m"><physics clt="c"/></model></extensions>').elems[-1])["backstop"],
+      "backstop= parses, off by default")
+
+
+# V2.5: damp_to="world" slows the points toward standing still instead of toward the animated motion (Ellen's skirt,
+# animated rigid to the hips through the legs). The root is carried 1 cm a frame sideways; full damping.
+def trailing(damp_world):
+    """how far the tip trails the root, in x, after 60 frames of the root moving +x"""
+    fake, fake_arm = fake_chain({"damping": [1.0], "damp_world": damp_world, "inertia": 1.0},
+                                gravity=Vector((0.0, 0.0, -0.001)))
+    for f in range(60):
+        cns_chain_hook.solve_tendril(fake, 0, Matrix.Translation((0.01 * f, 0.0, 0.0)), fake_arm,
+                                     lambda n: Matrix.Translation((0.0, 0.0, -0.1)), 1.0, [], None)
+    return fake.mats[0].translation.x - fake.mats[3].translation.x
+
+
+animated, world = trailing(False), trailing(True)
+check(abs(animated) < 0.01 and world > 0.1,
+      f"damp_to animation keeps up with the moving root (tip {animated * 100:.2f} cm behind), world lags it "
+      f"({world * 100:.1f} cm behind)")
+
+
+def damp_to(value):
+    text = '<physics clt="c"/>' if value is None else f'<physics clt="c" damp_to="{value}"/>'
+    e = ext_list.parse(f'<extensions><model path="m">{text}</model></extensions>').elems[-1]
+    values = ext_list.physics_values(e)
+    return None if values is None else values["damp_world"]
+
+
+check((damp_to(None), damp_to("animation"), damp_to("world"), damp_to("World")) == (False, False, True, None),
+      "damp_to= parses: animation by default, world, anything else drops the entry (the runner matches exactly)")
+d = ext_list.parse('<extensions><model path="m"><physics clt="c" damp_to="still"/></model></extensions>')
+check(any(level == "error" and "damp_to" in m for level, _, m in ext_list.issues([("d.xml", d)])),
+      "a bad damp_to is an error in Check")
+
+
+# V2.6: the shapes move across the substeps from where they were at the last solve. A sphere moves 4 cm a frame into
+# a hanging strand (a leg into Ellen's skirt); taken at the frame's pose, its whole frame of motion hit the strand in
+# the first substep, which left far faster than the sphere moves.
+def sweep(v26):
+    """the fastest any point moves after a frame (cm per frame) while a sphere moves in +x into the strand"""
+    fake, fake_arm = fake_chain({"radius": 0.5, "stiffness": 0.3}, gravity=Vector((0.0, 0.0, -0.001)),
+                                max_speed=100.0)
+    gather = cns_chain_hook._Tendril.gather
+
+    def as_now(self, ground):
+        gather(self, ground)
+        self.shapes_from = self.shapes_to       # V2.5: the shapes as now in every substep
+    if not v26:
+        cns_chain_hook._Tendril.gather = as_now
+    try:
+        fastest = 0.0
+        for f in range(12):
+            centre = Vector((min(-0.15 + 0.04 * f, -0.03), 0.0, -0.2))     # 3.5 cm into the strand, then held
+            run(fake, fake_arm, shapes=[(centre, centre, 0.06)], frames=1)
+            fastest = max(fastest, max(v.length for v in fake.vel))
+    finally:
+        cns_chain_hook._Tendril.gather = gather
+    return fastest * 100
+
+
+moved, jumped = sweep(True), sweep(False)
+check(moved < 4.0 * 2.0 and jumped > moved * 2.0,
+      f"V2.6: a sphere moving 4 cm a frame into the strand pushes it at {moved:.1f} cm a frame; taken as now in every "
+      f"substep it threw it at {jumped:.1f}")
+fake, fake_arm = fake_chain({"radius": 0.5})
+centre = Vector((0.0, 0.0, -0.15))
+run(fake, fake_arm, shapes=[(centre, centre, 0.03)], frames=2)
+check(len(fake.hook.shapes_prev.get(0, [])) == 1, "the last solve's shapes are kept per tendril")
+run(fake, fake_arm, shapes=[(centre, centre, 0.03), (centre, centre, 0.02)], frames=1)
+check(len(fake.hook.shapes_prev[0]) == 2, "a different shape count starts again from the shapes as now")
+
+# V2.7: the solver keeps its own points; mBlend shapes only the drawn matrices. A strand pushed by a sphere with
+# mBlend 0.5: the drawn joint sits halfway to the FK, the next solve starts from the solved point (fed back, the drawn
+# one snapped the strand back every frame while its speed stayed the solver's), and from the matrix when another
+# writer changed it.
+fake, fake_arm = fake_chain({"radius": 0.5, "pin": 0.0}, blend=0.5, gravity=Vector())
+centre = Vector((-0.02, 0.0, -0.2))
+run(fake, fake_arm, shapes=[(centre, centre, 0.03)], frames=3)
+solved, drawn = fake.hook.solved[2], fake.mats[2].translation.copy()
+
+
+def start_point(k):
+    t = cns_chain_hook._Tendril(fake, 0, Matrix.Identity(4), fake_arm, lambda n: Matrix.Translation((0, 0, -0.1)),
+                                1.0, [])
+    return t.x[k]
+
+
+check((solved - drawn).length > 0.005 and (start_point(2) - solved).length < 1e-9,
+      f"V2.7: with mBlend 0.5 the drawn joint is {(solved - drawn).length * 100:.1f} cm from the solved point, and the "
+      "next solve starts from the solved one")
+fake.mats[2].translation = drawn + Vector((0.0, 0.01, 0.0))     # another writer (the game's solver, a reset)
+check((start_point(2) - fake.mats[2].translation).length < 1e-9, "when something else wrote the joint, from the joint")
+chain.albam_phs.hook_damp_to = "world"
+check(model_ext.physics_entry(context, chain)[2].get("damp_to") == "world"
+      and cns_chain_preview._hook_effective(chain)["damp_to"] == "world", "Damp To in the Chain panel writes the list")
+chain.albam_phs.hook_damp_to = "animation"
+check(cns_chain_preview._hook_effective(chain)["damp_to"] == "animation"
+      and not model_ext.physics_entry(context, chain)[2].has("damp_to"), "and back to the default removes it")
 
 print("FAILURES:", failures)
 sys.exit(1 if failures else 0)

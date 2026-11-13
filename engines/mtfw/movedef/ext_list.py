@@ -128,16 +128,25 @@ ELEMENTS["physics"] = (
                                  "with the animation and a free swing dies down. Lower = livelier, higher = calmer. "
                                  "Absent: 1 - the chain file's Damping, at least 0.1 (its 1.0 would never lose speed "
                                  "on this solver)." + _ALONG),
+    Attr("damp_to", "dampto", "animation", "What damping slows the points toward. animation: the animated motion, so "
+                                           "the chain keeps up with it. world: standing still, so the chain lags its "
+                                           "model like the game's chains (a skirt animated only rigid to the hips, "
+                                           "which runs through the legs: Ellen's)"),
     Attr("gravity", "curve", "1", "Times the chain file's gravity, -100 to 100 (1 = as it is)." + _ALONG),
     Attr("radius", "curve", "", "The segments' radius against the collision shapes, in cm, up to 1000. Absent: the "
                                 "chain file's collision radius (mCollisionSize)." + _ALONG + ' ("6 2": 6 cm at '
                                 "the root, 2 at the tail; a segment tapers between its ends)"),
     Attr("ground", "bool", "false", "true: every point stays above the stage floor (a line cast per point per frame)"),
     Attr("self", "bool", "false", "true: the chain's tendrils push each other apart"),
+    Attr("backstop", "bool", "false", "true: a point caught on the far side of a collision shape is pushed out on the "
+                                      "side its animated place is on, so a skirt strip stuck behind a leg comes back. "
+                                      "Off: it goes back the way it came (long coat tails swinging round the legs get "
+                                      "thrown across them with it on)"),
     Attr("axis", "axis", "", "The joint axis aimed down the chain: x, +x, -x, ... (+z works here, the game's solver "
                              "can't). Absent: the chain file's mDir"),
 )
 RANGES = {("physics", "substeps"): (1, 16), ("physics", "iterations"): (1, 8)}
+DAMP_TO = ("animation", "world")    # <physics damp_to=>, matched exactly as the runner does (V2.5)
 # the <physics> settings along the tendril (chain_solver.md V2.2) and the runner's clamps (parse_curve)
 CURVE_RANGES = {"stiffness": (0.0, 1.0), "pin": (0.0, 1.0), "limit": (0.0, 180.0), "damping": (0.0, 1.0),
                 "radius": (0.0, 1000.0), "gravity": (-100.0, 100.0)}
@@ -269,6 +278,8 @@ def _check_elem(d, e, say):
             number = joint_number(e, a.name)
             if number is None or not 0 <= number <= 255:
                 say("error", f"<{e.tag}> {a.name}=\"{value}\": a joint number, 0-255")
+        elif a.kind == "dampto" and value not in DAMP_TO:
+            say("error", f"<{e.tag}> {a.name}=\"{value}\": animation or world, the game drops the entry")
         elif a.kind == "axis" and value.lower() not in AXES:
             say("error", f"<{e.tag}> {a.name}=\"{value}\": x, +x, -x, y, ... ")
         elif a.kind in ("blend", "unit"):
@@ -471,8 +482,8 @@ def cloth_values(e):
 def physics_values(e):
     """A <physics> entry's settings as the runner reads them (ModelExtension.cpp parse_physics): clamped; inertia /
     inertia_move / inertia_turn / damping / radius / axis None when absent (from the chain file or inertia), the
-    settings along the tendril (CURVE_RANGES) lists of 1-8 values. None when the runner drops the entry (no clt, a bad
-    axis, a list that isn't 1-8 numbers)."""
+    settings along the tendril (CURVE_RANGES) lists of 1-8 values, damp_world from damp_to. None when the runner drops
+    the entry (no clt, a bad axis or damp_to, a list that isn't 1-8 numbers)."""
     if not e.get("clt", "").strip():
         return None
     out = {}
@@ -494,6 +505,10 @@ def physics_values(e):
     out["friction"] = number("friction", float, 0.2, 0.0, 1.0)
     out["ground"] = is_true(e.get("ground", "false"))
     out["self"] = is_true(e.get("self", "false"))
+    out["backstop"] = is_true(e.get("backstop", "false"))
+    if e.has("damp_to") and e.get("damp_to") not in DAMP_TO:
+        return None
+    out["damp_world"] = e.get("damp_to", "animation") == "world"
     out["axis"] = None
     if e.has("axis"):
         out["axis"] = axis_code(e.get("axis"))

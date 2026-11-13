@@ -294,6 +294,16 @@ This reproduces the game's player foot planting (`cLegIkCtrl` + `cCnsIK`, see `V
     lightmap_factor), LIGHTMAP_SHADOW -> Specular MM x shadow map red, POWMAP -> no env cube (`_extend_mtfw_shader_lighting`
     adds the inputs, also to groups in older .blend files). `_group_socket_name` (export) prefers a texture's direct
     link to the group, so a texture may also feed other inputs. Test: `tests/blender/test_material_display.py`.
+  - **PBR materials** (`engines/mtfw/pbr.py`, 2026-11-15; format owned by dmc4_hook's shader,
+    `D:\dmc4_hook\src\dev\pbr\material_pbr.inc` header, plan `Vibed\PBR\README.md`): PBR = func_specular RIM (no
+    other flag), envmap_bias 5, fresnel_factor = (roughness scale, metal scale, F0, reflection strength), mask = ORM,
+    SSS = lighting THIN + lightmap_factor scatter colour, additional map R thickness / G scatter mask. Only
+    `pbr.PBR_KEYS` (70 keys, 28 shaders the hook replaces) are allowed; `check_material_153` refuses other RIM keys.
+    Conversion (`new_model._pbr_material`, on by `Object.albam_mod.pbr`, default True) packs ORM / ADDITIONAL
+    (`texture_convert`); the display group's third extension (`_extend_mtfw_shader_pbr`: inputs PBR, PBR Roughness /
+    Metal / Specular, Subsurface DMC4 / Radius DMC4) is set by `pbr.update_display`, also run by `update_model` for
+    ready materials. Material panel DMC4 PBR (`Material.albam_pbr` get / set fields, Make PBR / Make Classic). Don't
+    change a field's meaning without the shader's owner. Test: `tests/blender/test_pbr_material.py`.
   - Bone palettes hold at most 32 bones.
   - **Bones** (`joints.py`, `mesh._serialize_joint_layout`, 2026-10-16; v153 / v156): the bone table follows the
     armature. The source file's bones keep their index, matched by joint number (`mtfw.anim_retarget`), with their
@@ -1385,7 +1395,10 @@ Researched 2026-10-05, supported 2026-10-10 (import / export, motion preview). R
     (`albam.phs_simulate_range`) fills the scene range. The cache key includes what animates the armature and its
     parents (`_animation_key`: `nla.state`, 2026-11-04); before, switching actions or editing the NLA replayed
     cached poses of the old animation.
-  - **Parent frame:** the armature object times its `root_motion` bone (mParentMode 1: its parent armature's).
+  - **Parent frame:** the armature object times its `root_motion` bone (mParentMode 1: its parent armature's). A skin
+    attachment's is its owner's (`_model_holder`: the armature its `ALBAM_FollowBody` constraints follow; in the game
+    the attachment hangs under its owner, ModelAttach mpParent = owner, parent number -1). Until 2026-11-10 its own
+    armature object, which stands still, so Local flags / inertia never carried Ellen's or 2B's skirt.
   - **Collision:** `albam_phs.collision_shapes` = a COL_ object (set by wire_scene); the shapes as the objects have
     them now (`col_shapes.build_col`, once per frame; the source file if an edit is broken) are placed on their
     armature each step, every shape in file order.
@@ -1433,6 +1446,30 @@ Researched 2026-10-05, supported 2026-10-10 (import / export, motion preview). R
     against the saved version 1); radius 6 2 tapers (test); Nero's coat as a sheet (run + spin): 0.119 cm mean worst
     penetration, settles 105 frames after the spin (version 1's sheet never did), with inertia_turn 1 still swinging a
     second later. The coat's outer front tails alone (_00, _05) keep moving ~0.3-0.4 cm a frame in both versions.
+    **V2.4 / V2.5** (2026-11-11, Ellen's skirt): the runner skips output when no time passed (`solve_set` returns at
+    T <= 0 without a reset: the game's pause). A contact whose point crossed to the far side of the shape from its
+    reference is pushed out on the reference's side: the segment where it was at the substep's start (`old`, the
+    root's recorded before its target / push), or with `backstop="true"` its animated place (frees a strip stuck
+    behind a thigh; throws coat tails across the legs, so opt-in). `damp_to="world"` damps toward zero world speed
+    instead of the animated speed (`Hook.damp_world`; the runner matches "animation" / "world" exactly, anything
+    else drops the entry). Ellen's skirt (MMD, animated rigid to the hips) folded over the standing leg in a run
+    with every other setting: its animated pose runs through the thigh, and damping toward it dragged the strips in;
+    world damping lags like the game's solver (study numbers in chain_solver.md V2.5).
+    **V2.6** (2026-11-12): shapes move across the substeps. Each tendril keeps the shapes of its last stepped solve
+    (`Hook.shapes_prev`, dropped on a reset); the next solve carries them with its own carry (`_Tendril.carry`) and
+    substep f uses mix(carried, now, f), the radius as now (`gather` / `begin_substep`). Before this, a leg's whole
+    frame of motion hit the points in the first substep (test: a sphere 4 cm a frame into a strand, 5.0 vs 13.9 cm a
+    frame). Replay of the user's 600-frame recording (scratch `replay_v26.py`, the runner's output step rebuilt from
+    the skirt's locals) found the larger cause: output stores mix(F, x, mBlend) as the next solve's points while the
+    speeds stay the solver's, so mBlend 0.4 snapped 60 % back each frame (front tails reversing on ~23 % of frames;
+    keeping the solved points as state, blend only drawn: ~2 %).
+    **V2.7** (2026-11-12, the runner's answer): the solver keeps its own points. `Hook.solved[k]` (x after the solve,
+    root..tail) and `Hook.written[k]` (what output() put in mats[k]); `Hook.state_point` starts a solve (and self
+    collision's segment ends) from `solved` while mats[k] still holds `written` (1e-3 cm), else from mats[k] (another
+    writer: the game's solver, a reset); mBlend shapes only the drawn matrices, speeds unchanged. mBlend 1 (every coat
+    file) changes nothing. Coat run + spin: the settle time is chaotic, not a V2.6 effect: V2.6's carried shapes differ
+    from the current ones by 2.4e-5 cm there, and shapes nudged by 1e-9 m swing the motion 60 frames after the spin from
+    0.21 to 3.23 cm a frame (penetration 0.119 / 0.120 cm either way). Compare such runs over several seeds.
   - **Game quirks kept:** mDamping > 1 (Sanctus: 10 / 20) only bounded by mMaxSpeed; mTurbulence never applies at a
     steady 60 fps; a pushed joint position survives only for the chain root, so segments can still clip a capsule
     mid-length in fast motion; mBlend < 1 and bind offsets off the mDir axis change segment lengths.

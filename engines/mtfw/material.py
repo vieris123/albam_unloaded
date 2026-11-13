@@ -1141,13 +1141,14 @@ def setup_dmc4_material(record, bl_mat):
     if record.func_lightmap == 2 and "Use Specular Color" in group.inputs:
         _shadow_masks_specular(nt, group)
 
-    if "Emission DMC4" in group.inputs:
+    pbr = record.func_specular == 4   # SPECULAR_RIM = a dmc4_hook PbrMaterials material (pbr.py)
+    if "Emission DMC4" in group.inputs and not pbr:
         _env_cube_display(nt, group, record)
 
     if "Unlit" in group.inputs:
         # LIGHTING_NONE: no light is read; the colour is albedo x lightmap / vertex colour (and the env term)
         group.inputs["Unlit"].default_value = 1 if record.func_lighting == 0 else 0
-    if record.func_lighting == 4 and "Translucency" in group.inputs:
+    if record.func_lighting == 4 and "Translucency" in group.inputs and not pbr:
         _thin_translucency(nt, group, record)
 
     if record.func_lightmap in LIGHTMAP_VCOLOR and not group.inputs["Lightmap LM"].links:
@@ -1157,6 +1158,9 @@ def setup_dmc4_material(record, bl_mat):
         out = _scaled_color(nt, vc.outputs["Color"], factor, None, (vc.location[0] + 200, vc.location[1]))
         nt.links.new(out, group.inputs["Lightmap LM"])
         group.inputs["Use Lightmap"].default_value = 1
+
+    from . import pbr as pbr_materials
+    pbr_materials.update_display(bl_mat)
 
 
 def _shadow_masks_specular(nt, group):
@@ -1378,6 +1382,12 @@ def check_material_153(name, record):
         problems.append(f"func_lightmap {lightmap} needs vtype 2 (TEXCOORD2), has {vtype}")
     if lightmap in LIGHTMAP_VCOLOR and vtype not in (3, 5):
         problems.append(f"func_lightmap {lightmap} (vertex colour) needs vtype 3 or 5, has {vtype}")
+    if record.func_specular == 4 and not problems:   # SPECULAR_RIM = PBR (pbr.py): only keys dmc4_hook replaces
+        from . import pbr
+        reason = pbr.unsupported_reason({field: getattr(record, field) for field in FUNC_RADIX_153})
+        if reason is not None:
+            problems.append(f"it's a PBR material (specular RIM), but {reason}: the game would draw a rim light. "
+                            "Use Make Classic in its DMC4 PBR panel, or change its functions")
     if problems:
         raise AlbamCheckFailure(
             f"Material {name} can't be drawn by DMC4", details="; ".join(problems),
@@ -1673,6 +1683,7 @@ def _extend_mtfw_shader_lighting(shader_group):
       the light reaching the back face (-N.L, and the ambient toward -N) times the additional map's red and
       LightMapScale, before the albedo."""
     if "Unlit" in [i.name for i in _group_inputs(shader_group)]:
+        _extend_mtfw_shader_pbr(shader_group)
         return
     sg = ShaderGroupCompat(shader_group, "OLD" if bpy.app.version[0] <= 3 else "NEW")
     sg.new_socket("Unlit", in_out="INPUT", socket_type="NodeSocketInt")
@@ -1733,6 +1744,102 @@ def _extend_mtfw_shader_lighting(shader_group):
     links.new(lit.outputs[0], switch.inputs[1])
     links.new(unlit.outputs[0], switch.inputs[2])
     links.new(switch.outputs[0], group_out.inputs[0])
+    _extend_mtfw_shader_pbr(shader_group)
+
+
+def _extend_mtfw_shader_pbr(shader_group):
+    """Third set of added inputs (2026-11-15, PBR materials: pbr.py), defaults keep the old look:
+    - PBR: 1 = the mask is ORM (R occlusion, G roughness, B metal): roughness = G x PBR Roughness, metallic = B x PBR
+      Metal, the base colour x R (Blender has no occlusion input), Specular IOR Level = PBR Specular, a white
+      specular tint, subsurface from Subsurface DMC4 / Subsurface Radius DMC4 (pbr.update_display sets them)."""
+    if "PBR" in [i.name for i in _group_inputs(shader_group)]:
+        return
+    sg = ShaderGroupCompat(shader_group, "OLD" if bpy.app.version[0] <= 3 else "NEW")
+    sg.new_socket("PBR", in_out="INPUT", socket_type="NodeSocketInt")
+    sg.new_socket("PBR Roughness", in_out="INPUT", socket_type="NodeSocketFloat")
+    sg.new_socket("PBR Metal", in_out="INPUT", socket_type="NodeSocketFloat")
+    sg.new_socket("PBR Specular", in_out="INPUT", socket_type="NodeSocketFloat")
+    sg.new_socket("Subsurface DMC4", in_out="INPUT", socket_type="NodeSocketFloat")
+    sg.new_socket("Subsurface Radius DMC4", in_out="INPUT", socket_type="NodeSocketVector")
+    inputs = {i.name: i for i in _group_inputs(shader_group)}
+    inputs["PBR"].default_value = 0
+    inputs["PBR"].min_value, inputs["PBR"].max_value = 0, 1
+    inputs["PBR Roughness"].default_value = 1.0
+    inputs["PBR Metal"].default_value = 0.0
+    inputs["PBR Specular"].default_value = 0.5
+    inputs["Subsurface DMC4"].default_value = 0.0
+    inputs["Subsurface Radius DMC4"].default_value = (1.0, 0.2, 0.1)
+
+    nodes, links = shader_group.nodes, shader_group.links
+    group_in = next(n for n in nodes if n.type == "GROUP_INPUT")
+    bsdf = next(n for n in nodes if n.type == "BSDF_PRINCIPLED")
+    x, y = bsdf.location[0] - 450, bsdf.location[1] + 600
+    pbr = group_in.outputs["PBR"]
+
+    orm = nodes.new("ShaderNodeSeparateColor")
+    orm.label = "ORM"
+    orm.location = (x - 400, y)
+    links.new(group_in.outputs["Specular MM"], orm.inputs[0])
+
+    def math(op, a, b, loc):
+        n = nodes.new("ShaderNodeMath")
+        n.operation = op
+        n.location = loc
+        for i, v in enumerate((a, b)):
+            if isinstance(v, (int, float)):
+                n.inputs[i].default_value = v
+            else:
+                links.new(v, n.inputs[i])
+        return n.outputs[0]
+
+    def switch(socket, value, loc, label):
+        """socket <- mix(what fed it, value, PBR)"""
+        mix = nodes.new("ShaderNodeMix")
+        mix.data_type = "FLOAT"
+        mix.label = label
+        mix.location = loc
+        links.new(pbr, mix.inputs["Factor"])
+        if socket.is_linked:
+            links.new(socket.links[0].from_socket, mix.inputs[2])
+        else:
+            mix.inputs[2].default_value = socket.default_value
+        links.new(value, mix.inputs[3])
+        links.new(mix.outputs[0], socket)
+
+    switch(bsdf.inputs["Roughness"], math("MULTIPLY", orm.outputs[1], group_in.outputs["PBR Roughness"], (x - 200, y)),
+           (x, y), "PBR Roughness Switcher")
+    metal = math("MULTIPLY", math("MULTIPLY", orm.outputs[2], group_in.outputs["PBR Metal"], (x - 200, y - 150)), pbr,
+                 (x, y - 150))
+    links.new(metal, bsdf.inputs["Metallic"])
+    spec = bsdf.inputs.get("Specular IOR Level") or bsdf.inputs.get("Specular")
+    if spec is not None:
+        switch(spec, group_in.outputs["PBR Specular"], (x, y - 300), "PBR Specular Switcher")
+    tint_socket = bsdf.inputs.get("Specular Tint")
+    if tint_socket is not None and tint_socket.type == "RGBA" and tint_socket.is_linked:
+        tint = nodes.new("ShaderNodeMix")
+        tint.data_type = "RGBA"
+        tint.label = "PBR White Tint"
+        tint.location = (x, y - 450)
+        links.new(pbr, tint.inputs["Factor"])
+        links.new(tint_socket.links[0].from_socket, tint.inputs[6])
+        tint.inputs[7].default_value = (1.0, 1.0, 1.0, 1.0)
+        links.new(tint.outputs[2], tint_socket)
+    base = bsdf.inputs["Base Color"]
+    occluded = nodes.new("ShaderNodeMix")
+    occluded.data_type = "RGBA"
+    occluded.blend_type = "MULTIPLY"
+    occluded.label = "PBR Occlusion"
+    occluded.location = (x, y + 200)
+    links.new(pbr, occluded.inputs["Factor"])
+    links.new(base.links[0].from_socket, occluded.inputs[6])
+    links.new(orm.outputs[0], occluded.inputs[7])
+    links.new(occluded.outputs[2], base)
+    weight = bsdf.inputs.get("Subsurface Weight") or bsdf.inputs.get("Subsurface")
+    if weight is not None:
+        links.new(math("MULTIPLY", group_in.outputs["Subsurface DMC4"], pbr, (x, y - 600)), weight)
+    radius = bsdf.inputs.get("Subsurface Radius")
+    if radius is not None:
+        links.new(group_in.outputs["Subsurface Radius DMC4"], radius)
 
 
 def _group_inputs(shader_group):

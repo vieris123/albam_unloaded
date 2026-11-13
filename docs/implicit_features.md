@@ -35,6 +35,10 @@ Panels mentioned here are in the Properties editor (Object / Bone tabs) unless a
   **Environment CM** slot becomes a cube: a vertical strip of six faces (+X -X +Y -Y +Z -Z from the top) keeps its
   faces, any other image goes on all six (a flat colour reflects that colour everywhere; see
   [edge_glow.md](edge_glow.md)).
+- **New materials become PBR materials** (for dmc4_hook's PbrMaterials) when that conversion happens, unless the
+  model's **PBR Materials** is off (DMC4 Model panel): roughness, metal and occlusion images are packed into one mask
+  texture, Subsurface Weight turns on subsurface scattering. Export and Update Materials & Textures also bring the
+  Blender preview of PBR materials up to date. See [new_model.md](new_model.md#pbr-materials).
 - **Rename or reorder bones freely.** Export matches the model's bones by joint number, not name or order. Deleting
   one of the model's own bones is refused, because animations, chains, .col and effects refer to it.
 - **Move a mesh object** (relative to its model's root) and it exports where you see it. Quads, n-gons, UV seams,
@@ -81,6 +85,10 @@ Panels mentioned here are in the Properties editor (Object / Bone tabs) unless a
   the simulation. A frame already played shows its stored result. Jumping to any other frame restarts the
   simulation there, as the game does on a reset. **Simulate Range** fills the whole scene range at once. Nothing is
   keyed or exported.
+- **A chain on an attached model moves with its owner.** When a ModelExtension list's Preview Attachments makes a
+  model follow another (a dress on the body), the chain preview carries the dress's chains by the owner's movement
+  (its object and `root_motion`), as the game does with the attachment's model matrix. The chain files' Follow
+  flags and the `inertia` settings act on that movement.
 - **A `<physics>` entry switches the preview to dmc4_hook's solver.** When any ModelExtension list in the scene has a
   `<physics>` for the chain's file on its model, the preview runs that solver instead of the game's, with the entry's
   settings. Editing the entry, in the list or in the Chain panel, takes effect on the next frame. Its `ground`

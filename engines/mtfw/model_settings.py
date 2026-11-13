@@ -86,6 +86,12 @@ class AlbamModSettings(bpy.types.PropertyGroup):
         name="Mid Up To", min=0, max=0xFFD,
         description="Meshes marked Mid draw up to this depth; beyond it, Far meshes draw (and shadows always use "
                     "the Far meshes). Draw-depth units, 0-4093. Every game model has 3000")
+    pbr: bpy.props.BoolProperty(
+        name="PBR Materials", default=True,
+        description="Materials converted for this model (from a Principled BSDF: roughness, metal, occlusion, "
+                    "subsurface) become PBR materials, drawn by dmc4_hook's PbrMaterials. Off: the game's own "
+                    "shading, which works without dmc4_hook. Materials already converted keep their kind (see their "
+                    "DMC4 PBR panel)")
 
 
 def _mesh_lod_props(mesh):

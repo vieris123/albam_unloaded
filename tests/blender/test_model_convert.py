@@ -168,7 +168,7 @@ try:
     big = grid("big", [material("big")])
     weigh(big, huge)
     try:
-        new_model.setup_new_model(bpy.context, huge, r"model\game\huge\huge.mod")
+        new_model.setup_new_model(bpy.context, huge, r"model\game\huge\huge.mod", pbr=False)
         check(False, "a rig over the limit is refused")
     except AlbamCheckFailure as e:
         check("Mark Selected" in e.solution, "a rig over the limit is refused, pointing at Mark Selected")
@@ -176,7 +176,7 @@ try:
           not big.material_slots[0].material.node_tree.nodes.get("MTFrameworkGroup"),
           "the refusal changed nothing")
 
-    root, notes = new_model.setup_new_model(bpy.context, holder, r"model\game\mine\mine.mod")
+    root, notes = new_model.setup_new_model(bpy.context, holder, r"model\game\mine\mine.mod", pbr=False)
     print("\n".join(notes))
     check(root == arm, "the armature became the model")
     meshes = [c for c in arm.children_recursive if c.type == "MESH"]
@@ -258,7 +258,7 @@ try:
     prop_mat = material("prop", odd)
     static = grid("static", [prop_mat])
     bpy.context.view_layer.objects.active = static
-    static_root, notes = new_model.setup_new_model(bpy.context, static, r"model\game\mine\prop.mod")
+    static_root, notes = new_model.setup_new_model(bpy.context, static, r"model\game\mine\prop.mod", pbr=False)
     odd_dds = texture_of(prop_mat, "Diffuse BM").image
     t = tex(export(static_root), odd_dds)
     check((t.width, t.height, t.compression_format) == (256, 128, "DXT1"),
@@ -322,7 +322,7 @@ try:
     wanted = normals_at(hair)
     bpy.ops.object.select_all(action="DESELECT")
     bpy.context.view_layer.objects.active = long_rig
-    long_root, notes = new_model.setup_new_model(bpy.context, long_rig, r"model\game\mine\long.mod")
+    long_root, notes = new_model.setup_new_model(bpy.context, long_rig, r"model\game\mine\long.mod", pbr=False)
     parts = [c for c in long_root.children_recursive if c.type == "MESH"]
     names = {b.name for b in joints.joint_bones(long_root)}
     counts = [len(joints.weighted_bones(p, names)) for p in parts]
@@ -368,7 +368,7 @@ try:
     mesh_jp = grid(jp + "_mesh", [material(jp + "_mat", kanji)])
     weigh(mesh_jp, arm_jp)
     bpy.context.view_layer.objects.active = arm_jp
-    root_jp, notes_jp = new_model.setup_new_model(bpy.context, arm_jp, new_model.default_path(arm_jp.name))
+    root_jp, notes_jp = new_model.setup_new_model(bpy.context, arm_jp, new_model.default_path(arm_jp.name), pbr=False)
     files = export(root_jp)
     check(root_jp.albam_asset.relative_path == r"model\game\model\model.mod" and
           parse(files, root_jp).materials_data.textures == [r"model\game\model\texture_BM"],
@@ -376,7 +376,7 @@ try:
     arm_typed = rig("typed")
     weigh(grid("typed_mesh", [material("typed_mat", colour=(1, 0, 0, 1))]), arm_typed)
     bpy.context.view_layer.objects.active = arm_typed
-    root_typed, notes_typed = new_model.setup_new_model(bpy.context, arm_typed, "model\\game\\typed\\" + jp + ".mod")
+    root_typed, notes_typed = new_model.setup_new_model(bpy.context, arm_typed, "model\\game\\typed\\" + jp + ".mod", pbr=False)
     check(root_typed.albam_asset.relative_path == r"model\game\typed\model.mod" and
           any("game path changed" in n for n in notes_typed), "a typed path is made ASCII, and says so")
 
@@ -398,7 +398,7 @@ try:
     arm_gone = rig("gone_rig")
     weigh(grid("gone_mesh", [material("gone_mat", gone)]), arm_gone)
     bpy.context.view_layer.objects.active = arm_gone
-    _, notes_gone = new_model.setup_new_model(bpy.context, arm_gone, r"model\game\gone\gone.mod")
+    _, notes_gone = new_model.setup_new_model(bpy.context, arm_gone, r"model\game\gone\gone.mod", pbr=False)
     check(any(n.startswith(new_model.WARNING) and "can't read" in n for n in notes_gone), "an unreadable image is reported, not a crash")
 
     # a model given another path takes its textures with it: the .mod's table holds their full paths

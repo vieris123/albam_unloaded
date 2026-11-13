@@ -129,6 +129,19 @@ The game behaviour is known; Blender only approximates it. The other preview gap
     for its files); Bezier / Hermite `.shw` keys (Albam bakes linear keys); morphing normals (the game doesn't);
     a preview of the game's averaging of lists by rate (Blender sums keys).
 
+- [ ] **PBR materials (planned 2026-11-14).** Metallic / roughness models in the game: dmc4_hook swaps the
+  pixel shaders of the unused SPECULAR_RIM keys for a GGX shader (same registers, textures and vertex shaders as
+  STANDARD), Albam exports PBR materials as RIM with an ORM mask map and previews them as a Principled BSDF. RE
+  findings, design, decisions and phases: `E:\DMC mod stuffs\Vibed\PBR\README.md`. P0 (dmc4_hook `PbrMaterials`)
+  built and running in the game 2026-11-14 (2B by hand-set materials, skin with subsurface scattering on THIN).
+  **Albam's P2 done 2026-11-15** (`engines/mtfw/pbr.py`, guide `docs/new_model.md` "PBR materials", test
+  `test_pbr_material.py`, 4.2 and 5.4): PBR = specular RIM (no new flag), conversion from the Principled BSDF by
+  default (model setting PBR Materials; roughness / metal / glTF occlusion packed into an ORM `_MM`, Specular IOR Level
+  -> F0, Subsurface -> THIN + scatter colour, a weight image -> additional G), the DMC4 PBR panel (values, Make PBR /
+  Make Classic), the preview (group inputs PBR ...), export refuses RIM keys outside `pbr.PBR_KEYS` (the 70 keys /
+  28 shaders the hook replaces). Not done: a default environment cube (the shader reflects the stage's SH by default,
+  so none is needed yet), Emission -> EMIT, a thickness input. Conversion not tried in the game yet.
+
 - [ ] **In-game stage editor (dmc4_hook, scoped 2026-11-06, no code).** Live `.sdl` editing happens in the game
   (ImGui, PhotoMode's gizmos); its Save writes a normal `.sdl` outside nativePC, which Albam's SDL import reads.
   Albam's part: nothing new unless the saved files show a gap. Plan: `E:\DMC mod stuffs\Vibed\StageEditor\README.md`.
@@ -205,6 +218,72 @@ The game behaviour is known; Blender only approximates it. The other preview gap
   - [x] **Chain solver version 2** (2026-11-10, runner by albam-df, not built): XPBD soft constraints, settings along
     the tendril, inertia_move / inertia_turn, damping toward the animated motion, defaults 8 x 1; preview, list format,
     Chain panel, `test_chain_physics` (checks 1 / 3 / 5; 2 and 4 in scratch, numbers in CLAUDE.md).
+  - [x] **V2.4 / V2.5** (2026-11-11, runner by albam-df, not built): no output while no time passes, the contact side
+    from the substep's start (`backstop="true"`: from the animated place), `damp_to="animation|world"`; attached
+    models' chains take their owner's frame in the preview. `test_chain_physics` (4.2 and 5.4).
+  - [ ] **Ellen's skirt on `<physics>` in the game** (`damp_to="world"`, stiffness 0.3 0.05, closed sheet, front
+    radius 3, no links, **no backstop**: with it the fold comes back in the preview): runner built and the list
+    installed in both Ellen mods 2026-11-11. First game check: walking barely changed. The skirt (waist 139 cm down
+    to 105 cm) hangs over the hips, which had no shape (thigh capsules started at 108 cm), so `dress.col` got a hip
+    capsule on joint 13 (r 11 across x +-8.5 at 110 cm) and the upper thigh capsules now start at the hip joint (r 9);
+    x0.72 in org size. In the game that was worse ("always stuck behind her"), so the old `.col` is back. The preview
+    disagrees: over 40 pl000_01 blocks back to back, front tips behind a thigh where the animation isn't went from 456
+    frames (old shapes) to 83 (extended). The game's stuck state came after running (the `ellen` mod, extended
+    shapes). A sustained run in the preview (pl000_01 block 0003 looped 8 times with its travel carried on, 6.5 m/s,
+    then idle) doesn't keep it: strips go behind a thigh while running (old 168 / extended 22 of 393 frames) and come
+    back within 60 frames of stopping. The runner's substep and shape step read the same as the preview's
+    (`ChainSolver.cpp`), and the attachment updates in moveAfter after the body, so the targets shouldn't lag. The
+    game carries the skirt with her (dress chains have the Local flags, so inertia 0; Physics readout while running:
+    frame 10.70 cm per solve, as expected), so it isn't world damping dragging an uncarried skirt. A one-frame state
+    dump from the runner (ChainSolver "Dump one frame of physics state", 2026-11-12), replayed through
+    `cns_chain_hook` (all 15 tendrils, 225 links, 32 substeps), matches the game's step within 0.006 cm: the solvers
+    agree, so the difference is in the inputs over time (motion blending, shapes, T). Next: a multi-frame recording
+    from the runner, replayed from the game's own inputs. The dumped solve had T 4 (pending at its cap) on a frame
+    where the reference had moved one frame's run: check whether pending grows while the game is paused (it did:
+    the runner now keeps the largest step since the last solve, capped at 2). A 600-frame recording (idle, run,
+    stand, run) shows why: the skirt's tendril roots hang from the dress bone `上半身1` = **joint 2 (chest)**, not the
+    hips (13). Its ring of roots tilts with the chest: 15 deg forward at idle, **52-57 deg while running** (the thighs
+    stay near vertical), so the front strips' targets swing back through the thighs, the strips fold onto the thigh
+    capsules' tops, and V2.4's old-side rule keeps them there once she stops (the game's frames 250-440). Fix to try:
+    parent the skirt roots to the lower body (joint 13, a 下半身 bone in the dress armature following the body's).
+    Not done: on Nero's run the waistline would part from the bodice by up to 23 cm (12 cm on joint 1). Done
+    instead (2026-11-12): every skirt tendril's rest pose flared 20 deg outward about its root head (Edit Mode, the
+    mesh unchanged) in `Ellen demeshed.blend` and `Ellen true size.blend` (backups "BACKUP before skirt flare"),
+    `ellen_dress.mod` exported into both mods. Preview with the game's 11 deg idle chest lean: the front strips no
+    longer ride up onto the thighs mid-run (+26 cm -> -3 cm) and settle within 0.3 cm after stopping. The preview
+    still never kept them stuck without the flare (the game's run / stop path differs), so this needs the game.
+    In the game (2026-11-12): running "way better", but her legs clipped through at idle. The flare had moved the
+    bones, not the mesh, so the mesh hung up to 15 cm (at the tail) inside the nodes that collide; her idle stance
+    already puts the authored skirt 7.7 cm into the leggings, and only the collision push had kept it out. Fix: the
+    `<physics>` radius grows along the tendril by that offset (2 x L x sin 10 deg = 0, 3, 6.1 ... 15.2 cm root to
+    tail: `radius="3 18.2"` front, `"1.5 16.7"` the others; org size `"2.16 13.06"` / `"1.08 11.98"`), in both mods'
+    `dress.xml` and the `.blend`s' `EXT_dress` (which still held the old `<link>` list). Preview, idle with the lean:
+    0 leggings vertices outside the skirt (bones-only flare: 39-60, up to 7.5 cm; no flare: 9, 2.5 cm), 0.7 cm after
+    the run; the strips settle like the unflared skirt's (4.3 cm off target, pushed by the thighs). Flaring the mesh
+    with the bones (`mesh_flare`) also gave 0 but turned the skirt into a bell. Not checked in the game.
+  - [x] **Ellen's left hand** (2026-11-12): mangled in the rest pose since Match Game Skeleton (2026-11-02, the bug that
+    turned her left hand; the fix to the tool came after her blends were made): fingers off at the knuckles, finger roots
+    2.5-3 cm from the mirror of the right hand's, mesh with them. Rebuilt in both blends as the right hand's mirror
+    (942 vertices paired through the symmetric `Ellen bone cleaned.blend` by weights + UVs, shape keys and custom normals
+    too; the hand bones moved to the mirrored heads, rotations unchanged, so Nero's tracks still fit) and `pl000.mod`
+    exported into both mods. Backups "BACKUP before left hand fix". Other rigs matched before the tool fix may have the
+    same damage: compare a finger root with the mirror of the other hand's.
+  - [ ] **Skirt "spazzing" at the thighs** (the user, 2026-11-12): V2.6 (shapes across the substeps) and V2.7 (the
+    solver keeps its own points; mBlend only drawn) are in the runner and the preview. The replay of the recording put
+    the front strips' speed reversals at ~2 % of frames with both (23 % before). In the game (2026-11-12, built, Ellen's
+    current list): idle, stopping and the hand fine ("otherwise it's perfect"), but running still folds the skirt about
+    half the time. The recording of a folding run (dump3, 600 frames, clean) and a free-run replay of it (scratch
+    `replay_fold.py`, matches the game: front swing 77.8 vs 78.2 deg, tails up 41 vs 41 cm): the front strips sat
+    folded on the thighs nearly the whole run. Gravity and stiffness barely help; the tail radius (18.2 cm) holds a
+    lifted strip on top of the thigh, the old radius brings back idle clipping. The cause is still the chest parent
+    (the targets swing back through the thighs). Done (2026-11-12): a pivot bone per strip root (`skirt_pivot_0..14`,
+    at the root's head, the hips' rest rotation, under 上半身1, joints 53-73 / 53-71 org size, free in dress and body),
+    the root under it, and `<pin joint=pivot to="13" mode="rot"/>` each in `dress.xml`: the strips hang from the
+    pelvis while their roots stay on the bodice's waistline. Preview (idle with the game's lean -> run -> stop): a
+    front strip folded 47 % -> 0 % of running frames, lifted 93 % -> 35 %, waistline unchanged (1.2 cm, the root push),
+    idle clipping 1.5 cm -> 0. A ring bone instead moved the waistline up to 15.8 cm. In both mods, backups "BACKUP
+    before skirt pivots". Not checked in the game.
+  - [x] **"V2.6 slows the coat's settling"**: noise, not V2.6 (the settle time is chaotic; CLAUDE.md, V2.7).
   - [ ] **Outer coat tails creep:** Nero's front tails _00 / _05 on the hook solver alone keep moving ~0.3-0.4 cm a
     frame after the body stops (both versions); the sheet holds them. Look at the contacts there.
   - [ ] **`<physics>` / `<cloth>` in the game:** compare Nero's coat with the preview (the runner's test package has both
@@ -238,6 +317,29 @@ The game behaviour is known; Blender only approximates it. The other preview gap
     corrections from Match's plan, the rip's object root motion baked into the hips, keys only on the original key
     frames; checked against the original deformation (median under 0.4 mm). The original rig is kept as
     `2BRip_Original` (not exported). Not made into LMTs yet (frame rate and root motion split still to decide).
+    Skirt on dmc4_hook's solver (2026-11-12, with what Ellen taught): her rig mirrors exactly (no Match Skeleton hand
+    damage) and her 17 strip roots already hang from the hips (13), so neither of Ellen's fixes applies. Preview study
+    (scratch `study_2b.py`, Dante's idle -> run 0003 x 8 with travel -> idle): the game's solver + 27 links shredded
+    the strips while running (seams up to 5.7 x rest) and left a front strip folded in 97 % of the frames after
+    stopping; dmc4_hook's solver as one closed 17-strip sheet (Ellen's stiffness 0.3 0.05, damp_to world): seams 2.8 x,
+    0 % folded after stopping, the skirt drapes over the raised thigh as one piece. damp_to animation and gravity
+    -0.3 on every chain changed nothing much. In `2b.xml` (the links replaced; backup in the scratchpad) and the
+    `.blend`'s EXT_2b, which had been stale (no comments, the DT attach live, no boob / butt chains). Her animated pose
+    is the flared bell she was modelled with. The DT dress (attach disabled) and the hair still run the game's solver.
+    In the game (user, 2026-11-12): chest and skirt a tad too fast, the front-left skirt stretched out at idle. Fixes:
+    the chest chain's tail 10 -> 15 cm (`2b_boobs.clt`, one joint: the tail is the whole pendulum, swing ~23 -> ~28
+    frames; also in `2B_DMC4_2.blend`'s PHS_boobs); the skirt's `damping="0.2"` (settles ~37 frames after a stop instead
+    of ~94) and `radius="2.5"` on chains _01 / _02, whose files' 7.5 cm (the others 1.5) held the front / left panels
+    ~5 cm off the legs at idle (now within 2 cm of the animated pose, seams 1.02 x at idle, front strips lifted while
+    running 53 % of the frames instead of 91 %, folded 29 % vs 26 %). Scratch `speed_2b.py` / `radius_2b.py` /
+    `run_2b.py`. Not checked in the game yet.
+    Chest not to turn about its Z (user, 2026-11-12, "use the chain limit"): joint 88's per-bone limit in
+    `2b_boobs.clt` (and `2B_DMC4_2.blend`): grid 2, yaw (MinY / MaxY) 0, pitch -180 / 180. Grid 2 measures the
+    forward Z axis and rebuilds a clamped bone without a turn about it, so a yaw range of exactly 0 clamps every frame
+    and drops that turn; the bounce (about X) stays. Preview (scratch `chest_rot.py`, Dante's idle / run): unlimited, the
+    up axis turned ~100 deg rms about Z (up to 180, the chest flipping); limited, 0 about Z, the bounce 23 deg rms (up
+    to 81; capping pitch at rest +-30 is the next step if that's too much). Grids 0 / 1 don't work here: 0 adds a 90 deg
+    twist (its rebuild doesn't match its measure at this rest), 1 leaves the turn. Not checked in the game yet.
 
 - [ ] **Hitboxes (saved for later, 2026-10-10).** Four file types keyed to a model's joints, already mined in IDA
   (per the user) and described by 010 templates in `E:\DMC mod stuffs\DMC4 templates`:

@@ -61,6 +61,12 @@ modifier and the vertex groups are what skinning uses, so keep those.
 
 ## Materials and textures
 
+Materials become **PBR materials** by default (roughness, metal, occlusion and subsurface scattering, as Blender's
+Principled BSDF shows them), drawn in the game by dmc4_hook's PbrMaterials. Without dmc4_hook the game draws those
+with a bright rim light, so for a model meant to work without it, turn off **PBR Materials** in the New DMC4 Model
+dialog (or in the DMC4 Model panel before converting): its materials then get the game's own shading, the classic
+table below. See [PBR materials](#pbr-materials) for what changes.
+
 | In your material | In the game |
 |---|---|
 | Base Color image | base map: DXT1, or DXT5 if the alpha is used |
@@ -86,6 +92,45 @@ Specular or Roughness image has no specular at all.
   materials or more than 32 bones is refused by name. **Update Materials & Textures** in the DMC4 Model panel
   (on imported models too) does all of it at any time.
 - Existing `.dds` images are used as they are.
+
+## PBR materials
+
+A PBR material is one whose DMC4 Specular function is SPECULAR_RIM, a set of shaders no game model uses, which
+dmc4_hook's PbrMaterials replaces with a modern metal / roughness shader. Without dmc4_hook they draw as the game's
+rim light. What conversion takes from a Principled BSDF:
+
+| In your material | In the game |
+|---|---|
+| Base Color, Alpha, Normal Map | as in the classic table |
+| Roughness / Metallic values | the material's Roughness / Metal (no texture needed) |
+| Roughness / Metallic images | packed into one mask texture (`_MM`, DXT1): G roughness, B metal. Channels of packed images are followed through Separate Color nodes |
+| Occlusion (the **glTF Material Output** node Blender's glTF importer makes) | the mask's R |
+| Specular IOR Level value | the reflectance seen face-on: 0.5 = 4 % (most materials) |
+| Subsurface Weight above 0 | subsurface scattering (the game's thin-surface lighting); the Scatter Colour = weight x Radius / the largest Radius x 0.5, so skin's usual radius (1, 0.4, 0.24) gives (0.5, 0.2, 0.12) |
+| Subsurface Weight image | where it scatters (the additional map's G; `_AM`, DXT1) |
+
+A channel without an image is filled with white in the mask, and the material's value for it is used. Not used: a
+Specular IOR Level image, Emission (a material can have subsurface scattering or the game's emission, not both).
+Thickness (where light shines through: ears, fingers) has no Principled input: put a map in the DMC4 group's
+**Alpha Mask AM** slot by hand (R thickness, 0 = thin; G where it scatters). The mask and the additional map use the
+same UVs as the normal map.
+
+**The DMC4 PBR panel** (Material Properties) edits a PBR material without node work:
+- **Roughness / Metal**: the values, or with a mask texture its scales (1 = as painted);
+- **Specular**: the face-on reflectance, as Blender's Specular IOR Level (0.5 = 4 %, skin 0.35);
+- **Reflection**: how strongly it reflects its surroundings (the stage's light), 1 physically right, 0 none; highlights
+  from lights stay;
+- **Subsurface Scattering** and the **Scatter Colour**;
+- **Make Classic** turns it into the game's own shading (works without dmc4_hook; the mask and the scattering are
+  dropped, the specular sharpness comes from the roughness). On a classic material (an imported one, or one converted
+  with PBR off) **Make PBR** does the opposite: textures stay, its specular map is dropped (a PBR mask holds other
+  things), roughness comes from its specular sharpness, metal 0.
+
+Blender's preview follows the values (roughness, metal, specular, occlusion, subsurface). It doesn't show the
+Reflection strength or light shining through thin parts. Some combinations of the game's functions have no PBR
+shader (unlit, multitexture other than NONE, some lightmaps): conversion makes those classic and says so, and export
+refuses a PBR material set to one by hand. Update Materials & Textures also updates the preview of PBR materials set
+up in older .blend files.
 
 ## Playing the game's animations
 
@@ -152,6 +197,9 @@ The character's other models load as usual. Replacing `pl006.mod` leaves Dante's
 (`pl006_02`) and coat (`pl006_03`) on top of the new body; replace those too (an empty model works) to hide them.
 
 ## Cloth, tails and other extra parts
+
+For a skirt or dress, start with the playbook, [dress_physics.md](dress_physics.md): the route that worked on Ellen and
+2B, in order. The notes below are the detail, including what was tried on the game's own solver before dmc4_hook's.
 
 A part with its own physics works best as its own `.mod`, skinned to the body with ModelExtension (`<attach>` without
 `joint=`), with its chains on that model. Copy the body joints it uses into its armature at the body's exact rest pose,
@@ -287,6 +335,32 @@ adds:
   keeps up with a fast animated swing of the hips and a free swing still dies down. Left out, it's 1 - the chain
   file's Damping, at least 0.1: the game's solver loses speed in its length correction, this one doesn't, so the
   coats' Damping 1.0 would swing for good (it did in the game before the floor, 2026-11-10).
+- **Damp To:** `animation` (the default) slows the points toward the animated motion, as above. `world` slows them
+  toward standing still, so the chain lags its model like the game's chains. Use it for a skirt whose animation only
+  follows the hips: a model from another game or MMD, where the skirt bones hang straight down and run through the
+  legs when she walks. Following that animation folds the skirt over the standing leg (Ellen's did).
+- **Backstop:** a point caught on the far side of a collision shape is pushed out on the side its animated place is
+  on, so a skirt strip stuck behind a leg comes back. Off, it goes back the way it came. Leave it off for long tails
+  that swing round the body (a coat): it throws them across the legs. Leave it off with Damp To `world` too: when
+  the animated pose runs through the legs, it pulls the skirt back into the fold.
+- **A skirt hung from the chest:** check which bone the skirt's root bones hang from. Ellen's hang from the chest
+  (`上半身1`, joint 2), because her skirt starts above the hips. Nero's run leans the chest 50-90 degrees, which swings
+  the front strips back through the thighs, and in the game they then stayed folded on the thigh shapes after she
+  stopped (2026-11-12). Moving them to the hips (joint 13) would open a gap of up to 23 cm between skirt and bodice
+  mid-run. Flaring the skirt bones outward in Edit Mode works instead: select each strip's root bone with
+  everything under it and turn it outward about its head (20 degrees on Ellen). An Edit Mode change doesn't move the
+  mesh, so the skirt looks the same, but the animated pose the cloth is pulled toward now clears the legs.
+  The collision is still worked out on the bones, though, and the mesh now hangs inside them: at the tail of a 44 cm
+  strip flared 20 degrees, about 15 cm. So her legs came through the skirt at idle. Make up for it with the radius:
+  let it grow along the tendril by the same amount, about 2 x length x sin(flare / 2) at the tail (Ellen:
+  `radius="3 18.2"`, which is 3 cm at the root, as before, and 18.2 cm at the tail).
+  That still folded the front strips on the thighs about half the time while running. What fixed it in the preview
+  is letting the strips hang from the pelvis while their roots stay on the waistline. In Edit Mode, give each strip
+  root a new parent bone at the root's head, with the hips' rotation, under the chest bone. Make it a non-deforming
+  bone with a joint number neither the model nor the body uses. Then add a `<pin joint="<that bone>" to="13"
+  mode="rot"/>` for each in the model's list. The roots are chain joints, which take no constraint, so the pin goes
+  on their parents. One ring bone for all the roots would also work, but turning it moves the waistline by up to
+  16 cm.
 - **Substeps** (default 8) and **Iterations** (default 1): the frame is split into steps, so a fast move doesn't carry
   the cloth through a shape. Every 0-1 setting means the same at any count, so these only trade cost for accuracy.
 - **Gravity:** times the chain file's gravity.

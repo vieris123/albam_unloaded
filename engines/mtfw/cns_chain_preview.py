@@ -382,10 +382,26 @@ class _Chain:
         return final
 
 
+def _model_holder(arm):
+    """the armature whose object (and root_motion) is `arm`'s model matrix: itself, or for a skin attachment the owner
+    its bones follow (ALBAM_FollowBody, a list's Preview Attachments). In the game the attachment hangs under its owner
+    (dmc4_hook ModelAttach: uCoord mpParent = the owner, parent number -1), so its model matrix is the owner's and moves
+    with the character; the attachment's armature object stands still here."""
+    from albam.engines.mtfw.model_ext import FOLLOW
+    for pose in arm.pose.bones:
+        for con in pose.constraints:
+            target = con.target if con.name == FOLLOW else None
+            if target is not None and target != arm and target.type == "ARMATURE":
+                return target
+    return arm
+
+
 def _parent_frame(arm, mode):
     holder = arm
     if mode == 1 and arm.parent is not None and arm.parent.type == "ARMATURE":
         holder = arm.parent
+    else:
+        holder = _model_holder(arm)
     frame = holder.matrix_world.copy()
     root = holder.pose.bones.get("root_motion") if holder.pose else None
     if root is not None:
@@ -982,10 +998,12 @@ def _poll_col_root(self, obj):
 # (name, the runner's default when it isn't fixed by the chain file, as written in the list)
 HOOK_ATTRS = (("substeps", "8"), ("iterations", "1"), ("stiffness", "0"), ("pin", "0"), ("inertia", None),
               ("inertia_move", None), ("inertia_turn", None), ("limit", "0"), ("friction", "0.2"), ("damping", None),
-              ("gravity", "1"), ("radius", None), ("ground", "false"), ("self", "false"), ("axis", None))
+              ("damp_to", "animation"), ("gravity", "1"), ("radius", None), ("ground", "false"), ("self", "false"),
+              ("backstop", "false"), ("axis", None))
 _HOOK_DEFAULTS = {"substeps": 8, "iterations": 1, "stiffness": [0.0], "pin": [0.0], "inertia": None,
                   "inertia_move": None, "inertia_turn": None, "limit": [0.0], "friction": 0.2, "damping": None,
-                  "gravity": [1.0], "radius": None, "ground": False, "self": False, "axis": None}
+                  "gravity": [1.0], "radius": None, "ground": False, "self": False, "backstop": False,
+                  "damp_world": False, "axis": None}
 
 
 def _hook_effective(ob):
@@ -996,12 +1014,15 @@ def _hook_effective(ob):
             "inertia": hook.inertia, "inertia_move": hook.inertia_move, "inertia_turn": hook.inertia_turn,
             "limit": hook.limit, "friction": hook.friction, "damping": hook.damping, "gravity": hook.gravity,
             "radius": [r / cns_chain_hook.SCALE for r in hook.radius], "ground": hook.ground, "self": hook.self,
+            "backstop": hook.backstop, "damp_to": "world" if hook.damp_world else "animation",
             "axis": hook.axis}
 
 
 def _hook_text(name, value):
     if name == "axis":
         return cns_chain_hook.AXES[value]
+    if isinstance(value, str):
+        return value
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
@@ -1021,16 +1042,23 @@ def _along(ob, name):
     return ext_list.parse_curve(e.get(name, ""))[0] or []
 
 
+def ext_list_damp_to():
+    from albam.engines.mtfw.movedef import ext_list
+    return ext_list.DAMP_TO
+
+
 def _hook_prop(name):
     default = dict(HOOK_ATTRS)[name]
 
     def get(self):
         value = _hook_effective(self.id_data)[name]
+        if name == "damp_to":
+            return ext_list_damp_to().index(value)                  # an enum's getter returns its item's index
         return value[0] if isinstance(value, list) else value      # along the tendril: the root's
 
     def set_(self, value):
         from albam.engines.mtfw import model_ext
-        text = _hook_text(name, value)
+        text = _hook_text(name, ext_list_damp_to()[value] if name == "damp_to" else value)
         model_ext.set_physics_attr(bpy.context, self.id_data, name, None if text == default else text)
     return {"get": get, "set": set_}
 
@@ -1111,6 +1139,15 @@ class AlbamChainPreview(bpy.types.PropertyGroup):
         description="Per frame, the speed the chain loses beyond the animation's own motion: lower swings longer, "
                     "higher calms it. Left out of the list: 1 - the chain file's Damping, at least 0.1 (the coats' "
                     "Damping 1.0 never loses speed on this solver, the game's own loses it in its length correction)")
+    hook_damp_to: bpy.props.EnumProperty(
+        name="Damp To", **_hook_prop("damp_to"),
+        items=(("animation", "Animation", "Damping slows the points toward the animated motion: the chain keeps up "
+                                          "with the animation"),
+               ("world", "World", "Damping slows the points toward standing still: the chain lags its model like "
+                                  "the game's chains. For a skirt whose animation only follows the hips and runs "
+                                  "through the legs")),
+        description="What damping slows the points toward. World suits skirts animated only rigid to the hips (an "
+                    "MMD model's): following that animation folds them through the legs")
     hook_gravity: bpy.props.FloatProperty(
         name="Gravity", min=-100.0, max=100.0, soft_min=0.0, soft_max=2.0, **_hook_prop("gravity"),
         description="Times the chain file's gravity (1 = as it is)")
@@ -1125,6 +1162,12 @@ class AlbamChainPreview(bpy.types.PropertyGroup):
     hook_self: bpy.props.BoolProperty(
         name="Self Collision", **_hook_prop("self"),
         description="The chain's tendrils push each other apart")
+    hook_backstop: bpy.props.BoolProperty(
+        name="Backstop", **_hook_prop("backstop"),
+        description="A point caught on the far side of a collision shape is pushed out on the side its animated "
+                    "place is on, so a skirt strip stuck behind a leg comes back. Off: it's pushed back the way it "
+                    "came. Leave it off for long tails that swing round the body (a coat): it throws them across "
+                    "the shapes. Pair it with Limit")
     hook_axis: bpy.props.EnumProperty(
         name="Axis", items=_AXIS_ITEMS, **_hook_prop("axis"),
         description="The joint axis aimed down the chain (+Z works on this solver, the game's can't). Left out of "

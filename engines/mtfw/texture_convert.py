@@ -9,6 +9,11 @@ What each kind becomes follows the DX9 files (3,674 .tex under arctool):
   the display group flips it back (`Flip Normal Green`). `flip_green` is for maps already made the DirectX way.
 - MASK: specular colour, DXT1 (`_MM`, revision 0x2). From a specular image, or 1 - roughness when there's none, or
   their product.
+- ORM: a PBR material's mask (dmc4_hook PbrMaterials, `pbr.py`): R occlusion, G roughness, B metal, DXT1 (`_MM`). Each
+  channel comes from its own image (one of its channels, or its average); a channel without an image is 255, so the
+  material's scale for it (fresnel_factor x / y) is the value.
+- ADDITIONAL: a PBR material's additional map, R thickness, G where it scatters (lighting THIN), DXT1 (`_AM`); built
+  like ORM.
 - CUBE: the environment cube (`_CM`, revision 0x13 like the game's `_CM` files), six square faces, DXT1 or DXT5 by the
   alpha (the shader divides the colour by it). A vertical strip of six faces (+X -X +Y -Y +Z -Z from the top, the way
   imported cubes are shown) gives each face its own pixels; any other image is used for all six faces, so one flat
@@ -30,8 +35,10 @@ import numpy as np
 from albam.lib import dxt
 from albam.lib.dds import DDSHeader
 
-BASE, NORMAL, MASK, CUBE = "BASE", "NORMAL", "MASK", "CUBE"
-_KINDS = {BASE: ("_BM", "sRGB"), NORMAL: ("_NM", "Non-Color"), MASK: ("_MM", "Non-Color"), CUBE: ("_CM", "sRGB")}
+BASE, NORMAL, MASK, CUBE, ORM, ADDITIONAL = "BASE", "NORMAL", "MASK", "CUBE", "ORM", "ADDITIONAL"
+_KINDS = {BASE: ("_BM", "sRGB"), NORMAL: ("_NM", "Non-Color"), MASK: ("_MM", "Non-Color"), CUBE: ("_CM", "sRGB"),
+          ORM: ("_MM", "Non-Color"), ADDITIONAL: ("_AM", "Non-Color")}
+PACKED = (ORM, ADDITIONAL)   # one image per channel, missing channels 255
 SOCKET_KINDS = {"Diffuse BM": BASE, "Lightmap LM": BASE, "Normal NM": NORMAL, "Detail DNM": NORMAL,
                 "Specular MM": MASK, "Alpha Mask AM": MASK, "Special Map": MASK, "Environment CM": CUBE}
 CUBE_FACES = 6
@@ -135,6 +142,20 @@ def _mask_pixels(sources, channels):
     return np.concatenate((rgb, np.full(rgb.shape[:2] + (1,), 255, np.uint8)), axis=2)
 
 
+def _packed_pixels(sources, channels):
+    """R, G, B from sources[0..2] (one channel each, see _channel), 255 where a source is None or unreadable; the
+    size of the first readable source. None if none can be read."""
+    read = [read_pixels(s) if s is not None else None for s in sources]
+    first = next((px for px in read if px is not None), None)
+    if first is None:
+        return None
+    out = np.full(first.shape[:2] + (4,), 255, np.uint8)
+    for i, px in enumerate(read[:3]):
+        if px is not None:
+            out[..., i] = _channel(_fit(px, first.shape), channels[i])
+    return out
+
+
 def _cube_pixels(sources):
     """a vertical strip of six square faces (+X -X +Y -Y +Z -Z from the top): the source's own faces when it is such a
     strip, else the source on every face"""
@@ -162,7 +183,7 @@ def alpha_use(px):
 
 def _dds_bytes(px, kind):
     normal = kind == NORMAL
-    fourcc = b"DXT1" if kind == MASK or (kind in (BASE, CUBE) and px[..., 3].min() >= 250) else b"DXT5"
+    fourcc = b"DXT1" if kind in (MASK,) + PACKED or (kind in (BASE, CUBE) and px[..., 3].min() >= 250) else b"DXT5"
     h, w = px.shape[:2]
     if kind == CUBE:   # a DDS cube: each face with its mips, in face order
         h = w
@@ -206,7 +227,8 @@ def _same_recipe(a, b):
 
 def convert(kind, sources, channels=None, flip_green=False, use_alpha=True):
     """(the DDS image, alpha_use) for `kind` from the source images: BASE [colour, optional alpha image], NORMAL
-    [normal], MASK [specular or None, roughness or None]; channels: the channel to read from each, None = the image's
+    [normal], MASK [specular or None, roughness or None], ORM [occlusion, roughness, metal] and ADDITIONAL [thickness,
+    scatter mask] (each None or an image); channels: the channel to read from each, None = the image's
     colour (the alpha image's: its average). The same recipe gives back the same image, re-encoded only if the
     pixels changed. (None, None) if nothing could be read."""
     channels = list(channels or [None] * len(sources))
@@ -216,6 +238,8 @@ def convert(kind, sources, channels=None, flip_green=False, use_alpha=True):
         px = _normal_pixels(sources, flip_green)
     elif kind == CUBE:
         px = _cube_pixels(sources)
+    elif kind in PACKED:
+        px = _packed_pixels(sources, channels)
     else:
         px = _mask_pixels(sources, channels)
     if px is None:
