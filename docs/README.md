@@ -8,4 +8,5 @@
 | [edge_glow.md](edge_glow.md) | A material that glows only at its outline and is see-through inside (after images, ghosts) |
 | [shape_keys.md](shape_keys.md) | Shape keys as the game's morph targets (`.shp` / `.shw`), played by ModelExtension and moves |
 | [efl_keyframes.md](efl_keyframes.md) | Effect keyframes as F-curves |
+| [game_link.md](game_link.md) | Connecting Albam to the running game (dmc4_hook's debug server) |
 | [movedef.md](movedef.md) | Move files for dmc4_hook's MoveDef runner, authored from LMT animations |

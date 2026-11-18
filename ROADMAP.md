@@ -83,8 +83,8 @@ in the DX9 code before trusting one.
   preview's cache follows it. Test: `test_nla`.
 - [ ] **Joints an animation made in Blender doesn't key leak the previous motion's pose in the game** (found
   2026-11-09: `uModel::moveMotion` copies the joints' current pose under the new motion's tracks, so an untracked
-  joint stays as the motion before left it, where Blender shows the rest pose). The Nero rig's export bake now keys
-  them (`hold_unkeyed`). Still open for everything else (retargets such as Ellen / 2B, Add Animation without a rig):
+  joint stays as the motion before left it, where Blender shows the rest pose). The Nero and stand rigs' export
+  bakes now key them (`hold_unkeyed`). Still open for everything else (retargets such as Ellen / 2B, Add Animation without a rig):
   an export option (per LMT or per animation, on by default for animations not imported from a game file) writing a
   constant rest track for every game joint without curves, and location for the joints the character's vanilla
   LMTs move. Imported animations must stay as they are (vanilla upper-body layers leave the legs out on purpose).
@@ -141,14 +141,29 @@ The game behaviour is known; Blender only approximates it. The other preview gap
   Make Classic), the preview (group inputs PBR ...), export refuses RIM keys outside `pbr.PBR_KEYS` (the 70 keys /
   28 shaders the hook replaces). Not done: a default environment cube (the shader reflects the stage's SH by default,
   so none is needed yet), Emission -> EMIT, a thickness input. Conversion not tried in the game yet.
+  **Bake Occlusion** (2026-11-15, `engines/mtfw/occlusion.py`, test `test_occlusion.py`): ambient occlusion into the
+  per-vertex tangent.w (`mtfw_tangent_w`) in the rest pose, Python BVH rays, visible DMC4 models' meshes as
+  occluders, alpha-tested materials let rays through their texture's holes; value = darkest + (1 - darkest) x open.
+  2B baked (pl006 with the dress, pl009 without, hair, dress, dress_dt) into the "2B PBR" package. Not checked in the
+  game yet.
 
 - [ ] **In-game stage editor (dmc4_hook, scoped 2026-11-06, no code).** Live `.sdl` editing happens in the game
   (ImGui, PhotoMode's gizmos); its Save writes a normal `.sdl` outside nativePC, which Albam's SDL import reads.
   Albam's part: nothing new unless the saved files show a gap. Plan: `E:\DMC mod stuffs\Vibed\StageEditor\README.md`.
-- [ ] **Game link (parked 2026-11-06).** A live TCP link (127.0.0.1, JSON lines) between Albam and dmc4_hook, kept
-  for what needs Blender: Graph Editor curves synced to the game's clock, camera / poses / chain tuning back into
-  Blender. No file watcher (files go through the mod manager). Plan and protocol draft:
-  `E:\DMC mod stuffs\Vibed\GameLink\README.md`.
+- [ ] **Game link (resumed 2026-11-18).** Albam as a client of dmc4_hook's debug server (HTTP JSON-RPC on
+  127.0.0.1:13350; the game side, albam-66, owns the protocol: `E:\DMC mod stuffs\Vibed\GameMCP\tools.md`; the
+  decisions and features of `Vibed\GameLink\README.md` carry over). No file watcher (files go through the mod manager).
+  - [x] Client + Game Link panel (`blender_ui/game_link.py`, 2026-11-18): Connect / Disconnect, status poll on a worker
+    thread handed back by a timer, room / mission / frame / load shown, `LOAD_GEN_LISTENERS`. Test `test_game_link.py`
+    (a stand-in server; reads the real game when it's up).
+  - [x] Live `.sdl` keys (P2, `engines/mtfw/sdl_link.py` + `sdl_live.py`, 2026-11-18): `sdl_layout` check, full push,
+    then each edit's diff against the last synced bytes as `sdl_patch` runs; size / outside-array changes held back.
+    Test `test_sdl_link.py` (stand-in server holding blade01's image); checked against the real game in room 405
+    (an mAngle key edit reached the image, reverted back to the file's bytes).
+  - [x] Playhead and scheduler clock (P3, `sdl_clock`): Follow Game / Drive Game (pause + frame, wrapped into a loop;
+    released on Off / Disconnect). Checked in the game the same day.
+  - [ ] Not seen on screen by the user yet: a blade turning with a live edit (albam-66 saw a patch turn it).
+  - [ ] Later: camera / unit positions back (P4), `.pla` units (P5), player side (P6).
 - [ ] **Model chains: check per-bone limits in the game.** No shipped chain enables mBoneAdjust; Albam writes and
   previews it from the decompiled code (grid 2 clamps cleanly, grids 0 / 1 don't measure back inside their limits as
   decoded). First real use: Ellen's chest (`chains\boobs.clt` in both ellen mods, 2026-11-03: grid 2, X max at the

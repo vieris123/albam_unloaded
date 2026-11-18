@@ -872,6 +872,9 @@ class ALBAM_PT_NewModel(bpy.types.Panel):
             layout.label(text=f"Model: {root.albam_asset.relative_path}", icon="OBJECT_DATA")
             layout.operator("albam.mod_update", icon="FILE_REFRESH")
             layout.prop(root.albam_mod, "pbr")
+            row = layout.row(align=True)
+            row.operator("albam.mod_bake_occlusion", icon="SHADING_RENDERED")
+            row.operator("albam.mod_clear_occlusion", text="", icon="X")
             if root.type == "ARMATURE":
                 layout.operator("albam.match_skeleton", icon="ARMATURE_DATA")
             for note in notes.split("\n") if notes else []:

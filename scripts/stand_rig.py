@@ -8,9 +8,12 @@ What it adds:
   LMT action of both armatures renamed along;
 - the stand's and the arm's meshes, and Nero's body (pl000.mod, without the head, hair and coat models), on any of the
   three armatures that has none (the first retarget runs didn't keep them);
-- the stand's sword (wp040) in the right hand, on wp024's joint 150 where the game draws it, shown while the stand's
-  `show_sword` is on, with the hand's fingers closed on it then (the grip of the arm's vanilla motion 0x31C, frame 3,
-  held by `GRIP-` bones under the hand);
+- the stand's sword (wp040) where the game draws it (uPlNeroDevil::updatePosition 0x8292E0): in the right hand
+  (wp024's joint 150) while the stand's `show_sword` is on, as event bit 31 (Stand Sword in Hand) of the stand's motion
+  puts it, else sheathed on the stand's joint 151 (the left hand's sheath). With `sword_follows_events` the switch
+  follows the events of the stand's LMT animation playing, else it's set by hand. The right hand closes on the sword
+  while it's there (the grip of the arm's vanilla motion 0x31C, frame 3, held by `GRIP-` bones under the hand), as much
+  as `grip_r` says (keyable: 0 leaves the fingers to their own keys);
 - control shapes, colours (left blue, right red, middle yellow), bone collections (Twist and Mechanism hidden), and
   location / scale locks on every game bone but the root and the lower spine;
 - `follow_nero` on the stand object: 1 = the stand copies Nero's pose (the retarget), 0 = it plays its own keys;
@@ -20,8 +23,9 @@ What it adds:
   (`FOL-*`, the game bones' rest frames) the game bones copy their rotation from. The right arm's upper part is the
   stand's joint 6 and its forearm and hand are the wp024 bones, so its helper chain lives in the stand and the wp024
   bones copy from it: everything is posed from the stand armature, fingers of the right hand on wp024 itself;
-- the text block `stand_rig_ui.py` (3D View sidebar > Stand Rig: the switches, the bone collections and Bake on
-  Export; Blender runs it when the file is opened with scripts allowed, else Text Editor > Run Script once).
+- the text block `stand_rig_ui.py` (3D View sidebar > Stand Rig: the switches with Bake IK Frame / IK On Here and
+  Fingers from Grip, the sword, the bone collections and Bake on Export, as on the Nero rig; Blender runs it when the
+  file is opened with scripts allowed, else Text Editor > Run Script once).
 
 The game only reads keys, so anything the constraints make (IK, the arm's place on the stand, the retarget) reaches
 it through the bake the UI text adds to LMT export (a baked copy of each action is exported, played with its other
@@ -44,10 +48,18 @@ ATTACH_BONE = "ARM_ATTACH"
 RETARGET = "RETARGET_"          # the retarget's constraints (stand_taunt_retarget.py)
 RIG = "RIG_"                    # this rig's constraints
 FOLLOW, IK_L, IK_R = "follow_nero", "ik_arm_l", "ik_arm_r"
-SWORD = "show_sword"            # stand object property: the sword's meshes show
-SWORD_MESH = "stand_rig_sword_mesh"   # on the sword's meshes: 1 = follows show_sword (0: one the import hides)
+SWORD = "show_sword"            # stand object property: the sword is in the right hand (else sheathed)
+SWORD_FOLLOW = "sword_follows_events"   # stand object property: SWORD follows the stand's LMT events
+GRIP_R = "grip_r"               # stand object property: how much the right hand closes on the sword
+SWORD_MESH = "stand_rig_sword_mesh"   # on the sword's meshes: 1 = shown (0: one the import hides)
 SWORD_JOINT = 150               # wp024's joint the game draws the sword in while it's drawn
-SWORD_TIP = "Show the stand's Yamato (wp040) in its right hand"
+SHEATH_JOINT = 151              # the stand's joint it's drawn in otherwise (sheathed)
+SWORD_TIP = ("Yamato (wp040) in the stand's right hand (wp024 joint 150), as event bit 31 (Stand Sword in Hand) puts "
+             "it in the game; off = sheathed on the stand's joint 151")
+SWORD_FOLLOW_TIP = ("The sword follows event bit 31 (Stand Sword in Hand) of the stand's LMT animation playing, as in "
+                    "the game; off = set Show Sword by hand. An animation without events leaves it as it is")
+GRIP_TIP = ("Right hand's grip: 1 = the fingers close on the sword while it's in the hand, 0 = the fingers play their "
+            "own keys, between = a blend. Keyable")
 MARK = "albam_stand_rig"        # object property: "stand" / "arm" (the UI finds the rigs by it)
 PREBEND = 0.002                 # m the helper elbow sits behind the real one
 POLE_DISTANCE = 0.5             # m behind the elbow
@@ -166,14 +178,14 @@ def _import_model(model_path, mesh):
 
 
 def add_sword(stand, arm, joints, mesh):
-    """wp040, the stand's Yamato, in the arm's hand. The game draws the sword model in the frame of wp024's joint 150
-    while the stand's motion has its sword-in-hand event bit 31 (uPlNeroDevil::updatePosition; else in stand joint 151,
-    sheathed), so the model's space (Albam's GAME_FRAME) goes onto that bone. The meshes the import shows follow the
-    stand's show_sword switch."""
+    """wp040, the stand's Yamato. The game draws the sword model in the frame of wp024's joint 150 while the stand's
+    motion has its sword-in-hand event bit 31, else in the stand's joint 151, sheathed (uPlNeroDevil::updatePosition),
+    so the model's space (Albam's GAME_FRAME) goes onto those bones: a Child Of each, switched by show_sword."""
     hand = _game_bones(arm, joints).get(SWORD_JOINT)
     if hand is None:
         print(f"stand rig: {arm.name} has no joint {SWORD_JOINT}, so the sword isn't attached")
         return 0
+    sheath = _game_bones(stand, joints).get(SHEATH_JOINT)
     sword = next((o for o in bpy.data.objects if o.get(MARK) == "sword"), None)
     added = 0
     if sword is None:
@@ -191,18 +203,40 @@ def add_sword(stand, arm, joints, mesh):
                 ob[SWORD_MESH] = not ob.hide_viewport
                 added += 1
         sword.hide_set(True)
-    sword.parent = arm
-    sword.parent_type = "BONE"
-    sword.parent_bone = hand.name
-    sword.matrix_parent_inverse = Matrix.Translation((0.0, -hand.length, 0.0)) @ joints.GAME_FRAME.inverted()
+    sword.parent = None
     sword.matrix_basis = Matrix.Identity(4)
     if SWORD not in stand.keys():
         stand[SWORD] = True
     stand.id_properties_ui(SWORD).update(description=SWORD_TIP)
+    if SWORD_FOLLOW not in stand.keys():
+        stand[SWORD_FOLLOW] = True
+    stand.id_properties_ui(SWORD_FOLLOW).update(description=SWORD_FOLLOW_TIP)
+    if sword.animation_data is not None:
+        for fc in [d for d in sword.animation_data.drivers if f'.constraints["{RIG}' in d.data_path]:
+            sword.animation_data.drivers.remove(fc)
+    for con in [c for c in sword.constraints if c.name.startswith(RIG)]:
+        sword.constraints.remove(con)
+    places = [(arm, hand, "show")] + ([(stand, sheath, "1 - show")] if sheath is not None else [])
+    for owner, bone, expression in places:
+        con = sword.constraints.new("CHILD_OF")
+        con.name = f"{RIG}{'hand' if owner is arm else 'sheath'}"
+        con.target, con.subtarget = owner, bone.name
+        con.inverse_matrix = joints.GAME_FRAME.inverted()
+        con.set_inverse_pending = False
+        _drive(con, expression, [("show", stand, f'["{SWORD}"]')])
+    if sheath is None:
+        print(f"stand rig: {stand.name} has no joint {SHEATH_JOINT}, so the sword hides while sheathed")
     for ob in sword.children:
         if ob.type != "MESH" or not ob.get(SWORD_MESH):
             continue
         for path in ("hide_viewport", "hide_render"):
+            if ob.animation_data is not None:
+                old = ob.animation_data.drivers.find(path)
+                if old is not None:
+                    ob.animation_data.drivers.remove(old)
+            if sheath is not None:
+                setattr(ob, path, False)
+                continue
             driver = ob.driver_add(path).driver
             driver.type = "SCRIPTED"
             for v in list(driver.variables):
@@ -419,7 +453,7 @@ def build_ik(stand, arm, sb, ab):
 
 def build_grip(stand, arm, ab, compat):
     """The fingers close on the sword while show_sword is on: GRIP- bones under the hand hold the finger pose of a
-    vanilla sword motion (relative to the hand), and each finger copies its GRIP- bone with the switch as influence."""
+    vanilla sword motion (relative to the hand), and each finger copies its GRIP- bone, as much as grip_r says."""
     from albam.engines.mtfw import animation
     action = next((a for a in bpy.data.actions if "wp024_04" in a.name.lower()
                    and animation.get_lmt_props(a).lmt_id == GRIP_BLOCK), None)
@@ -453,7 +487,7 @@ def build_grip(stand, arm, ab, compat):
         con = arm.pose.bones[n].constraints.new("COPY_TRANSFORMS")
         con.name = RIG + "grip"
         con.target, con.subtarget = arm, GRIP + n
-        _drive(con, "show", [("show", stand, f'["{SWORD}"]')])
+        _drive(con, "grip if show else 0", [("show", stand, f'["{SWORD}"]'), ("grip", stand, f'["{GRIP_R}"]')])
     return action.name
 
 
@@ -552,6 +586,7 @@ def build(stand=None, arm=None, follow_nero=None):
         notes.append(f"wp040: {n} sword meshes in the hand")
     sb = {j: b.name for j, b in _game_bones(stand, joints).items()}
     ab = {j: b.name for j, b in _game_bones(arm, joints).items()}
+    _prop(stand, GRIP_R, 1.0, GRIP_TIP)
     grip = build_grip(stand, arm, ab, compat)
     if grip:
         notes.append(f"sword grip from {grip} frame {GRIP_FRAME}")

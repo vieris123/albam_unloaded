@@ -132,6 +132,26 @@ shader (unlit, multitexture other than NONE, some lightmaps): conversion makes t
 refuses a PBR material set to one by hand. Update Materials & Textures also updates the preview of PBR materials set
 up in older .blend files.
 
+## Baked occlusion
+
+The game's models carry a per-vertex occlusion value that darkens the light from the game's lights (spot and point
+lights, diffuse and specular) in creases, under hair and clothing. A new model has none (fully lit). **Bake
+Occlusion** in the DMC4 Model panel computes it, with or without PBR materials:
+- It bakes in the **rest pose**, whatever pose the armatures are in.
+- **Every mesh of DMC4 models visible in the viewport casts shadows**, this model's and the others' (hair, a dress on
+  its own model). Hide what shouldn't: a dress another body version doesn't wear, an overlay that sits on the skin.
+  The model's hidden meshes are still baked.
+- Hair cards, lace and other alpha-tested parts block light only where their texture is opaque.
+- **Distance** (0.2 m suits a character), **Samples** (more is smoother) and **Darkest** (how much light a fully
+  enclosed spot keeps: 0.35 darkens creases without going black).
+
+The values are a point attribute `mtfw_tangent_w` on each mesh (0..1; Blender's preview doesn't show them). Imported
+game models come with their own. **Clear Occlusion** (the X next to the button) removes them, so the model exports
+fully lit. The bake looks at the model's meshes as they are at the time: bake again after changing them.
+
+Double-sided hair (each card twice, facing in and out) gets dark inner copies; that's right, as the game only draws
+the side facing the camera.
+
 ## Playing the game's animations
 
 Right joint numbers aren't enough for a model to play Dante's or Nero's animations. An animation sets each joint's

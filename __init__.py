@@ -41,6 +41,7 @@ def register():
     importlib.import_module("albam.engines.mtfw.model_settings")
     importlib.import_module("albam.engines.mtfw.new_model")
     importlib.import_module("albam.engines.mtfw.pbr")
+    importlib.import_module("albam.engines.mtfw.occlusion")
     importlib.import_module("albam.engines.mtfw.skeleton_match")
     importlib.import_module("albam.engines.mtfw.effect")
     importlib.import_module("albam.engines.mtfw.effect_export")
@@ -57,6 +58,8 @@ def register():
     importlib.import_module("albam.engines.mtfw.movedef_blender")
     importlib.import_module("albam.engines.mtfw.model_ext")
     importlib.import_module("albam.blender_ui.foot_ik")
+    importlib.import_module("albam.blender_ui.game_link")
+    importlib.import_module("albam.engines.mtfw.sdl_link")
     if os.getenv("ALBAM_ENABLE_REEN"):
         importlib.import_module("albam.engines.reng.archive")
         importlib.import_module("albam.engines.reng.mesh")
@@ -109,6 +112,8 @@ def register():
     register_anim_handlers()
     from albam.engines.mtfw.effect_editor import register_editor
     register_editor()
+    from albam.engines.mtfw.sdl_link import register_handlers as register_sdl_link
+    register_sdl_link()
 
 def cleanse_modules():
     for module_name in sorted(modules.keys()):
@@ -131,6 +136,10 @@ def unregister():
     unregister_anim_handlers()
     from albam.engines.mtfw.effect_editor import unregister_editor
     unregister_editor()
+    from albam.engines.mtfw.sdl_link import unregister_handlers as unregister_sdl_link
+    unregister_sdl_link()
+    from albam.blender_ui.game_link import unregister_link
+    unregister_link()
 
     for _, cls in reversed(blender_registry.props):
         bpy.utils.unregister_class(cls)

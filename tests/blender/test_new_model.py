@@ -135,6 +135,7 @@ try:
             self.texts.append(text)
         def column(self, **_):
             return self
+        row = column
         def operator(self, idname, **_):
             self.texts.append(idname)
         def prop(self, data, name, **_):

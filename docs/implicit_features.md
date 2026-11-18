@@ -141,14 +141,16 @@ Panels mentioned here are in the Properties editor (Object / Bone tabs) unless a
     Export** (by default the ones that key the IK controls or switches; an arm action follows its stand half) are
     baked on a temporary copy: what the constraints make reaches the file, the action keeps only your keys. A
     stand action is baked with the arm action in the same slot of the paired LMT playing, and the other way round.
-    A switch the action doesn't key is baked as it is now, with a note. On the Nero rig every game joint the
+    A switch the action doesn't key is baked as it is now, with a note. On both rigs every game joint the
     action doesn't key (the hidden deform / twist bones, the weapon joints) gets a constant key at the pose Blender
-    shows, because the game would hold such a joint as the previous motion left it. Joint 0 (`root`) is exported
-    without its turn, which goes into `spine_lower` and `hips` (the pose is the same), as the game's own animations
-    keep it.
+    shows, because the game would hold such a joint as the previous motion left it. Joint 0 (`root`) of Nero and of
+    the stand is exported without its turn, which goes into `spine_lower` and `hips` (the pose is the same), as the
+    game's own animations keep it; the arm's (wp024) keeps its turn, which places it on the stand.
+  - On the stand rig, with Follow Events on, the sword moves between the arm's hand and the sheath on the stand's
+    joint 151 by event bit 31 (Stand Sword in Hand) of the stand's animation playing, as in the game.
   - Keys of helper bones (IK controls, poles, Not a Game Joint) don't count for where the clip starts.
-- **Rig switches stay with their animation** (Nero and stand rigs): changing an IK switch (a hand grip on the Nero
-  rig, or Follow Nero) while an
+- **Rig switches stay with their animation** (Nero and stand rigs): changing an IK switch (a hand grip, or Follow
+  Nero on the stand) while an
   action that doesn't key it plays keys it, constant, on the action's first frame; putting another action on keys the
   switches of the one before as they were, when it bakes on export. A switch keyed that way follows later changes.
 - **Tracks the armature can't show are kept.** Joints the rig doesn't have (an LMT shared with the character's
@@ -248,6 +250,12 @@ Panels mentioned here are in the Properties editor (Object / Bone tabs) unless a
   its tracks are dropped.
 - **Edit as XML** (Object Properties > Scheduler / Placement XML) covers what the objects can't (new units, new
   tracks). Objects you had parented to the Empties and constraints on them survive Apply XML.
+- **With Live .sdl Edits on** (Game Link panel, connected to the game), every key or property edit of an imported
+  `.sdl` the game has loaded is sent to the game a moment later. You don't need to press anything. Edits that add or
+  remove keys or tracks aren't sent; the panel says so. When the game loads another room, the file is checked and
+  sent again. See [game_link.md](game_link.md).
+- **Clock set to Follow Game / Drive Game**: the playhead follows the chosen scheduler in the game, or the game's
+  scheduler follows the playhead while it's paused.
 
 ## Stage collision (`.sbc`)
 
